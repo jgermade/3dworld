@@ -1,0 +1,22 @@
+# The OpenCASCADE this shim is written against, and the revision `make
+# occt-headers` repairs a broken install from.
+#
+# It is not a pin in the sense a Cargo.lock is one: the build takes whatever
+# OCCT the system has, and this file records what that was *supposed* to be.
+# A real pin arrives with the Emscripten build, which compiles OCCT rather than
+# linking a distribution's.
+
+version = 7.6.3
+tag     = V7_6_3
+repo    = https://github.com/Open-Cascade-SAS/OCCT
+
+# Headers fetched into native/vendor-include/ by `make occt-headers`, and why.
+#
+#   NCollection_AliasedArray.hxx
+#       Ubuntu Noble's libocct-foundation-dev 7.6.3+dfsg1-7.1build1 ships
+#       Poly_ArrayOfNodes.hxx, which includes this, and does not ship this.
+#       Every translation unit reaching Poly_Triangulation fails without it.
+#       https://packages.ubuntu.com/noble/libocct-foundation-dev
+#
+# These files are OCCT's, LGPL-2.1-only with the OCCT exception, and are not
+# committed to this repository — see AGENTS.md § Licensing.

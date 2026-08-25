@@ -4,3 +4,6 @@
 /pkg
 node_modules
 *.wasm
+kernel-occt/native/vendor-include/
+web/dist/
+web/test/node_modules/

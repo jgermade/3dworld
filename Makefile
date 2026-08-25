@@ -6,7 +6,7 @@ WASM_TARGET := wasm32-unknown-unknown
 
 ## Everything CI runs, and everything a contributor should run before pushing.
 ## Needs no setup: the OpenCASCADE backend is not a default workspace member.
-test: check clippy fmt-check
+test: check clippy fmt-check licences
 	$(CARGO) test
 
 ## The implementation compiles, and so does every crate on its own.
@@ -22,6 +22,32 @@ check:
 test-occt:
 	$(CARGO) test -p w3d-kernel-occt
 
+## Fetches the headers a distribution failed to ship, at the revision in
+## kernel-occt/native/UPSTREAM. Needed on Ubuntu Noble, whose
+## libocct-foundation-dev is missing NCollection_AliasedArray.hxx — see the
+## note there. Nothing is committed: the files are OCCT's, LGPL-2.1.
+##
+## Separate from the build on purpose. A build script that fetches from the
+## network on its own is not a build anybody can reproduce.
+OCCT_TAG ?= V7_6_3
+OCCT_RAW := https://raw.githubusercontent.com/Open-Cascade-SAS/OCCT/$(OCCT_TAG)/src
+VENDOR := kernel-occt/native/vendor-include
+
+.PHONY: occt-headers
+occt-headers:
+	mkdir -p $(VENDOR)
+	curl -sSfL -o $(VENDOR)/NCollection_AliasedArray.hxx \
+	    $(OCCT_RAW)/NCollection/NCollection_AliasedArray.hxx
+	@echo "fetched into $(VENDOR) at $(OCCT_TAG); these files are OCCT's, LGPL-2.1"
+
+## Every crate this project links is compatible with GPL-3.0-or-later, which
+## AGENTS.md has required since the licence was settled and nothing checked
+## until there was a check. Reads both targets, because the dependency sets
+## differ. Carries its own negative controls and runs them first.
+.PHONY: licences
+licences:
+	python3 tools/licences.py
+
 clippy:
 	$(CARGO) clippy --all-targets -- -D warnings
 
@@ -31,12 +57,63 @@ fmt:
 fmt-check:
 	$(CARGO) fmt --all --check
 
-## The seam survives the target it exists for. `w3d-core` and the kernel
-## contract must build for wasm with no host assumptions; nothing here needs a
-## browser, because nothing above the seam does.
+## The seam survives the target it exists for: `w3d-core` and the kernel
+## contract must build for wasm with no host assumption having crept in. It is
+## still only a type-check — nothing is instantiated, because there is no
+## `web/` yet.
+##
+## The second command is not one. The WebGL2 fallback is one feature name away
+## from not being in the build at all, and asking for the wrong one still
+## compiles: `gles` is the *native* GL backend and does nothing on wasm32.
+## `glow` in the dependency tree is the evidence that the fallback is there.
 wasm:
 	rustup target add $(WASM_TARGET)
-	$(CARGO) check --target $(WASM_TARGET)
+	@# `w3d-app` is the *desktop* shell — winit and a native window — and does
+	@# not build for wasm by design; the browser's shell is `w3d-web`. It is
+	@# excluded by name rather than dropped from default-members, so that
+	@# `make test` still runs the editor's tests.
+	$(CARGO) check --target $(WASM_TARGET) --workspace \
+	    --exclude w3d-app --exclude w3d-kernel-occt
+	@$(CARGO) tree -p w3d-render --target $(WASM_TARGET) -e normal \
+	    | grep -q glow \
+	    || (echo "the wasm build has no WebGL2 fallback: glow is not in the \
+tree. Check render/Cargo.toml's wgpu features."; exit 1)
+
+## The browser build. `wasm-bindgen` is a separate tool, not a crate: install
+## it with `cargo install wasm-bindgen-cli --version <the wasm-bindgen dep's
+## version>`, and keep the two in step — a mismatch is a runtime error about
+## an unknown import, not a build failure.
+##
+## Output goes to web/dist/, which is gitignored. Nothing built is committed.
+WASM_OUT := web/dist
+
+.PHONY: web web-serve web-test app app-test
+web:
+	rustup target add $(WASM_TARGET)
+	$(CARGO) build -p w3d-web --release --target $(WASM_TARGET)
+	wasm-bindgen --target web --no-typescript --out-dir $(WASM_OUT) \
+	    target/$(WASM_TARGET)/release/w3d_web.wasm
+	@ls -l $(WASM_OUT)/w3d_web_bg.wasm | awk '{printf "wasm: %.2f MiB\n", $$5/1048576}'
+
+## Serves web/ with COOP/COEP. `--no-isolation` omits them, which is the case
+## worth seeing: the loader must degrade visibly rather than fail obscurely.
+web-serve: web
+	python3 web/serve.py
+
+## The modeller, in a real window. Needs `xvfb-run` and a rasteriser:
+##   apt install xvfb mesa-vulkan-drivers libxkbcommon-x11-0
+## `--features occt` swaps the fake kernel for OpenCASCADE.
+app:
+	$(CARGO) build -p w3d-app
+
+app-test: app
+	python3 tools/app_smoke.py
+
+## Drives the built page in headless Chromium and asserts it drew and picked.
+## This is the only check in the repository that runs the viewport in a real
+## browser; everything else is native.
+web-test: web
+	node web/test/browser.mjs
 
 doc:
 	$(CARGO) doc --workspace --no-deps

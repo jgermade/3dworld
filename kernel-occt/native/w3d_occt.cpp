@@ -11,6 +11,7 @@
 
 #include <cmath>
 #include <cstring>
+#include <sstream>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -28,6 +29,8 @@
 #include <BRep_Tool.hxx>
 #include <Bnd_Box.hxx>
 #include <Poly_Triangulation.hxx>
+#include <BRepTools.hxx>
+#include <BRep_Builder.hxx>
 #include <Standard_Failure.hxx>
 #include <TopAbs_Orientation.hxx>
 #include <TopExp.hxx>
@@ -396,6 +399,69 @@ void w3d_occt_mesh_free(W3dOcctMesh *mesh) {
   if (mesh && mesh->owner) {
     delete static_cast<MeshBuffers *>(mesh->owner);
     std::memset(mesh, 0, sizeof(*mesh));
+  }
+}
+
+int32_t w3d_occt_save_body(W3dOcctContext *ctx, uint32_t body,
+                           W3dOcctBytes *out) {
+  const TopoDS_Shape *shape = ctx->find(body);
+  if (!shape) {
+    return W3D_OCCT_ERR_UNKNOWN_BODY;
+  }
+  return guarded([&] {
+    std::ostringstream stream;
+    // OCCT's own BREP. Not an interchange format and not pretending to be:
+    // the header says so, and a document records `occt-brep-1` beside it.
+    BRepTools::Write(*shape, stream);
+    auto *owned = new std::string(stream.str());
+    if (owned->empty()) {
+      delete owned;
+      return fail("BRepTools::Write produced nothing");
+    }
+    out->data = reinterpret_cast<const uint8_t *>(owned->data());
+    out->len = static_cast<uint32_t>(owned->size());
+    out->owner = owned;
+    return W3D_OCCT_OK;
+  });
+}
+
+int32_t w3d_occt_load_body(W3dOcctContext *ctx, const uint8_t *data,
+                           uint32_t len, uint32_t *out) {
+  if (!data || len == 0) {
+    return W3D_OCCT_ERR_UNSUPPORTED;
+  }
+  // BREP carries this signature near the start — "\nCASCADE Topology V3, (c)
+  // Open Cascade" on 7.6, with the version digit varying. Searching a window
+  // rather than matching at offset zero is deliberate: the leading newline and
+  // the version are both things OCCT has changed before.
+  //
+  // Checking it here is what lets a caller tell "these are another kernel's
+  // bytes" from "these are ours and broken", because BRepTools::Read reports
+  // both the same way — it simply leaves the shape null.
+  static const char kSignature[] = "CASCADE Topology";
+  const size_t window = len < 64 ? len : 64;
+  const char *begin = reinterpret_cast<const char *>(data);
+  if (std::string(begin, window).find(kSignature) == std::string::npos) {
+    return W3D_OCCT_ERR_UNSUPPORTED;
+  }
+  return guarded([&] {
+    std::istringstream stream(
+        std::string(reinterpret_cast<const char *>(data), len));
+    TopoDS_Shape shape;
+    BRep_Builder builder;
+    BRepTools::Read(shape, stream, builder);
+    if (shape.IsNull()) {
+      return fail("the BREP data did not describe a shape");
+    }
+    *out = ctx->store(shape);
+    return W3D_OCCT_OK;
+  });
+}
+
+void w3d_occt_bytes_free(W3dOcctBytes *bytes) {
+  if (bytes && bytes->owner) {
+    delete static_cast<std::string *>(bytes->owner);
+    std::memset(bytes, 0, sizeof(*bytes));
   }
 }
 

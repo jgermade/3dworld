@@ -45,9 +45,36 @@ So `SESSIONS/` read at a glance answers the two questions that matter: `*.md` is
 open, `*.completed.md` is what is finished and why. Nothing is deleted, and nothing moves out of
 the folder.
 
-A file is only closed when its `Next` is empty. If part of the work is being abandoned rather
-than finished, say so in the walkthrough — an abandoned item closed quietly is indistinguishable
-from a forgotten one.
+A file is only closed when nothing is still pending *in it*. That is not the same as everything
+being done: a file closes when its own work has landed and whatever it left owed has moved into
+the live register (below), which the walkthrough must name. If part of the work is being abandoned
+rather than finished, say so in the walkthrough — an abandoned item closed quietly is
+indistinguishable from a forgotten one.
+
+### The plan is the last register, not the last `Next`
+
+A `Next` block records what was pending *when that session ended*, and a file with four of them is
+a plan a reader has to reconstruct. When a file's `Next` blocks have accumulated, close them with a
+single `## The pending register` that says out loud which registers and `Next` blocks it
+supersedes, and gather into it what the `Next` blocks never held — the owed work named in
+`Loose ends, deliberately left` and in the second half of `Verified, and not`.
+
+There is exactly one live register across the whole of `SESSIONS/` at any time, and it is in the
+open file — `*.md`, of which there should normally be one. When a new file takes the register
+over, the old file says so and points at the new one; everything above stays standing, because the
+order in which things became pending is part of the record.
+
+**The register may be a file of its own**, and once a body of work is finished that is the tidier
+place for it: the closed file stops carrying a plan that has outgrown it, and the next session
+opens against a document that is nothing but what is left. `2026-08-25_21h59.what-is-not-built-yet.md`
+is that file today. It has no `Walkthrough · as built` and will never grow one — work that acts on
+it opens its own file and says which items it took.
+
+**It is also the one file in `SESSIONS/` that is maintained rather than appended**, and the
+distinction is the whole reason the append rule exists: that rule protects a *record*, where the
+wrong turns are most of the value. A register is a *plan*, and a plan that only grows stops being
+one. Items leave it as they are done and a `## Taken` table says which file took each, so the
+reasoning is still one link away. Everything else in the folder stays append-only.
 
 ### Always append, never rewrite
 
@@ -77,14 +104,22 @@ kernel-fake/   w3d-kernel-fake  a backend that satisfies the contract without   
                                 doing geometry
 core/          w3d-core         document · history/undo · selection ·            ✅ built
                                 tessellation cache — generic over the kernel
+format/        w3d-format       the .w3d file: a zip, a manifest, and one       ✅ built
+                                geometry blob per body — see FORMAT.md
 
 kernel-occt/   w3d-kernel-occt  the OpenCASCADE backend: a C ABI of thirteen    ✅ native
                                 entry points, and the Rust side of it            ⬜ wasm
 
+render/        w3d-render       wgpu: capability detection, mesh upload,        ✅ built
+                                camera, and ID-buffer picking                    ✅ WebGL2
+                                                                                 ⬜ WebGPU
+web/           w3d-web          the loader: probe, dispatch, COOP/COEP, and     ✅ built
+                                a canvas that draws and picks                    ⬜ threaded
+
+app/           w3d-app          the modeller: editor, scene, and a winit +      ✅ desktop
+                                egui shell that draws in one pass                ⬜ web
+
 kernel-native/                  a kernel of our own, or truck                    ⬜
-render/                         wgpu — WebGPU, WebGL2 fallback with no compute   ⬜
-app/                            the modeller; native and web from one source     ⬜
-web/                            the loader: feature probe, dispatch, COOP/COEP   ⬜
 ```
 
 Crates are prefixed `w3d-` because `3dworld` is not a valid Rust identifier and the name is not
@@ -136,6 +171,22 @@ used.
   through `EMSCRIPTEN_KEEPALIVE`. It carries thirteen entry points because the trait has thirteen
   methods. Declare there first, then implement in C++, then use from Rust — and never widen it to
   "expose a bit more of OCCT".
+- **A capability probe cannot certify a driver.** What the machine can do is read from the adapter
+  and never inferred from `cfg!` — but that is only the first of three ways this goes wrong, and
+  the other two cost more. A backend that is not compiled in cannot be reported at all: wgpu's
+  `gles` feature is the *native* GL backend and does nothing on wasm32, so asking for it instead of
+  `webgl` compiles, type-checks and ships with no fallback, which is why `make wasm` greps the tree
+  for `glow`. And a driver can answer every question correctly and still draw nothing: headless
+  Chromium reports WebGPU, hands back an adapter with compute shaders and a gigabyte of buffer, and
+  rasterises a black canvas with no error anywhere. **The last word therefore belongs to whoever
+  can look at the result** — `web/`'s loader renders a frame, counts the colours on the canvas, and
+  falls back to WebGL2 from evidence rather than from a feature flag. A degradation nobody can name
+  is a bug report about performance six months later.
+- **Dependencies are declared per target, with `default-features = false` and the backend list
+  spelled out.** This workspace had none until `w3d-render`, and the first one is where the habit
+  gets set: the enabled backend list *is* the platform decision in STACK.md, and a
+  default-features build hides it in a lockfile. The licence rule below is not the only reason to
+  read a dependency's feature table.
 - **Arena slots are never reused.** Undo restores a node into the slot it came from, so a free
   list lets a later insert take a slot an undo still needs, and the undo then silently does
   nothing. This was written, shipped and reverted within one session; the cost is that an arena
@@ -150,10 +201,16 @@ used.
 | --- | --- |
 | `make check` | Every crate compiles, tests and all. |
 | `make clippy` | `-D warnings`. There is no allow-list; a lint that has to be silenced gets an argument in a session file. |
+| `make licences` | Every crate on **both** targets is compatible with GPL-3.0-or-later, checked against an explicit allowlist in `tools/licences.py`. A dependency with an unlisted licence fails the build. The tool runs its own negative controls first, because a checker that cannot fail is a checker that says yes. |
 | `cargo test --workspace` | The document, history, selection and the arena's identity rules — driven against `w3d-kernel-fake`, with no OCCT, no browser and no `.wasm` anywhere. |
 | `w3d_kernel::conformance` | One suite, run against *every* backend, `FakeKernel` included. A backend is only a backend if it passes it, and this is what keeps the kernel decision reversible. |
-| `make wasm` | The default members build for `wasm32-unknown-unknown`. Nothing above the seam may acquire a host assumption without this failing. |
-| `make test-occt` | The same conformance suite against **real geometry**, plus the document driven by OpenCASCADE. Not part of `make test`, because it needs OCCT installed; `w3d-kernel-occt` is excluded from the workspace's `default-members` so that `make test` stays a no-setup command. |
+| `make wasm` | The default members build for `wasm32-unknown-unknown`, **and the WebGL2 backend is really in the tree**. Nothing above the seam may acquire a host assumption without the first half failing; the second half exists because asking wgpu for `gles` instead of `webgl` compiles cleanly and ships no fallback at all. |
+| `make test-occt` | The same conformance suite against **real geometry**, plus the document driven by OpenCASCADE, plus the only end-to-end test there is: real geometry through the real viewport, and a click that names a face. Not part of `make test`, because it needs OCCT installed; `w3d-kernel-occt` is excluded from the workspace's `default-members` so that `make test` stays a no-setup command. |
+| `make web` | Not a check. Builds the browser bundle into `web/dist/` — needs `wasm-bindgen-cli` at the same version as the `wasm-bindgen` dependency; a mismatch is a runtime error about an unknown import, not a build failure. |
+| `w3d_format` round-trip | A document saved and loaded keeps its nodes, names, visibility, tolerance, quality and shared bodies, and refuses a file written by another kernel — in both directions. The container is asserted to be a zip a standard tool can open. |
+| `make app-test` | The modeller **in a real window**: `xvfb-run`, thirty frames, and a screenshot in which the chrome and the viewport are checked *separately* — a run where egui drew and the scene did not looks identical in a colour count. Carries its own negative controls. Needs `xvfb`, a rasteriser and `libxkbcommon-x11-0`. |
+| `make web-test` | The viewport **in a real browser**: WebGPU offered, WebGL2 forced, and a run with no COOP/COEP that must degrade visibly. The only check here that is not native. Needs `npm install` in `web/test/`, so it is not part of `make test`. |
+| `make occt-headers` | Not a check. Fetches headers a distribution failed to ship, at the revision in `kernel-occt/native/UPSTREAM` — needed on Ubuntu Noble. Deliberately not run from `build.rs`: a build that reaches the network on its own is not a build anybody can reproduce. |
 
 Still owed, and named so that the gap is not mistaken for coverage:
 
@@ -163,8 +220,21 @@ Still owed, and named so that the gap is not mistaken for coverage:
   not a suite, and none of them is degenerate.
 - **`wasm-pack test --headless`** — that the thing actually instantiates under COOP/COEP with
   threads. Needs `web/` to exist.
+- **A GPU in CI, and a browser in CI.** `w3d-render`'s tests need an adapter and *skip*, printing
+  `SKIPPED:`, when there is none — and `cargo test` then reports `ok`. `make web-test` is not part
+  of `make test` at all. Two holes of the same shape; until both are closed, a green run is not
+  evidence the viewport works.
+- **WebGPU has never rendered a pixel.** The native tests run on Vulkan through lavapipe, which is
+  not WebGPU, and the browser's WebGPU is broken in this container. WebGL2 *is* exercised
+  end-to-end, picking included. The fast path is still an argument.
 - **An OCCT build for wasm.** `kernel-occt` compiles and passes natively; no Emscripten build
   exists, and `-fwasm-exceptions` against `-fexceptions` has not been decided.
+
+**Keep the window out of what can be tested without one.** `w3d-app` is split into an editor that
+has no window and no GPU in it — commands, selection, the rule that a drag is not a click — and a
+shell that is winit, egui and a surface. A winit event loop cannot be driven from `cargo test` and a
+state machine can, so everything that could be wrong and could be caught belongs on the first side.
+The shell is thin by construction, and `make app-test` covers what is left of it.
 
 **Prefer extending `w3d-kernel-fake` over mocking `core`.** A test that stubs the document proves
 nothing; one that stubs the kernel proves the whole modeller.
@@ -173,6 +243,32 @@ And when a check belongs to *the contract* rather than to one backend, it goes i
 `kernel/src/conformance.rs`, not in a test file. Everything there has to be true of any correct
 kernel — which rules out most interesting assertions, and is the discipline that makes the ones
 left over mean something.
+
+## The file format
+
+`FORMAT.md` is the specification and it is the thing that makes the format open — not the
+container. `format/` is one implementation of it, and a reader written from that page alone must
+be able to read what this one writes.
+
+One rule matters more than the rest, and it is the seam wearing a different hat: **the geometry
+blobs are the writing kernel's own bytes, and the manifest records which kernel wrote them.** A
+build whose kernel does not match must refuse the file by name. It must not convert, and it must
+not open the document with the geometry missing.
+
+> A native file that silently half-converts is the worst outcome a format can have. A file that
+> will not open is a problem you can see.
+
+Moving geometry *between* kernels is what STEP is for: a different operation, with a different
+name in the interface, lossy in ways a user should be asked to accept.
+
+Two consequences worth knowing before changing anything here:
+
+- **`GeometryKernel::geometry_format` is a promise about bytes on somebody's disk.** Changing what
+  `save_body` produces means changing that string, and a backend that does not is breaking every
+  file anyone has saved.
+- **The round-trip is a conformance check**, not a backend test. "Saving and loading a body keeps
+  its topology and its bounds" is true of any correct kernel, so it lives in
+  `kernel/src/conformance.rs` with everything else that is.
 
 ## Licensing
 
@@ -201,7 +297,20 @@ Plasticity's own model. Relicensing later would mean removing OCCT.
 Serving the `.wasm` to a browser is **distribution** — GPL-3, not AGPL, and the SaaS distinction
 neither saves us nor is needed. Ship a link to the corresponding source alongside the build.
 
-Do not add a dependency whose licence is incompatible with GPL-3.0-or-later.
+Do not add a dependency whose licence is incompatible with GPL-3.0-or-later. **`make licences`
+enforces this** — it is part of `make test`, it reads both targets because the dependency sets
+differ, and it fails on any licence not on the allowlist in `tools/licences.py`. Widening that list
+is a decision that gets an argument in a session file, not an edit.
+
+Two consequences of the tree as it stands, worth knowing before they surprise someone:
+
+- **Two crates are Apache-2.0-only** (`codespan-reporting`, `spirv`, both reached through `naga`).
+  Apache-2.0 is compatible with GPL-**3** and not with GPL-2, so the licence that was chosen for
+  the kernel's sake is also the one the renderer's dependencies require. There is no version of
+  this project that is GPL-2.
+- **`cargo metadata` cannot see everything**, and the omissions are the interesting ones: OCCT
+  itself, the header `make occt-headers` fetches, Playwright, and the browsers and drivers a test
+  run needs. `tools/licences.py` lists them in its report rather than leaving them out.
 
 ## Temporary files and scripts
 

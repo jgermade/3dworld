@@ -80,6 +80,34 @@ impl<K: GeometryKernel> Document<K> {
         }
     }
 
+    /// Rebuilds a document from a file.
+    ///
+    /// Not general-purpose insertion, and deliberately one constructor rather
+    /// than a sequence of mutations: a half-loaded document is not a state
+    /// anything should be able to observe. The bodies must be ones this
+    /// `kernel` just produced — from `GeometryKernel::load_body` — because a
+    /// `Body` means nothing to any other kernel.
+    ///
+    /// **History starts empty.** A loaded document has nothing to undo back
+    /// to, which is a property rather than an omission: the edits that built
+    /// it happened in another process, and the bodies they referred to are not
+    /// in this one.
+    pub fn from_parts(
+        kernel: K,
+        tolerance: Tolerance,
+        quality: Quality,
+        nodes: impl IntoIterator<Item = Node>,
+    ) -> Self {
+        let mut doc = Self::new(kernel);
+        doc.tolerance = tolerance;
+        doc.quality = quality;
+        for node in nodes {
+            doc.created.push(node.body);
+            doc.nodes.insert(node);
+        }
+        doc
+    }
+
     pub fn kernel(&self) -> &K {
         &self.kernel
     }
