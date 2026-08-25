@@ -1,0 +1,16 @@
+[package]
+name = "w3d-kernel"
+description = "The seam: the geometry kernel contract, and the conformance suite every backend must pass."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+default = ["conformance"]
+# The suite is a normal (non-dev) feature on purpose: a backend crate must be
+# able to run it from its own tests without depending on this crate's dev-deps.
+conformance = []
+
+[lints]
+workspace = true

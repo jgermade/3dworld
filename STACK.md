@@ -10,14 +10,16 @@
 ┌─────────────────────────────────────────────────────────────────────┐
 │  3dworld                                                            │
 │                                                                     │
-│   the modeller                     app/        egui or a TS shell   │
-│     document · undo · selection    core/                            │
-│     tessellation · snapping        core/                            │
+│   the modeller                     app/        egui or a TS shell ⬜ │
+│     document · undo · selection    w3d-core                       ✅ │
+│     tessellation cache             w3d-core                       ✅ │
 │                                                                     │
-│   ═════ kernel::GeometryKernel ═════  the seam, and the spec        │
+│   ═════ w3d_kernel::GeometryKernel ═════  the seam, and the spec  ✅ │
+│         + conformance: one suite, every backend                     │
 │                                                                     │
-│   kernel/occt/    OpenCASCADE, built by Emscripten                  │
-│   kernel/native/  ours, or truck — swapped in behind the trait      │
+│   w3d-kernel-fake  no geometry, full contract — drives the tests  ✅ │
+│   kernel/occt/     OpenCASCADE, built by Emscripten               ⬜ │
+│   kernel/native/   ours, or truck — swapped in behind the trait   ⬜ │
 └─────────────────────────────────────────────────────────────────────┘
         │                                                     │
         ▼                                                     ▼
@@ -71,7 +73,9 @@ the parts wasm constrains.
 
 | | |
 | --- | --- |
-| Rust | stable; `wasm32-unknown-unknown`, `+simd128` |
+| Rust | 1.94.1 stable, edition 2024; `unsafe_code = "forbid"` workspace-wide |
+| Targets | `x86_64-unknown-linux-gnu` and `wasm32-unknown-unknown`, both checked; `+simd128` checked |
+| Dependencies | **none.** The three crates depend on each other and on nothing else. |
 | Threads | `wasm-bindgen-rayon`, `+atomics,+bulk-memory,+mutable-globals`, nightly for `build-std` |
 | Graphics | `wgpu` — WebGPU where present, WebGL2 fallback |
 | Kernel | undecided — see AGENTS.md § Licensing |

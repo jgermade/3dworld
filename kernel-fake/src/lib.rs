@@ -1,0 +1,258 @@
+//! A backend that satisfies the contract without doing any geometry.
+//!
+//! It exists so that `w3d-core` — the document, history, selection, the
+//! tessellation cache — can be written, driven and tested before a decision on
+//! the real kernel is made, and so that the conformance suite has something to
+//! be run against on day one.
+//!
+//! **What it actually is:** a CSG tree that is never evaluated. Bounds are
+//! computed exactly for primitives and combined by the rules set operations
+//! obey — a union's bounds are the union of the operands', a difference's are
+//! contained in the minuend's, an intersection's in both. Those are true
+//! statements about the real answer, just weak ones. Tessellation returns the
+//! bounding box, subdivided by quality.
+//!
+//! So it is honest about *shape* and silent about *geometry*, which is exactly
+//! the split the conformance suite tests. **Prefer extending this over mocking
+//! `w3d-core`**: a test that stubs the document proves nothing, one that stubs
+//! the kernel proves the whole modeller.
+
+use w3d_kernel::{
+    Aabb, Body, BooleanOp, GeometryKernel, KernelError, Mat4, Mesh, Quality, Result, Tolerance,
+    Topology, Vec3,
+};
+
+#[derive(Clone, Debug)]
+enum Shape {
+    Box(Vec3),
+    Sphere(f64),
+    Cylinder { radius: f64, height: f64 },
+    Boolean(BooleanOp, Box<Shape>, Box<Shape>),
+    Transformed(Mat4, Box<Shape>),
+}
+
+impl Shape {
+    fn bounds(&self) -> Aabb {
+        match self {
+            Self::Box(size) => Aabb::centered(*size),
+            Self::Sphere(r) => Aabb::centered(Vec3::splat(2.0 * r)),
+            Self::Cylinder { radius, height } => {
+                Aabb::centered(Vec3::new(2.0 * radius, 2.0 * radius, *height))
+            }
+            Self::Boolean(op, a, b) => match op {
+                // Exact.
+                BooleanOp::Union => a.bounds().union(&b.bounds()),
+                // Conservative, and the only bound available without evaluating.
+                BooleanOp::Difference => a.bounds(),
+                BooleanOp::Intersection => a.bounds().intersection(&b.bounds()),
+            },
+            Self::Transformed(m, inner) => inner.bounds().transformed(m),
+        }
+    }
+
+    /// Counts invented to be plausible and consistent, never to be believed.
+    /// A caller that depends on these numbers is depending on the fake.
+    fn topology(&self) -> Topology {
+        match self {
+            Self::Box(_) => Topology {
+                solids: 1,
+                faces: 6,
+                edges: 12,
+                vertices: 8,
+            },
+            Self::Sphere(_) => Topology {
+                solids: 1,
+                faces: 1,
+                edges: 1,
+                vertices: 2,
+            },
+            Self::Cylinder { .. } => Topology {
+                solids: 1,
+                faces: 3,
+                edges: 2,
+                vertices: 2,
+            },
+            Self::Boolean(_, a, b) => {
+                let (a, b) = (a.topology(), b.topology());
+                Topology {
+                    solids: 1,
+                    faces: a.faces + b.faces,
+                    edges: a.edges + b.edges,
+                    vertices: a.vertices + b.vertices,
+                }
+            }
+            Self::Transformed(_, inner) => inner.topology(),
+        }
+    }
+}
+
+/// Subdivisions per box edge for a given quality.
+///
+/// Monotone in `sag` and clamped at both ends: the conformance suite requires
+/// that finer quality never yields fewer triangles, and nothing requires that
+/// a fake spend a second producing them.
+fn subdivisions(bounds: &Aabb, quality: Quality) -> u32 {
+    let extent = {
+        let s = bounds.size();
+        s.x.max(s.y).max(s.z).max(f64::MIN_POSITIVE)
+    };
+    let sag = quality.sag.max(1.0e-3);
+    (extent / sag).sqrt().ceil().clamp(1.0, 16.0) as u32
+}
+
+/// The bounding box, as triangles, with one face id per side.
+fn tessellate_box(bounds: &Aabb, n: u32) -> Mesh {
+    let mut mesh = Mesh::default();
+    if bounds.is_empty() {
+        return mesh;
+    }
+    let (min, max) = (bounds.min, bounds.max);
+
+    for face in 0..6u32 {
+        let axis = (face / 2) as usize;
+        let positive = face % 2 == 1;
+        let (u, v) = ((axis + 1) % 3, (axis + 2) % 3);
+
+        let mut normal = [0.0f32; 3];
+        normal[axis] = if positive { 1.0 } else { -1.0 };
+
+        let base = mesh.positions.len() as u32;
+        for i in 0..=n {
+            for j in 0..=n {
+                let mut p = Vec3::ZERO;
+                p.set_axis(
+                    axis,
+                    if positive {
+                        max.axis(axis)
+                    } else {
+                        min.axis(axis)
+                    },
+                );
+                let t = |k: u32| f64::from(k) / f64::from(n);
+                p.set_axis(u, min.axis(u) + (max.axis(u) - min.axis(u)) * t(i));
+                p.set_axis(v, min.axis(v) + (max.axis(v) - min.axis(v)) * t(j));
+                mesh.positions.push(p.to_f32());
+                mesh.normals.push(normal);
+            }
+        }
+
+        let stride = n + 1;
+        for i in 0..n {
+            for j in 0..n {
+                let a = base + i * stride + j;
+                let (b, c, d) = (a + 1, a + stride, a + stride + 1);
+                // Winding follows the face direction so that back-face culling
+                // is meaningful even on a fake.
+                let quad = if positive {
+                    [a, c, b, b, c, d]
+                } else {
+                    [a, b, c, b, d, c]
+                };
+                mesh.indices.extend_from_slice(&quad);
+                mesh.face_of_triangle.push(face);
+                mesh.face_of_triangle.push(face);
+            }
+        }
+    }
+    mesh
+}
+
+/// Slots are never reused. A stale handle therefore stays an error forever
+/// rather than silently naming somebody else's body — the failure mode that
+/// makes a generational index worth having, and the one the conformance suite
+/// checks by deleting twice.
+#[derive(Default)]
+pub struct FakeKernel {
+    slots: Vec<Option<Shape>>,
+}
+
+impl FakeKernel {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// How many bodies are alive. For tests that assert the document is not
+    /// leaking kernel storage.
+    pub fn live_bodies(&self) -> usize {
+        self.slots.iter().filter(|s| s.is_some()).count()
+    }
+
+    fn insert(&mut self, shape: Shape) -> Body {
+        self.slots.push(Some(shape));
+        Body::from_raw((self.slots.len() - 1) as u32)
+    }
+
+    fn get(&self, body: Body) -> Result<&Shape> {
+        self.slots
+            .get(body.raw() as usize)
+            .and_then(Option::as_ref)
+            .ok_or(KernelError::UnknownBody(body))
+    }
+}
+
+impl GeometryKernel for FakeKernel {
+    fn name(&self) -> &'static str {
+        "fake"
+    }
+
+    fn create_box(&mut self, size: Vec3) -> Result<Body> {
+        if size.x <= 0.0 || size.y <= 0.0 || size.z <= 0.0 {
+            return Err(KernelError::Degenerate("box extent must be positive"));
+        }
+        Ok(self.insert(Shape::Box(size)))
+    }
+
+    fn create_sphere(&mut self, radius: f64) -> Result<Body> {
+        if radius <= 0.0 {
+            return Err(KernelError::Degenerate("sphere radius must be positive"));
+        }
+        Ok(self.insert(Shape::Sphere(radius)))
+    }
+
+    fn create_cylinder(&mut self, radius: f64, height: f64) -> Result<Body> {
+        if radius <= 0.0 || height <= 0.0 {
+            return Err(KernelError::Degenerate(
+                "cylinder radius and height must be positive",
+            ));
+        }
+        Ok(self.insert(Shape::Cylinder { radius, height }))
+    }
+
+    fn boolean(&mut self, op: BooleanOp, a: Body, b: Body, _tol: Tolerance) -> Result<Body> {
+        let (sa, sb) = (self.get(a)?.clone(), self.get(b)?.clone());
+        Ok(self.insert(Shape::Boolean(op, Box::new(sa), Box::new(sb))))
+    }
+
+    fn transform(&mut self, body: Body, m: &Mat4) -> Result<Body> {
+        let inner = self.get(body)?.clone();
+        Ok(self.insert(Shape::Transformed(*m, Box::new(inner))))
+    }
+
+    fn copy(&mut self, body: Body) -> Result<Body> {
+        let shape = self.get(body)?.clone();
+        Ok(self.insert(shape))
+    }
+
+    fn delete(&mut self, body: Body) -> Result<()> {
+        let slot = self
+            .slots
+            .get_mut(body.raw() as usize)
+            .ok_or(KernelError::UnknownBody(body))?;
+        slot.take()
+            .map(|_| ())
+            .ok_or(KernelError::UnknownBody(body))
+    }
+
+    fn topology(&self, body: Body) -> Result<Topology> {
+        Ok(self.get(body)?.topology())
+    }
+
+    fn bounds(&self, body: Body) -> Result<Aabb> {
+        Ok(self.get(body)?.bounds())
+    }
+
+    fn tessellate(&self, body: Body, quality: Quality) -> Result<Mesh> {
+        let bounds = self.get(body)?.bounds();
+        Ok(tessellate_box(&bounds, subdivisions(&bounds, quality)))
+    }
+}

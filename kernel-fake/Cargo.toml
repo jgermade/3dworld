@@ -1,0 +1,13 @@
+[package]
+name = "w3d-kernel-fake"
+description = "A backend that implements the contract without doing geometry. Proves the seam, not the maths."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+w3d-kernel = { path = "../kernel" }
+
+[lints]
+workspace = true

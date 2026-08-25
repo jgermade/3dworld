@@ -67,18 +67,26 @@ A B-rep modeller in the mould of Plasticity: NURBS surfaces and exact solids, dr
 direct modelling rather than parametric history, running in the browser on WebAssembly and on
 the desktop from the same core.
 
-**As of the first session none of this exists.** The tree below is the decided shape, not an
-observation. The first code to land either matches it or amends this file in the same commit.
+What exists is the top half. The rest is the decided shape, and code that lands either matches
+it or amends this file in the same commit.
 
 ```
-core/     the document, history/undo, scene graph, tessellation, snapping, selection
-kernel/   trait GeometryKernel — the seam
-  occt/     wrapper over an Emscripten build of OpenCASCADE
-  native/   a kernel of our own, or truck
-render/   wgpu — WebGPU, with a WebGL2 fallback that has no compute
-app/      the modeller itself; nativa and web from one source
-web/      the loader: feature probe, variant dispatch, COOP/COEP check
+kernel/        w3d-kernel       the seam: the trait, the value types, the        ✅ built
+                                conformance suite every backend must pass
+kernel-fake/   w3d-kernel-fake  a backend that satisfies the contract without    ✅ built
+                                doing geometry
+core/          w3d-core         document · history/undo · selection ·            ✅ built
+                                tessellation cache — generic over the kernel
+
+kernel/occt/                    wrapper over an Emscripten build of OpenCASCADE  ⬜
+kernel/native/                  a kernel of our own, or truck                    ⬜
+render/                         wgpu — WebGPU, WebGL2 fallback with no compute   ⬜
+app/                            the modeller; native and web from one source     ⬜
+web/                            the loader: feature probe, dispatch, COOP/COEP   ⬜
 ```
+
+Crates are prefixed `w3d-` because `3dworld` is not a valid Rust identifier and the name is not
+settled anyway. Directory names are the ones above; do not rename either half unilaterally.
 
 The seam is `kernel::GeometryKernel`. It is not a convenience trait: it is what lets the whole of
 `core/`, `render/` and `app/` be written, reviewed and tested before a decision on the kernel is
@@ -112,21 +120,42 @@ used.
 - **A tolerance is an argument, never a constant.** Every predicate that compares takes its
   tolerance from the document, and no file outside `kernel/` invents an epsilon. Scattered
   hard-coded epsilons are the standard way a CAD kernel becomes unfixable.
+- **Bodies are immutable; every operation returns a new one.** Undo is then a matter of keeping
+  the old handle rather than inverting an operation, which is the only undo a B-rep kernel can
+  implement honestly — nothing can invert a boolean. `conformance` enforces it, because a backend
+  that consumes its operands makes history impossible and would be found much later otherwise.
+- **Arena slots are never reused.** Undo restores a node into the slot it came from, so a free
+  list lets a later insert take a slot an undo still needs, and the undo then silently does
+  nothing. This was written, shipped and reverted within one session; the cost is that an arena
+  grows with the nodes a session ever created. Do not reintroduce a free list to reclaim it —
+  compaction with history cleared is the honest fix, and it is not written.
 
 ## Testing
 
-There is nothing here yet, and the first thing that lands must bring `make test` with it. The
-shape it has to take, because it is the shape the seam implies:
+`make test` is the whole of it, and it is three different kinds of check:
 
-| Check | What it would prove |
+| Command | What it proves |
 | --- | --- |
-| `cargo test -p core` | The document, history and tessellation, against a fake kernel — no OCCT, no browser, no `.wasm`. |
-| Kernel conformance | One suite, run against *every* backend. A backend is only a backend if it passes it, and this is what keeps the decision reversible. |
-| Fixture regression | Named solids in, golden topology out. The only defence against a robustness fix breaking three cases to fix one. |
-| `wasm-pack test --headless` | That the thing actually instantiates under COOP/COEP with threads. |
+| `make check` | Every crate compiles, tests and all. |
+| `make clippy` | `-D warnings`. There is no allow-list; a lint that has to be silenced gets an argument in a session file. |
+| `cargo test --workspace` | The document, history, selection and the arena's identity rules — driven against `w3d-kernel-fake`, with no OCCT, no browser and no `.wasm` anywhere. |
+| `w3d_kernel::conformance` | One suite, run against *every* backend, `FakeKernel` included. A backend is only a backend if it passes it, and this is what keeps the kernel decision reversible. |
+| `make wasm` | The workspace builds for `wasm32-unknown-unknown`. Nothing above the seam may acquire a host assumption without this failing. |
 
-**Prefer extending the fake kernel over mocking `core`.** A test that stubs the document proves
+Still owed, and named so that the gap is not mistaken for coverage:
+
+- **Fixture regression** — named solids in, golden topology out. The only defence against a
+  robustness fix breaking three cases to fix one. Needs a real kernel to be worth writing.
+- **`wasm-pack test --headless`** — that the thing actually instantiates under COOP/COEP with
+  threads. Needs `web/` to exist.
+
+**Prefer extending `w3d-kernel-fake` over mocking `core`.** A test that stubs the document proves
 nothing; one that stubs the kernel proves the whole modeller.
+
+And when a check belongs to *the contract* rather than to one backend, it goes in
+`kernel/src/conformance.rs`, not in a test file. Everything there has to be true of any correct
+kernel — which rules out most interesting assertions, and is the discipline that makes the ones
+left over mean something.
 
 ## Licensing
 

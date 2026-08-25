@@ -1,0 +1,16 @@
+[package]
+name = "w3d-core"
+description = "The document, history, selection and tessellation cache. Generic over the kernel."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+w3d-kernel = { path = "../kernel", default-features = false }
+
+[dev-dependencies]
+w3d-kernel-fake = { path = "../kernel-fake" }
+
+[lints]
+workspace = true
