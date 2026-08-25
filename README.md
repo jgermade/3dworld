@@ -71,8 +71,9 @@ What to read:
 - [STACK.md](STACK.md) — the shape, and every choice with what forced it.
 - [FORMAT.md](FORMAT.md) — the `.w3d` file, specified well enough to implement from.
 - [AGENTS.md](AGENTS.md) — conventions, and the rules that are not style.
-- [SESSIONS/](SESSIONS/) — the record. `*.md` is open, `*.completed.md` is finished and why.
-  **The plan is [`what-is-not-built-yet`](SESSIONS/2026-08-25_21h59.what-is-not-built-yet.md)**,
+- [RECORD/](RECORD/) — what was decided, learned and left owed, in the order it happened.
+  `*.md` is open, `*.completed.md` is finished and why.
+  **The plan is [`what-is-not-built-yet`](RECORD/2026-08-25_21h59.what-is-not-built-yet.md)**,
   the one open file; every register and `Next` block inside the completed ones is superseded and
   kept only for the order in which things became pending.
 - [`kernel/src/lib.rs`](kernel/src/lib.rs) — the contract, and the two properties of it that
