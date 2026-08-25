@@ -1,0 +1,408 @@
+// The OpenCASCADE side of the seam.
+//
+// Everything OCCT-shaped is confined to this file: its exceptions are caught
+// here and become error codes, its cylinder's base-at-origin convention is
+// corrected here, its per-face triangulations are stitched here. Nothing
+// leaves through w3d_occt.h that OCCT would recognise as its own.
+//
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+#include "w3d_occt.h"
+
+#include <cmath>
+#include <cstring>
+#include <string>
+#include <unordered_map>
+#include <vector>
+
+#include <BRepAlgoAPI_Common.hxx>
+#include <BRepAlgoAPI_Cut.hxx>
+#include <BRepAlgoAPI_Fuse.hxx>
+#include <BRepBndLib.hxx>
+#include <BRepBuilderAPI_GTransform.hxx>
+#include <BRepBuilderAPI_Transform.hxx>
+#include <BRepMesh_IncrementalMesh.hxx>
+#include <BRepPrimAPI_MakeBox.hxx>
+#include <BRepPrimAPI_MakeCylinder.hxx>
+#include <BRepPrimAPI_MakeSphere.hxx>
+#include <BRep_Tool.hxx>
+#include <Bnd_Box.hxx>
+#include <Poly_Triangulation.hxx>
+#include <Standard_Failure.hxx>
+#include <TopAbs_Orientation.hxx>
+#include <TopExp.hxx>
+#include <TopExp_Explorer.hxx>
+#include <TopTools_IndexedMapOfShape.hxx>
+#include <TopoDS.hxx>
+#include <TopoDS_Face.hxx>
+#include <TopoDS_Shape.hxx>
+#include <gp_Ax2.hxx>
+#include <gp_GTrsf.hxx>
+#include <gp_Pnt.hxx>
+#include <gp_Trsf.hxx>
+
+// Ids are never reused within a context. Same rule as the document's arena and
+// for the same reason: a handle that outlives its body must stay an error
+// rather than quietly name the next occupant.
+struct W3dOcctContext {
+  std::unordered_map<uint32_t, TopoDS_Shape> bodies;
+  uint32_t next_id = 0;
+
+  uint32_t store(const TopoDS_Shape &shape) {
+    const uint32_t id = next_id++;
+    bodies.emplace(id, shape);
+    return id;
+  }
+
+  const TopoDS_Shape *find(uint32_t id) const {
+    auto it = bodies.find(id);
+    return it == bodies.end() ? nullptr : &it->second;
+  }
+};
+
+namespace {
+
+// Per-thread, not per-context: a message is read immediately by whoever made
+// the failing call, and keeping it off the context means the reading entry
+// points do not write through a shared pointer.
+thread_local std::string g_last_error;
+
+int32_t fail(const char *what) {
+  g_last_error = what;
+  return W3D_OCCT_ERR_FAILED;
+}
+
+int32_t fail(const Standard_Failure &e) {
+  g_last_error = e.GetMessageString() ? e.GetMessageString() : "OCCT failure";
+  return W3D_OCCT_ERR_FAILED;
+}
+
+// Every entry point is wrapped: an OCCT exception crossing into Rust would be
+// undefined behaviour, and OCCT throws for input it dislikes rather than
+// returning.
+template <typename F> int32_t guarded(F &&f) {
+  try {
+    return f();
+  } catch (const Standard_Failure &e) {
+    return fail(e);
+  } catch (const std::exception &e) {
+    return fail(e.what());
+  } catch (...) {
+    return fail("unknown C++ exception");
+  }
+}
+
+} // namespace
+
+extern "C" {
+
+W3dOcctContext *w3d_occt_context_new(void) { return new W3dOcctContext(); }
+
+void w3d_occt_context_free(W3dOcctContext *ctx) { delete ctx; }
+
+int32_t w3d_occt_make_box(W3dOcctContext *ctx, double sx, double sy, double sz,
+                          uint32_t *out) {
+  if (!(sx > 0.0) || !(sy > 0.0) || !(sz > 0.0)) {
+    return W3D_OCCT_ERR_DEGENERATE;
+  }
+  return guarded([&] {
+    // OCCT builds from a corner; the contract says origin-centred.
+    const gp_Pnt corner(-sx / 2.0, -sy / 2.0, -sz / 2.0);
+    *out = ctx->store(BRepPrimAPI_MakeBox(corner, sx, sy, sz).Shape());
+    return W3D_OCCT_OK;
+  });
+}
+
+int32_t w3d_occt_make_sphere(W3dOcctContext *ctx, double radius, uint32_t *out) {
+  if (!(radius > 0.0)) {
+    return W3D_OCCT_ERR_DEGENERATE;
+  }
+  return guarded([&] {
+    *out = ctx->store(BRepPrimAPI_MakeSphere(radius).Shape());
+    return W3D_OCCT_OK;
+  });
+}
+
+int32_t w3d_occt_make_cylinder(W3dOcctContext *ctx, double radius, double height,
+                               uint32_t *out) {
+  if (!(radius > 0.0) || !(height > 0.0)) {
+    return W3D_OCCT_ERR_DEGENERATE;
+  }
+  return guarded([&] {
+    // OCCT's cylinder sits on its base. Ours is centred, so the axis starts
+    // half a height below the origin.
+    const gp_Ax2 axis(gp_Pnt(0.0, 0.0, -height / 2.0), gp_Dir(0.0, 0.0, 1.0));
+    *out = ctx->store(BRepPrimAPI_MakeCylinder(axis, radius, height).Shape());
+    return W3D_OCCT_OK;
+  });
+}
+
+int32_t w3d_occt_boolean(W3dOcctContext *ctx, int32_t op, uint32_t a, uint32_t b,
+                         double fuzzy, uint32_t *out) {
+  const TopoDS_Shape *sa = ctx->find(a);
+  const TopoDS_Shape *sb = ctx->find(b);
+  if (!sa || !sb) {
+    return W3D_OCCT_ERR_UNKNOWN_BODY;
+  }
+  return guarded([&] {
+    // Copies, because `store` may rehash the map and invalidate sa/sb, and
+    // because the contract requires the operands to survive untouched.
+    const TopoDS_Shape shape_a = *sa;
+    const TopoDS_Shape shape_b = *sb;
+
+    BRepAlgoAPI_BooleanOperation *algo = nullptr;
+    BRepAlgoAPI_Fuse fuse;
+    BRepAlgoAPI_Cut cut;
+    BRepAlgoAPI_Common common;
+    switch (op) {
+    case W3D_OCCT_OP_UNION:
+      algo = &fuse;
+      break;
+    case W3D_OCCT_OP_DIFFERENCE:
+      algo = &cut;
+      break;
+    case W3D_OCCT_OP_INTERSECTION:
+      algo = &common;
+      break;
+    default:
+      return W3D_OCCT_ERR_UNSUPPORTED;
+    }
+
+    TopTools_ListOfShape args, tools;
+    args.Append(shape_a);
+    tools.Append(shape_b);
+    algo->SetArguments(args);
+    algo->SetTools(tools);
+    if (fuzzy > 0.0) {
+      algo->SetFuzzyValue(fuzzy);
+    }
+    algo->Build();
+    if (!algo->IsDone()) {
+      return fail("boolean did not complete");
+    }
+    *out = ctx->store(algo->Shape());
+    return W3D_OCCT_OK;
+  });
+}
+
+int32_t w3d_occt_transform(W3dOcctContext *ctx, uint32_t body, const double *m34,
+                           uint32_t *out) {
+  const TopoDS_Shape *s = ctx->find(body);
+  if (!s) {
+    return W3D_OCCT_ERR_UNKNOWN_BODY;
+  }
+  return guarded([&] {
+    const TopoDS_Shape shape = *s;
+    // gp_Trsf is rigid-plus-uniform-scale and refuses anything else. Try it
+    // first because it keeps the geometry's type; fall back to gp_GTrsf, which
+    // accepts any affine at the cost of rebuilding surfaces as B-splines.
+    try {
+      gp_Trsf t;
+      t.SetValues(m34[0], m34[1], m34[2], m34[3], m34[4], m34[5], m34[6],
+                  m34[7], m34[8], m34[9], m34[10], m34[11]);
+      *out = ctx->store(BRepBuilderAPI_Transform(shape, t, Standard_True).Shape());
+      return W3D_OCCT_OK;
+    } catch (const Standard_Failure &) {
+      gp_GTrsf g;
+      for (int row = 0; row < 3; ++row) {
+        for (int col = 0; col < 4; ++col) {
+          g.SetValue(row + 1, col + 1, m34[row * 4 + col]);
+        }
+      }
+      *out = ctx->store(BRepBuilderAPI_GTransform(shape, g, Standard_True).Shape());
+      return W3D_OCCT_OK;
+    }
+  });
+}
+
+int32_t w3d_occt_copy(W3dOcctContext *ctx, uint32_t body, uint32_t *out) {
+  const TopoDS_Shape *s = ctx->find(body);
+  if (!s) {
+    return W3D_OCCT_ERR_UNKNOWN_BODY;
+  }
+  // A shallow TopoDS_Shape copy shares the underlying TShape by reference
+  // count, so it outlives the original's deletion. That is enough *because
+  // bodies are immutable*: sharing is unobservable when nothing mutates. A
+  // BRepBuilderAPI_Copy would be a deep copy nobody can tell apart, paid for.
+  const TopoDS_Shape shape = *s;
+  *out = ctx->store(shape);
+  return W3D_OCCT_OK;
+}
+
+int32_t w3d_occt_delete(W3dOcctContext *ctx, uint32_t body) {
+  return ctx->bodies.erase(body) == 1 ? W3D_OCCT_OK : W3D_OCCT_ERR_UNKNOWN_BODY;
+}
+
+int32_t w3d_occt_topology(W3dOcctContext *ctx, uint32_t body, uint32_t *out4) {
+  const TopoDS_Shape *s = ctx->find(body);
+  if (!s) {
+    return W3D_OCCT_ERR_UNKNOWN_BODY;
+  }
+  return guarded([&] {
+    // Mapped, not explored: an explorer visits an edge once per face that
+    // shares it, and reporting twelve edges as twenty-four is the sort of
+    // wrong that nothing downstream would notice for months.
+    const TopAbs_ShapeEnum kinds[4] = {TopAbs_SOLID, TopAbs_FACE, TopAbs_EDGE,
+                                       TopAbs_VERTEX};
+    for (int i = 0; i < 4; ++i) {
+      TopTools_IndexedMapOfShape map;
+      TopExp::MapShapes(*s, kinds[i], map);
+      out4[i] = static_cast<uint32_t>(map.Extent());
+    }
+    return W3D_OCCT_OK;
+  });
+}
+
+int32_t w3d_occt_bounds(W3dOcctContext *ctx, uint32_t body, double *out6) {
+  const TopoDS_Shape *s = ctx->find(body);
+  if (!s) {
+    return W3D_OCCT_ERR_UNKNOWN_BODY;
+  }
+  return guarded([&] {
+    Bnd_Box box;
+    // AddOptimal, not Add: the plain version bounds curved surfaces by their
+    // control polygon, which on a sphere is visibly larger than the sphere.
+    // The contract says a sphere's bounds are 2r across and means it.
+    //
+    // useShapeTolerance is Standard_False, and that argument cost a conformance
+    // failure to get right. Passing True inflates the box by each vertex's and
+    // edge's own tolerance — 1e-7 by default — so a 2x4x6 box reported bounds
+    // of 2.0000002 across. That is a defensible number for culling, where a
+    // conservative box is the safe one, and the wrong answer to "what are this
+    // solid's bounds". The contract asks for the geometry; a caller that wants
+    // slack can add its own, and one that cannot tell the difference cannot
+    // implement snapping.
+    BRepBndLib::AddOptimal(*s, box, Standard_False, Standard_False);
+    if (box.IsVoid()) {
+      return fail("empty bounding box");
+    }
+    box.SetGap(0.0);
+    box.Get(out6[0], out6[1], out6[2], out6[3], out6[4], out6[5]);
+    return W3D_OCCT_OK;
+  });
+}
+
+namespace {
+
+struct MeshBuffers {
+  std::vector<float> positions;
+  std::vector<float> normals;
+  std::vector<uint32_t> indices;
+  std::vector<uint32_t> face_of_triangle;
+};
+
+} // namespace
+
+int32_t w3d_occt_tessellate(W3dOcctContext *ctx, uint32_t body, double sag,
+                            double angle, W3dOcctMesh *out) {
+  const TopoDS_Shape *s = ctx->find(body);
+  if (!s) {
+    return W3D_OCCT_ERR_UNKNOWN_BODY;
+  }
+  return guarded([&] {
+    TopoDS_Shape shape = *s;
+    // Not parallel. Determinism is a product property here — the same document
+    // must tessellate identically on every machine — and it is worth more than
+    // the wall-clock of a display mesh.
+    BRepMesh_IncrementalMesh mesher(shape, sag, Standard_False, angle,
+                                    Standard_False);
+    if (!mesher.IsDone()) {
+      return fail("meshing did not complete");
+    }
+
+    auto *buf = new MeshBuffers();
+    uint32_t face_index = 0;
+    for (TopExp_Explorer exp(shape, TopAbs_FACE); exp.More();
+         exp.Next(), ++face_index) {
+      const TopoDS_Face face = TopoDS::Face(exp.Current());
+      TopLoc_Location loc;
+      const Handle(Poly_Triangulation) tri = BRep_Tool::Triangulation(face, loc);
+      if (tri.IsNull()) {
+        continue;
+      }
+      const gp_Trsf placement = loc.Transformation();
+      const bool reversed = face.Orientation() == TopAbs_REVERSED;
+      const uint32_t base = static_cast<uint32_t>(buf->positions.size() / 3);
+      const int node_count = tri->NbNodes();
+
+      for (int i = 1; i <= node_count; ++i) {
+        gp_Pnt p = tri->Node(i);
+        p.Transform(placement);
+        buf->positions.push_back(static_cast<float>(p.X()));
+        buf->positions.push_back(static_cast<float>(p.Y()));
+        buf->positions.push_back(static_cast<float>(p.Z()));
+        buf->normals.insert(buf->normals.end(), {0.0f, 0.0f, 0.0f});
+      }
+
+      for (int t = 1; t <= tri->NbTriangles(); ++t) {
+        int a = 0, b = 0, c = 0;
+        tri->Triangle(t).Get(a, b, c);
+        if (reversed) {
+          std::swap(b, c);
+        }
+        const uint32_t ia = base + static_cast<uint32_t>(a - 1);
+        const uint32_t ib = base + static_cast<uint32_t>(b - 1);
+        const uint32_t ic = base + static_cast<uint32_t>(c - 1);
+        buf->indices.insert(buf->indices.end(), {ia, ib, ic});
+        buf->face_of_triangle.push_back(face_index);
+
+        // Accumulate the geometric normal onto each corner. Faces do not share
+        // nodes in an OCCT triangulation, so this smooths within a face and
+        // leaves a hard edge between faces — which is what a CAD model wants
+        // without any crease-angle heuristic.
+        const float *pa = &buf->positions[ia * 3];
+        const float *pb = &buf->positions[ib * 3];
+        const float *pc = &buf->positions[ic * 3];
+        const float ux = pb[0] - pa[0], uy = pb[1] - pa[1], uz = pb[2] - pa[2];
+        const float vx = pc[0] - pa[0], vy = pc[1] - pa[1], vz = pc[2] - pa[2];
+        const float nx = uy * vz - uz * vy;
+        const float ny = uz * vx - ux * vz;
+        const float nz = ux * vy - uy * vx;
+        for (uint32_t idx : {ia, ib, ic}) {
+          buf->normals[idx * 3 + 0] += nx;
+          buf->normals[idx * 3 + 1] += ny;
+          buf->normals[idx * 3 + 2] += nz;
+        }
+      }
+    }
+
+    for (size_t i = 0; i + 2 < buf->normals.size(); i += 3) {
+      const float len = std::sqrt(buf->normals[i] * buf->normals[i] +
+                                  buf->normals[i + 1] * buf->normals[i + 1] +
+                                  buf->normals[i + 2] * buf->normals[i + 2]);
+      if (len > 0.0f) {
+        buf->normals[i] /= len;
+        buf->normals[i + 1] /= len;
+        buf->normals[i + 2] /= len;
+      } else {
+        // A degenerate triangle fan gave no direction. Say so with a valid
+        // unit vector rather than shipping NaNs into a vertex buffer.
+        buf->normals[i + 2] = 1.0f;
+      }
+    }
+
+    out->positions = buf->positions.data();
+    out->normals = buf->normals.data();
+    out->indices = buf->indices.data();
+    out->face_of_triangle = buf->face_of_triangle.data();
+    out->vertex_count = static_cast<uint32_t>(buf->positions.size() / 3);
+    out->triangle_count = static_cast<uint32_t>(buf->face_of_triangle.size());
+    out->owner = buf;
+    return W3D_OCCT_OK;
+  });
+}
+
+void w3d_occt_mesh_free(W3dOcctMesh *mesh) {
+  if (mesh && mesh->owner) {
+    delete static_cast<MeshBuffers *>(mesh->owner);
+    std::memset(mesh, 0, sizeof(*mesh));
+  }
+}
+
+const char *w3d_occt_last_error(void) { return g_last_error.c_str(); }
+
+uint32_t w3d_occt_live_bodies(const W3dOcctContext *ctx) {
+  return static_cast<uint32_t>(ctx->bodies.size());
+}
+
+} // extern "C"

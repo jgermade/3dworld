@@ -5,15 +5,25 @@ WASM_TARGET := wasm32-unknown-unknown
 .PHONY: test check clippy fmt fmt-check wasm doc clean
 
 ## Everything CI runs, and everything a contributor should run before pushing.
+## Needs no setup: the OpenCASCADE backend is not a default workspace member.
 test: check clippy fmt-check
-	$(CARGO) test --workspace
+	$(CARGO) test
 
 ## The implementation compiles, and so does every crate on its own.
 check:
-	$(CARGO) check --workspace --all-targets
+	$(CARGO) check --all-targets
+
+## The OpenCASCADE backend, and the conformance suite run against real
+## geometry. Needs OCCT headers and libraries:
+##   apt install libocct-foundation-dev libocct-modeling-data-dev \
+##               libocct-modeling-algorithms-dev
+## Override discovery with OCCT_INCLUDE_DIR / OCCT_LIB_DIR.
+.PHONY: test-occt
+test-occt:
+	$(CARGO) test -p w3d-kernel-occt
 
 clippy:
-	$(CARGO) clippy --workspace --all-targets -- -D warnings
+	$(CARGO) clippy --all-targets -- -D warnings
 
 fmt:
 	$(CARGO) fmt --all
@@ -26,7 +36,7 @@ fmt-check:
 ## browser, because nothing above the seam does.
 wasm:
 	rustup target add $(WASM_TARGET)
-	$(CARGO) check --workspace --target $(WASM_TARGET)
+	$(CARGO) check --target $(WASM_TARGET)
 
 doc:
 	$(CARGO) doc --workspace --no-deps

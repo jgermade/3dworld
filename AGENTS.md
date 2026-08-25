@@ -78,8 +78,10 @@ kernel-fake/   w3d-kernel-fake  a backend that satisfies the contract without   
 core/          w3d-core         document · history/undo · selection ·            ✅ built
                                 tessellation cache — generic over the kernel
 
-kernel/occt/                    wrapper over an Emscripten build of OpenCASCADE  ⬜
-kernel/native/                  a kernel of our own, or truck                    ⬜
+kernel-occt/   w3d-kernel-occt  the OpenCASCADE backend: a C ABI of thirteen    ✅ native
+                                entry points, and the Rust side of it            ⬜ wasm
+
+kernel-native/                  a kernel of our own, or truck                    ⬜
 render/                         wgpu — WebGPU, WebGL2 fallback with no compute   ⬜
 app/                            the modeller; native and web from one source     ⬜
 web/                            the loader: feature probe, dispatch, COOP/COEP   ⬜
@@ -124,6 +126,16 @@ used.
   the old handle rather than inverting an operation, which is the only undo a B-rep kernel can
   implement honestly — nothing can invert a boolean. `conformance` enforces it, because a backend
   that consumes its operands makes history impossible and would be found much later otherwise.
+- **`unsafe` lives in exactly one crate, and that crate is the FFI boundary.** The workspace
+  *forbids* it, and `forbid` cannot be relaxed by an `#[allow]` in a file — so `w3d-kernel-occt`
+  opts out of the shared lint in its own `Cargo.toml`, which is a visible act in a reviewed file
+  rather than an attribute buried in a module. A second crate wanting `unsafe` is a design
+  conversation, not an edit.
+- **The C ABI header is the specification, not a convenience.** Every symbol
+  `kernel-occt/native/w3d_occt.h` declares is a symbol an Emscripten build has to keep alive
+  through `EMSCRIPTEN_KEEPALIVE`. It carries thirteen entry points because the trait has thirteen
+  methods. Declare there first, then implement in C++, then use from Rust — and never widen it to
+  "expose a bit more of OCCT".
 - **Arena slots are never reused.** Undo restores a node into the slot it came from, so a free
   list lets a later insert take a slot an undo still needs, and the undo then silently does
   nothing. This was written, shipped and reverted within one session; the cost is that an arena
@@ -140,14 +152,19 @@ used.
 | `make clippy` | `-D warnings`. There is no allow-list; a lint that has to be silenced gets an argument in a session file. |
 | `cargo test --workspace` | The document, history, selection and the arena's identity rules — driven against `w3d-kernel-fake`, with no OCCT, no browser and no `.wasm` anywhere. |
 | `w3d_kernel::conformance` | One suite, run against *every* backend, `FakeKernel` included. A backend is only a backend if it passes it, and this is what keeps the kernel decision reversible. |
-| `make wasm` | The workspace builds for `wasm32-unknown-unknown`. Nothing above the seam may acquire a host assumption without this failing. |
+| `make wasm` | The default members build for `wasm32-unknown-unknown`. Nothing above the seam may acquire a host assumption without this failing. |
+| `make test-occt` | The same conformance suite against **real geometry**, plus the document driven by OpenCASCADE. Not part of `make test`, because it needs OCCT installed; `w3d-kernel-occt` is excluded from the workspace's `default-members` so that `make test` stays a no-setup command. |
 
 Still owed, and named so that the gap is not mistaken for coverage:
 
 - **Fixture regression** — named solids in, golden topology out. The only defence against a
-  robustness fix breaking three cases to fix one. Needs a real kernel to be worth writing.
+  robustness fix breaking three cases to fix one. `kernel-occt/tests/document.rs` is the first
+  seed of it (a drilled plate is asserted at 7 faces, 15 edges, 10 vertices) but it is five cases,
+  not a suite, and none of them is degenerate.
 - **`wasm-pack test --headless`** — that the thing actually instantiates under COOP/COEP with
   threads. Needs `web/` to exist.
+- **An OCCT build for wasm.** `kernel-occt` compiles and passes natively; no Emscripten build
+  exists, and `-fwasm-exceptions` against `-fexceptions` has not been decided.
 
 **Prefer extending `w3d-kernel-fake` over mocking `core`.** A test that stubs the document proves
 nothing; one that stubs the kernel proves the whole modeller.

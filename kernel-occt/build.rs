@@ -1,0 +1,90 @@
+//! Compiles the C++ shim and links OpenCASCADE.
+//!
+//! Shells out to a compiler rather than using the `cc` crate, so that this
+//! workspace keeps its "no dependencies" property all the way down. The whole
+//! job is one translation unit and one archive; a build-dependency would buy
+//! cross-compiler detection we do not need until the Emscripten build exists,
+//! and that build will want its own path anyway.
+
+use std::env;
+use std::path::PathBuf;
+use std::process::Command;
+
+/// The OCCT toolkits this shim actually reaches into. Kept explicit and short
+/// for the same reason the header is: every one is a thing that has to be
+/// present, and in a wasm build, a thing that has to be compiled.
+const TOOLKITS: &[&str] = &[
+    "TKernel",
+    "TKMath",
+    "TKG2d",
+    "TKG3d",
+    "TKGeomBase",
+    "TKGeomAlgo",
+    "TKBRep",
+    "TKTopAlgo",
+    "TKPrim",
+    "TKBO",
+    "TKBool",
+    "TKMesh",
+    "TKShHealing",
+];
+
+fn main() {
+    println!("cargo:rerun-if-changed=native/w3d_occt.cpp");
+    println!("cargo:rerun-if-changed=native/w3d_occt.h");
+    println!("cargo:rerun-if-env-changed=OCCT_INCLUDE_DIR");
+    println!("cargo:rerun-if-env-changed=OCCT_LIB_DIR");
+
+    let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR"));
+    let include =
+        env::var("OCCT_INCLUDE_DIR").unwrap_or_else(|_| "/usr/include/opencascade".into());
+
+    if !PathBuf::from(&include)
+        .join("BRepPrimAPI_MakeBox.hxx")
+        .exists()
+    {
+        panic!(
+            "OpenCASCADE headers not found in {include}.\n\
+             Install them (Debian/Ubuntu: libocct-foundation-dev \
+             libocct-modeling-data-dev libocct-modeling-algorithms-dev) or set \
+             OCCT_INCLUDE_DIR.\n\
+             This crate is excluded from the workspace's default members, so \
+             `cargo test` does not need it; `cargo test -p w3d-kernel-occt` does."
+        );
+    }
+
+    let cxx = env::var("CXX").unwrap_or_else(|_| "c++".into());
+    let object = out_dir.join("w3d_occt.o");
+
+    run(
+        Command::new(&cxx)
+            .args(["-std=c++17", "-O2", "-fPIC", "-c"])
+            .arg("native/w3d_occt.cpp")
+            .arg("-I")
+            .arg(&include)
+            .arg("-o")
+            .arg(&object),
+        &cxx,
+    );
+
+    let archive = out_dir.join("libw3d_occt.a");
+    let ar = env::var("AR").unwrap_or_else(|_| "ar".into());
+    run(Command::new(&ar).arg("rcs").arg(&archive).arg(&object), &ar);
+
+    println!("cargo:rustc-link-search=native={}", out_dir.display());
+    println!("cargo:rustc-link-lib=static=w3d_occt");
+    if let Ok(lib_dir) = env::var("OCCT_LIB_DIR") {
+        println!("cargo:rustc-link-search=native={lib_dir}");
+    }
+    for tk in TOOLKITS {
+        println!("cargo:rustc-link-lib=dylib={tk}");
+    }
+    println!("cargo:rustc-link-lib=dylib=stdc++");
+}
+
+fn run(cmd: &mut Command, what: &str) {
+    let status = cmd
+        .status()
+        .unwrap_or_else(|e| panic!("could not run {what}: {e}"));
+    assert!(status.success(), "{what} failed: {status}");
+}

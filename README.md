@@ -6,11 +6,12 @@ WebAssembly and on the desktop from the same Rust core.
 
 **GPL-3.0-or-later.**
 
-The seam and the document are built and tested; no real kernel is chosen yet.
+The seam, the document and an OpenCASCADE backend are built and tested. There is no viewport yet.
 
 ```
-make test     # check, clippy -D warnings, and the workspace tests
-make wasm     # the same code, built for wasm32-unknown-unknown
+make test       # check, clippy -D warnings, and the tests — no setup needed
+make wasm       # the same code, built for wasm32-unknown-unknown
+make test-occt  # the conformance suite against real geometry (needs OCCT)
 ```
 
 What to read:
@@ -20,3 +21,5 @@ What to read:
 - [SESSIONS/](SESSIONS/) — the record. `*.md` is open, `*.completed.md` is finished.
 - [`kernel/src/lib.rs`](kernel/src/lib.rs) — the contract, and the two properties of it that
   everything above depends on.
+- [`kernel-occt/native/w3d_occt.h`](kernel-occt/native/w3d_occt.h) — the C ABI, which is the
+  specification of what an OpenCASCADE build must export.

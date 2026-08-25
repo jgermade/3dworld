@@ -18,8 +18,9 @@
 │         + conformance: one suite, every backend                     │
 │                                                                     │
 │   w3d-kernel-fake  no geometry, full contract — drives the tests  ✅ │
-│   kernel/occt/     OpenCASCADE, built by Emscripten               ⬜ │
-│   kernel/native/   ours, or truck — swapped in behind the trait   ⬜ │
+│   w3d-kernel-occt  OpenCASCADE through a 13-entry C ABI           ✅ │
+│     └ native build ✅   Emscripten build ⬜                          │
+│   kernel-native/   ours, or truck — swapped in behind the trait   ⬜ │
 └─────────────────────────────────────────────────────────────────────┘
         │                                                     │
         ▼                                                     ▼
@@ -81,4 +82,5 @@ the parts wasm constrains.
 | Graphics | `wgpu` — WebGPU where present, WebGL2 fallback |
 | Kernel | OpenCASCADE (LGPL-2.1-only, taken to GPL-3 via its §3) behind `GeometryKernel` |
 | Licence | GPL-3.0-or-later — see AGENTS.md § Licensing |
-| Emscripten | pinned here once `kernel/occt/` exists |
+| OpenCASCADE | 7.6.3 (Ubuntu Noble); no version is pinned yet, and one should be |
+| Emscripten | not yet — the OCCT wasm build does not exist |

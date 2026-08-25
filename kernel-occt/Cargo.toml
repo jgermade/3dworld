@@ -1,0 +1,22 @@
+[package]
+name = "w3d-kernel-occt"
+description = "The OpenCASCADE backend. The only crate in this workspace that contains unsafe."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+build = "build.rs"
+links = "w3d_occt"
+
+[dependencies]
+w3d-kernel = { path = "../kernel" }
+
+# Deliberately NOT `[lints] workspace = true`. The workspace forbids unsafe,
+# and `forbid` cannot be relaxed by a crate that inherits it — which is the
+# point: unsafe exists in exactly one crate, the FFI boundary, and opting out
+# of the shared lint is a visible act rather than an `#[allow]` buried in a file.
+[dev-dependencies]
+w3d-core = { path = "../core" }
+
+[lints.rust]
+unsafe_code = "allow"
