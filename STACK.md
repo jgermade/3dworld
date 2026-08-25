@@ -10,9 +10,10 @@
 ┌─────────────────────────────────────────────────────────────────────┐
 │  3dworld                                                            │
 │                                                                     │
-│   the modeller                     app/        egui or a TS shell ⬜ │
+│   the modeller                     app/        egui over wgpu     ⬜ │
 │     document · undo · selection    w3d-core                       ✅ │
 │     tessellation cache             w3d-core                       ✅ │
+│     viewport · camera · picking    w3d-render                     ✅ │
 │                                                                     │
 │   ═════ w3d_kernel::GeometryKernel ═════  the seam, and the spec  ✅ │
 │         + conformance: one suite, every backend                     │
@@ -77,10 +78,10 @@ the parts wasm constrains.
 | --- | --- |
 | Rust | 1.94.1 stable, edition 2024; `unsafe_code = "forbid"` workspace-wide |
 | Targets | `x86_64-unknown-linux-gnu` and `wasm32-unknown-unknown`, both checked; `+simd128` checked |
-| Dependencies | **none.** The three crates depend on each other and on nothing else. |
+| Dependencies | **one, and it is `wgpu` 30** (MIT OR Apache-2.0), taken by `w3d-render` and declared per target with `default-features = false`. The four crates above the viewport still depend on each other and on nothing else. |
 | Threads | `wasm-bindgen-rayon`, `+atomics,+bulk-memory,+mutable-globals`, nightly for `build-std` |
-| Graphics | `wgpu` — WebGPU where present, WebGL2 fallback |
+| Graphics | `wgpu` 30 — WebGPU where present, WebGL2 fallback. Both compiled for wasm; only WebGPU-class backends have been *run*, and those under lavapipe. The wasm feature is `webgl`, **not** `gles`; `gles` is the native GL backend and silently does nothing on wasm32. |
 | Kernel | OpenCASCADE (LGPL-2.1-only, taken to GPL-3 via its §3) behind `GeometryKernel` |
 | Licence | GPL-3.0-or-later — see AGENTS.md § Licensing |
-| OpenCASCADE | 7.6.3 (Ubuntu Noble); no version is pinned yet, and one should be |
+| OpenCASCADE | 7.6.3 (Ubuntu Noble), recorded in `kernel-occt/native/UPSTREAM`. That file names a version; it does not enforce one — the build takes whatever the system has. A real pin arrives with the Emscripten build. Noble's `libocct-foundation-dev` is missing a header: `make occt-headers`. |
 | Emscripten | not yet — the OCCT wasm build does not exist |

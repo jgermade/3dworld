@@ -1,0 +1,47 @@
+[package]
+name = "w3d-render"
+description = "The viewport: wgpu over WebGPU, Vulkan and Metal, and a WebGL2 fallback that says what it cost."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+w3d-kernel = { path = "../kernel", default-features = false }
+
+# The first third-party dependency this workspace has taken, and it is declared
+# per target rather than once: the backend list *is* the platform decision, and
+# a default-features build would silently pull in backends neither column uses.
+# MIT OR Apache-2.0, which is compatible with GPL-3.0-or-later.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+wgpu = { version = "30", default-features = false, features = [
+    "std",
+    "wgsl",
+    "parking_lot",
+    "vulkan",
+    "metal",
+    "dx12",
+] }
+
+# `webgl` is the WebGL2 fallback, and the feature name is a trap worth a
+# comment: `gles` is the *native* OpenGL backend and does nothing at all on
+# `wasm32-unknown-unknown`, so a build that asks for it compiles, type-checks,
+# and ships with no fallback. See the session file.
+#
+# WebGL2 has no compute shaders — `Capabilities::compute` is how a caller finds
+# out which of the two it landed on.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wgpu = { version = "30", default-features = false, features = [
+    "std",
+    "wgsl",
+    "webgpu",
+    "webgl",
+] }
+
+[dev-dependencies]
+w3d-core = { path = "../core" }
+w3d-kernel-fake = { path = "../kernel-fake" }
+pollster = "0.4"
+
+[lints]
+workspace = true

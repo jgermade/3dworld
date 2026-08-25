@@ -6,13 +6,20 @@ WebAssembly and on the desktop from the same Rust core.
 
 **GPL-3.0-or-later.**
 
-The seam, the document and an OpenCASCADE backend are built and tested. There is no viewport yet.
+The seam, the document, an OpenCASCADE backend and the viewport are built and tested. Nothing
+presents to a window or a canvas yet: `w3d-render` draws into textures, and the application shell
+that owns a surface does not exist.
 
 ```
 make test       # check, clippy -D warnings, and the tests — no setup needed
 make wasm       # the same code, built for wasm32-unknown-unknown
-make test-occt  # the conformance suite against real geometry (needs OCCT)
+make test-occt  # real geometry, and a click that names a face (needs OCCT)
 ```
+
+`w3d-render`'s tests need a graphics adapter. Without one they **skip**, printing `SKIPPED:` and
+the reason — so a green `make test` on a machine with no GPU is not evidence the viewport works.
+Run `cargo test -p w3d-render -- --nocapture` to see which happened. A software rasteriser is
+enough: `apt install mesa-vulkan-drivers` gets lavapipe.
 
 ## Building the OpenCASCADE backend
 
@@ -44,9 +51,10 @@ What to read:
 
 - [STACK.md](STACK.md) — the shape, and every choice with what forced it.
 - [AGENTS.md](AGENTS.md) — conventions, and the rules that are not style.
-- [SESSIONS/](SESSIONS/) — the record. `*.md` is open, `*.completed.md` is finished. **The plan
-  is `## The pending register` at the end of the open file**; the `Next` blocks above it are
-  superseded and kept for the order things became pending in.
+- [SESSIONS/](SESSIONS/) — the record. `*.md` is open, `*.completed.md` is finished. **The plan is
+  `## The pending register` at the end of the newest file**; there is exactly one live register
+  across the folder, and every `Next` block above it is superseded and kept only for the order in
+  which things became pending.
 - [`kernel/src/lib.rs`](kernel/src/lib.rs) — the contract, and the two properties of it that
   everything above depends on.
 - [`kernel-occt/native/w3d_occt.h`](kernel-occt/native/w3d_occt.h) — the C ABI, which is the

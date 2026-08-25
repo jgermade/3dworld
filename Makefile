@@ -49,12 +49,22 @@ fmt:
 fmt-check:
 	$(CARGO) fmt --all --check
 
-## The seam survives the target it exists for. `w3d-core` and the kernel
-## contract must build for wasm with no host assumptions; nothing here needs a
-## browser, because nothing above the seam does.
+## The seam survives the target it exists for: `w3d-core` and the kernel
+## contract must build for wasm with no host assumption having crept in. It is
+## still only a type-check — nothing is instantiated, because there is no
+## `web/` yet.
+##
+## The second command is not one. The WebGL2 fallback is one feature name away
+## from not being in the build at all, and asking for the wrong one still
+## compiles: `gles` is the *native* GL backend and does nothing on wasm32.
+## `glow` in the dependency tree is the evidence that the fallback is there.
 wasm:
 	rustup target add $(WASM_TARGET)
 	$(CARGO) check --target $(WASM_TARGET)
+	@$(CARGO) tree -p w3d-render --target $(WASM_TARGET) -e normal \
+	    | grep -q glow \
+	    || (echo "the wasm build has no WebGL2 fallback: glow is not in the \
+tree. Check render/Cargo.toml's wgpu features."; exit 1)
 
 doc:
 	$(CARGO) doc --workspace --no-deps

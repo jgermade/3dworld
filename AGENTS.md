@@ -49,6 +49,18 @@ A file is only closed when its `Next` is empty. If part of the work is being aba
 than finished, say so in the walkthrough — an abandoned item closed quietly is indistinguishable
 from a forgotten one.
 
+### The plan is the last register, not the last `Next`
+
+A `Next` block records what was pending *when that session ended*, and a file with four of them is
+a plan a reader has to reconstruct. When a file's `Next` blocks have accumulated, close them with a
+single `## The pending register` that says out loud which registers and `Next` blocks it
+supersedes, and gather into it what the `Next` blocks never held — the owed work named in
+`Loose ends, deliberately left` and in the second half of `Verified, and not`.
+
+There is exactly one live register across the whole of `SESSIONS/` at any time. When a new file
+takes it over, the old file gets a one-paragraph extension saying so and pointing at the new one.
+Everything above stays standing: the order in which things became pending is part of the record.
+
 ### Always append, never rewrite
 
 Extensions are `## Extension · <date> · <summary>`, corrections are `### Correction · …`. When a
@@ -81,8 +93,10 @@ core/          w3d-core         document · history/undo · selection ·        
 kernel-occt/   w3d-kernel-occt  the OpenCASCADE backend: a C ABI of thirteen    ✅ native
                                 entry points, and the Rust side of it            ⬜ wasm
 
+render/        w3d-render       wgpu: capability detection, mesh upload,        ✅ built
+                                camera, and ID-buffer picking                    ⬜ WebGL2 untried
+
 kernel-native/                  a kernel of our own, or truck                    ⬜
-render/                         wgpu — WebGPU, WebGL2 fallback with no compute   ⬜
 app/                            the modeller; native and web from one source     ⬜
 web/                            the loader: feature probe, dispatch, COOP/COEP   ⬜
 ```
@@ -136,6 +150,19 @@ used.
   through `EMSCRIPTEN_KEEPALIVE`. It carries thirteen entry points because the trait has thirteen
   methods. Declare there first, then implement in C++, then use from Rust — and never widen it to
   "expose a bit more of OCCT".
+- **What the machine can do is read, not assumed — and a capability cannot report a backend that
+  is not in the binary.** `Capabilities` is built from the adapter, never from `cfg!`, because a
+  web build compiled with both backends can land on WebGPU or on WebGL2 and there is no way to
+  know which until it has. That covers the runtime half. The build half is not something a probe
+  can see: wgpu's `gles` feature is the *native* GL backend and does nothing on wasm32, so asking
+  for it instead of `webgl` compiles, type-checks and ships with no fallback at all. `make wasm`
+  greps the tree for `glow` for that reason. A degradation nobody can name is a bug report about
+  performance six months later.
+- **Dependencies are declared per target, with `default-features = false` and the backend list
+  spelled out.** This workspace had none until `w3d-render`, and the first one is where the habit
+  gets set: the enabled backend list *is* the platform decision in STACK.md, and a
+  default-features build hides it in a lockfile. The licence rule below is not the only reason to
+  read a dependency's feature table.
 - **Arena slots are never reused.** Undo restores a node into the slot it came from, so a free
   list lets a later insert take a slot an undo still needs, and the undo then silently does
   nothing. This was written, shipped and reverted within one session; the cost is that an arena
@@ -152,8 +179,9 @@ used.
 | `make clippy` | `-D warnings`. There is no allow-list; a lint that has to be silenced gets an argument in a session file. |
 | `cargo test --workspace` | The document, history, selection and the arena's identity rules — driven against `w3d-kernel-fake`, with no OCCT, no browser and no `.wasm` anywhere. |
 | `w3d_kernel::conformance` | One suite, run against *every* backend, `FakeKernel` included. A backend is only a backend if it passes it, and this is what keeps the kernel decision reversible. |
-| `make wasm` | The default members build for `wasm32-unknown-unknown`. Nothing above the seam may acquire a host assumption without this failing. |
-| `make test-occt` | The same conformance suite against **real geometry**, plus the document driven by OpenCASCADE. Not part of `make test`, because it needs OCCT installed; `w3d-kernel-occt` is excluded from the workspace's `default-members` so that `make test` stays a no-setup command. |
+| `make wasm` | The default members build for `wasm32-unknown-unknown`, **and the WebGL2 backend is really in the tree**. Nothing above the seam may acquire a host assumption without the first half failing; the second half exists because asking wgpu for `gles` instead of `webgl` compiles cleanly and ships no fallback at all. |
+| `make test-occt` | The same conformance suite against **real geometry**, plus the document driven by OpenCASCADE, plus the only end-to-end test there is: real geometry through the real viewport, and a click that names a face. Not part of `make test`, because it needs OCCT installed; `w3d-kernel-occt` is excluded from the workspace's `default-members` so that `make test` stays a no-setup command. |
+| `make occt-headers` | Not a check. Fetches headers a distribution failed to ship, at the revision in `kernel-occt/native/UPSTREAM` — needed on Ubuntu Noble. Deliberately not run from `build.rs`: a build that reaches the network on its own is not a build anybody can reproduce. |
 
 Still owed, and named so that the gap is not mistaken for coverage:
 
@@ -163,6 +191,12 @@ Still owed, and named so that the gap is not mistaken for coverage:
   not a suite, and none of them is degenerate.
 - **`wasm-pack test --headless`** — that the thing actually instantiates under COOP/COEP with
   threads. Needs `web/` to exist.
+- **A GPU in CI.** `w3d-render`'s tests need an adapter and *skip*, printing `SKIPPED:`, when there
+  is none — and `cargo test` then reports `ok`. They pass here against lavapipe, Mesa's software
+  rasteriser. Until CI has one, a green run is not evidence the viewport works.
+- **WebGL2 has never been run.** It is compiled and asserted present. Every claim about the
+  fallback — `Rg32Uint` as a render target, the scissored pick, the downlevel limits — is an
+  argument until a browser has executed it.
 - **An OCCT build for wasm.** `kernel-occt` compiles and passes natively; no Emscripten build
   exists, and `-fwasm-exceptions` against `-fexceptions` has not been decided.
 
