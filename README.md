@@ -14,6 +14,27 @@ make wasm       # the same code, built for wasm32-unknown-unknown
 make test-occt  # the conformance suite against real geometry (needs OCCT)
 ```
 
+## Building the OpenCASCADE backend
+
+Only needed for `make test-occt`; everything else builds with a bare Rust toolchain.
+
+```sh
+apt install libocct-foundation-dev libocct-modeling-data-dev libocct-modeling-algorithms-dev
+```
+
+`OCCT_INCLUDE_DIR` and `OCCT_LIB_DIR` override discovery if your headers are elsewhere.
+
+**On Ubuntu 24.04 (Noble) that package is broken** and the compiler error points nowhere useful.
+`libocct-foundation-dev` 7.6.3+dfsg1-7.1build1 ships `Poly_ArrayOfNodes.hxx`, which includes
+`NCollection_AliasedArray.hxx`, which it does not ship — so every translation unit that reaches
+`Poly_Triangulation` fails, and that is all of modelling. There is no other version in the
+archive. Take the header from upstream at the matching tag:
+
+```sh
+sudo curl -o /usr/include/opencascade/NCollection_AliasedArray.hxx \
+  https://raw.githubusercontent.com/Open-Cascade-SAS/OCCT/V7_6_3/src/NCollection/NCollection_AliasedArray.hxx
+```
+
 What to read:
 
 - [STACK.md](STACK.md) — the shape, and every choice with what forced it.
