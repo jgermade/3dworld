@@ -28,12 +28,17 @@ apt install libocct-foundation-dev libocct-modeling-data-dev libocct-modeling-al
 `libocct-foundation-dev` 7.6.3+dfsg1-7.1build1 ships `Poly_ArrayOfNodes.hxx`, which includes
 `NCollection_AliasedArray.hxx`, which it does not ship — so every translation unit that reaches
 `Poly_Triangulation` fails, and that is all of modelling. There is no other version in the
-archive. Take the header from upstream at the matching tag:
+archive.
 
 ```sh
-sudo curl -o /usr/include/opencascade/NCollection_AliasedArray.hxx \
-  https://raw.githubusercontent.com/Open-Cascade-SAS/OCCT/V7_6_3/src/NCollection/NCollection_AliasedArray.hxx
+make occt-headers
 ```
+
+fetches the missing header from upstream at the tag in
+[`kernel-occt/native/UPSTREAM`](kernel-occt/native/UPSTREAM), into a gitignored
+`kernel-occt/native/vendor-include/` that the build puts *after* the system include path. Nothing
+is committed — the file is OCCT's, LGPL-2.1. `build.rs` detects this exact case and says so,
+rather than leaving you with forty lines of include trace.
 
 What to read:
 

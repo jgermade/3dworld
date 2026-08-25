@@ -22,6 +22,24 @@ check:
 test-occt:
 	$(CARGO) test -p w3d-kernel-occt
 
+## Fetches the headers a distribution failed to ship, at the revision in
+## kernel-occt/native/UPSTREAM. Needed on Ubuntu Noble, whose
+## libocct-foundation-dev is missing NCollection_AliasedArray.hxx — see the
+## note there. Nothing is committed: the files are OCCT's, LGPL-2.1.
+##
+## Separate from the build on purpose. A build script that fetches from the
+## network on its own is not a build anybody can reproduce.
+OCCT_TAG ?= V7_6_3
+OCCT_RAW := https://raw.githubusercontent.com/Open-Cascade-SAS/OCCT/$(OCCT_TAG)/src
+VENDOR := kernel-occt/native/vendor-include
+
+.PHONY: occt-headers
+occt-headers:
+	mkdir -p $(VENDOR)
+	curl -sSfL -o $(VENDOR)/NCollection_AliasedArray.hxx \
+	    $(OCCT_RAW)/NCollection/NCollection_AliasedArray.hxx
+	@echo "fetched into $(VENDOR) at $(OCCT_TAG); these files are OCCT's, LGPL-2.1"
+
 clippy:
 	$(CARGO) clippy --all-targets -- -D warnings
 
