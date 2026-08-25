@@ -195,4 +195,40 @@ pub trait GeometryKernel {
     fn bounds(&self, body: Body) -> Result<Aabb>;
 
     fn tessellate(&self, body: Body, quality: Quality) -> Result<Mesh>;
+
+    // ---- persistence --------------------------------------------------
+    //
+    // A `Body` is a handle into a backend, so a document cannot be saved by
+    // writing its handles down. These three are how geometry leaves and
+    // re-enters a kernel, and they are the narrowest widening that makes a
+    // file possible.
+    //
+    // What they are deliberately **not** is an interchange format. The bytes
+    // are the backend's own — OCCT writes BREP — and another backend must
+    // refuse them rather than guess. That is why `geometry_format` exists and
+    // why a file records it: a document written by one kernel and opened by
+    // another fails with a sentence, instead of silently producing wrong
+    // geometry. Moving between kernels is what STEP is for.
+
+    /// Names the format [`GeometryKernel::save_body`] writes, for a file to
+    /// record so that a different backend can refuse it.
+    ///
+    /// A short stable identifier with a version in it, like `occt-brep-1`.
+    /// Changing what `save_body` produces means changing this, and a backend
+    /// that does not keep that promise breaks every file anyone has saved.
+    fn geometry_format(&self) -> &'static str;
+
+    /// Serialises one body into bytes only this kernel need understand.
+    ///
+    /// Lossless: `load_body` on the result must produce a body with the same
+    /// topology and the same bounds, which is what `conformance` checks.
+    fn save_body(&self, body: Body) -> Result<Vec<u8>>;
+
+    /// The inverse, producing a new body.
+    ///
+    /// Returns [`KernelError::Unsupported`] for bytes this kernel does not
+    /// recognise and [`KernelError::Failed`] for its own bytes that are
+    /// damaged — a caller can tell "wrong kernel" from "broken file", and a
+    /// user deserves to know which.
+    fn load_body(&mut self, bytes: &[u8]) -> Result<Body>;
 }

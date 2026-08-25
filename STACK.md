@@ -12,6 +12,7 @@
 │                                                                     │
 │   the modeller                     w3d-app     egui over wgpu     ✅ │
 │     document · undo · selection    w3d-core                       ✅ │
+│     the .w3d file · FORMAT.md      w3d-format                     ✅ │
 │     tessellation cache             w3d-core                       ✅ │
 │     viewport · camera · picking    w3d-render                     ✅ │
 │     the loader, and a canvas       w3d-web                        ✅ │
@@ -51,6 +52,7 @@ the parts wasm constrains.
 | **`egui`, not a DOM framework** | In a modeller the UI is not the viewport, and that is what decides it. On the web a DOM shell composes fine around a `<canvas>`; on the desktop, any DOM framework is a webview, and compositing a native wgpu surface with a webview has only two answers — a transparent overlay whose mouse events fight the viewport's, or blitting frames into the webview at unusable latency. egui draws the chrome as GPU geometry in the same pass as the scene: one surface, one loop, nothing to composite. Blender, Fusion and Plasticity all land here. Dioxus was the strongest candidate against it and fails on exactly this; keep it in mind for auxiliary surfaces that composite with nothing. |
 | **The kernel stays on the CPU** | WGSL has no `f64`. The GPU takes display tessellation and LOD, BVH build, culling, ID-buffer picking, silhouette and edge extraction, instance transforms. It does not take anything whose correctness is numerical. |
 | **SIMD128 as the baseline, threads as the branch** | `+simd128` is universal since Safari 16.4, so it is not worth a variant. Threads are: they need `SharedArrayBuffer`, which needs COOP/COEP, which depends on the host's headers rather than the user's hardware. That is the one axis the loader really has to probe. |
+| **A native `.w3d`, and STEP for everything else** | No existing format holds a graph of nodes with names, visibility and a document tolerance — Fusion's `.f3d` is undocumented and its geometry is proprietary ASM, and FreeCAD's `.FCStd` is a parametric feature tree we do not have. So the native file is ours and specified in `FORMAT.md`, and it is a zip so that `unzip -l` works. Interchange is **STEP**, which reaches Fusion, FreeCAD, SolidWorks and Onshape with one implementation; writing anyone else's native format would be a second implementation to reach somewhere STEP already goes. |
 | **Arena + `u32` index everywhere** | Forced by the sharding above — a pointer means nothing in another worker's heap. It also halves node size, and it is what undo, serialisation and stable entity IDs want independently. |
 
 ## Consequences a host has to know about

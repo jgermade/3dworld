@@ -20,6 +20,24 @@ const ERR_UNKNOWN_BODY: i32 = 1;
 const ERR_DEGENERATE: i32 = 2;
 const ERR_UNSUPPORTED: i32 = 3;
 
+/// Serialised geometry owned by the C++ side until `w3d_occt_bytes_free`.
+#[repr(C)]
+struct RawBytes {
+    data: *const u8,
+    len: u32,
+    owner: *mut core::ffi::c_void,
+}
+
+impl RawBytes {
+    const fn empty() -> Self {
+        Self {
+            data: core::ptr::null(),
+            len: 0,
+            owner: core::ptr::null_mut(),
+        }
+    }
+}
+
 #[repr(C)]
 struct RawMesh {
     positions: *const f32,
@@ -74,6 +92,9 @@ unsafe extern "C" {
         out: *mut RawMesh,
     ) -> i32;
     fn w3d_occt_mesh_free(mesh: *mut RawMesh);
+    fn w3d_occt_save_body(ctx: *mut Context, body: u32, out: *mut RawBytes) -> i32;
+    fn w3d_occt_load_body(ctx: *mut Context, data: *const u8, len: u32, out: *mut u32) -> i32;
+    fn w3d_occt_bytes_free(bytes: *mut RawBytes);
     fn w3d_occt_last_error() -> *const c_char;
     fn w3d_occt_live_bodies(ctx: *const Context) -> u32;
 }
@@ -266,6 +287,48 @@ impl GeometryKernel for OcctKernel {
         };
         unsafe { w3d_occt_mesh_free(&mut raw) };
         Ok(mesh)
+    }
+
+    fn geometry_format(&self) -> &'static str {
+        // Versioned, because it is a promise about bytes on somebody's disk.
+        // The `1` moves if what BRepTools::Write produces here ever changes
+        // shape — an OCCT major version is the likely cause.
+        "occt-brep-1"
+    }
+
+    fn save_body(&self, body: Body) -> Result<Vec<u8>> {
+        let mut raw = RawBytes::empty();
+        // SAFETY: the shim writes `raw` only on OK, and the buffer it points
+        // at lives until `w3d_occt_bytes_free`. Everything is copied first, so
+        // no borrowed memory escapes.
+        let code = unsafe { w3d_occt_save_body(self.ctx, body.raw(), &mut raw) };
+        check(code, body)?;
+        let bytes = unsafe { core::slice::from_raw_parts(raw.data, raw.len as usize) }.to_vec();
+        unsafe { w3d_occt_bytes_free(&mut raw) };
+        Ok(bytes)
+    }
+
+    fn load_body(&mut self, bytes: &[u8]) -> Result<Body> {
+        let mut out = 0u32;
+        // SAFETY: the pointer and length describe `bytes`, which outlives the
+        // call; the shim copies before returning.
+        let code = unsafe {
+            w3d_occt_load_body(
+                self.ctx,
+                bytes.as_ptr(),
+                u32::try_from(bytes.len()).unwrap_or(u32::MAX),
+                &mut out,
+            )
+        };
+        match code {
+            ERR_UNSUPPORTED => Err(KernelError::Unsupported(
+                "these bytes are not OpenCASCADE BREP",
+            )),
+            other => {
+                check_new(other)?;
+                Ok(Body::from_raw(out))
+            }
+        }
     }
 }
 

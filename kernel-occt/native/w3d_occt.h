@@ -2,8 +2,9 @@
  *
  * This header is the specification of what an OpenCASCADE build must keep
  * exported, and it is deliberately the same shape as `GeometryKernel`:
- * thirteen entry points, one per trait method, plus two for moving a mesh
- * across and one for the error text. It is not bindings for OCCT — nothing
+ * sixteen entry points, one per trait method, plus two for moving a mesh
+ * across, one for moving serialised geometry across, and one for the error
+ * text. It is not bindings for OCCT — nothing
  * here exposes a TopoDS_Shape, a Handle or a Standard_Real, so nothing above
  * it can start depending on OCCT's vocabulary.
  *
@@ -96,6 +97,27 @@ int32_t w3d_occt_bounds(W3dOcctContext *ctx, uint32_t body, double *out6);
 int32_t w3d_occt_tessellate(W3dOcctContext *ctx, uint32_t body, double sag,
                             double angle, W3dOcctMesh *out);
 void w3d_occt_mesh_free(W3dOcctMesh *mesh);
+
+/* Serialised geometry, owned by the C++ side until w3d_occt_bytes_free.
+ *
+ * These bytes are OCCT's BREP format and nothing above the seam interprets
+ * them: a document records that they are `occt-brep-1` and a different backend
+ * refuses them. Moving geometry *between* kernels is what STEP is for, and
+ * STEP is not this. */
+typedef struct {
+  const uint8_t *data;
+  uint32_t len;
+  void *owner; /* opaque; pass the struct back to bytes_free */
+} W3dOcctBytes;
+
+int32_t w3d_occt_save_body(W3dOcctContext *ctx, uint32_t body, W3dOcctBytes *out);
+
+/* Returns W3D_OCCT_ERR_UNSUPPORTED when the bytes are not BREP at all, and
+ * W3D_OCCT_ERR_FAILED when they are BREP and damaged — the caller can tell
+ * "wrong kernel" from "broken file", and a user deserves to know which. */
+int32_t w3d_occt_load_body(W3dOcctContext *ctx, const uint8_t *data, uint32_t len, uint32_t *out);
+
+void w3d_occt_bytes_free(W3dOcctBytes *bytes);
 
 /* The message behind the last W3D_OCCT_ERR_FAILED, for a log. Never for a
  * caller to match on. Valid until the next call on this thread. */

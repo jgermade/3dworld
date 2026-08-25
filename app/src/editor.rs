@@ -7,6 +7,8 @@
 //! live here and are asserted here. The shell translates events into
 //! [`Input`] and [`Command`] and does what [`Reaction`] tells it.
 
+use std::path::{Path, PathBuf};
+
 use w3d_core::kernel::{BooleanOp, GeometryKernel, Vec3};
 use w3d_core::{Document, NodeId};
 use w3d_render::{Camera, Pick};
@@ -25,6 +27,10 @@ pub enum Command {
     ClearSelection,
     SelectAll,
     ZoomToFit,
+    /// Writes to the path the document was last saved to or opened from.
+    /// Without one, the shell has to ask — which it does by treating this as
+    /// `SaveAs` with a default name.
+    Save,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -85,6 +91,9 @@ struct Drag {
 
 pub struct Editor<K: GeometryKernel> {
     doc: Document<K>,
+    /// Where this document came from and where `Save` writes. `None` for one
+    /// that has never been saved.
+    path: Option<PathBuf>,
     camera: Camera,
     drag: Option<Drag>,
     viewport: (u32, u32),
@@ -97,6 +106,7 @@ impl<K: GeometryKernel> Editor<K> {
     pub fn new(kernel: K) -> Self {
         Self {
             doc: Document::new(kernel),
+            path: None,
             camera: Camera::default(),
             drag: None,
             viewport: (1, 1),
@@ -261,6 +271,7 @@ impl<K: GeometryKernel> Editor<K> {
                 }
                 Ok(format!("selected {}", ids.len()))
             }
+            Command::Save => self.save(None),
             Command::ZoomToFit => {
                 let bounds = self.doc.visible_bounds();
                 if bounds.is_empty() {
@@ -275,6 +286,55 @@ impl<K: GeometryKernel> Editor<K> {
             Ok(message) => message,
             Err(message) => message,
         };
+    }
+
+    // ---- files --------------------------------------------------------
+
+    pub fn path(&self) -> Option<&Path> {
+        self.path.as_deref()
+    }
+
+    /// Saves to `path`, or to wherever this document already lives.
+    ///
+    /// The path is remembered on success only. A failed save must not make the
+    /// next `Save` write somewhere the last one did not reach.
+    pub fn save(&mut self, path: Option<PathBuf>) -> Result<String, String> {
+        let target = match path.or_else(|| self.path.clone()) {
+            Some(path) => path,
+            None => PathBuf::from("untitled.w3d"),
+        };
+        let bytes = w3d_format::save(&self.doc).map_err(|e| format!("could not save: {e}"))?;
+        std::fs::write(&target, bytes)
+            .map_err(|e| format!("could not write {}: {e}", target.display()))?;
+        let message = format!("saved {}", target.display());
+        self.path = Some(target);
+        self.status = message.clone();
+        Ok(message)
+    }
+
+    /// Replaces the document with one read from `path`.
+    ///
+    /// Takes the kernel by argument because `w3d_format::load` builds a
+    /// document *around* a kernel: the bodies in a file mean nothing to the
+    /// kernel currently loaded, so opening is a replacement rather than a
+    /// merge.
+    pub fn open(&mut self, path: PathBuf, kernel: K) -> Result<String, String> {
+        let bytes =
+            std::fs::read(&path).map_err(|e| format!("could not read {}: {e}", path.display()))?;
+        let doc = w3d_format::load(kernel, &bytes).map_err(|e| e.to_string())?;
+        self.doc = doc;
+        self.drag = None;
+        self.camera = Camera::default();
+        self.camera.fit(&self.doc.visible_bounds());
+        let bodies = self.doc.len();
+        let message = format!(
+            "opened {} — {bodies} {}",
+            path.display(),
+            if bodies == 1 { "body" } else { "bodies" }
+        );
+        self.path = Some(path);
+        self.status = message.clone();
+        Ok(message)
     }
 
     fn add(
@@ -530,6 +590,60 @@ mod tests {
         assert_eq!(e.selection().len(), 2);
         e.run(Command::Boolean(BooleanOp::Difference));
         assert_eq!(e.document().len(), 1, "{}", e.status());
+    }
+
+    #[test]
+    fn saving_remembers_where_and_opening_replaces_everything() {
+        let dir = std::env::temp_dir().join(format!("w3d-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("doc.w3d");
+
+        let mut e = editor();
+        e.run(Command::AddBox);
+        e.run(Command::AddSphere);
+        assert!(e.path().is_none(), "nothing has been saved yet");
+        e.save(Some(path.clone())).unwrap();
+        assert_eq!(e.path(), Some(path.as_path()));
+
+        // A second `Save` goes to the same place without being told.
+        e.run(Command::AddCylinder);
+        e.run(Command::Save);
+        assert!(e.status().starts_with("saved"), "{}", e.status());
+
+        let mut other = editor();
+        other.run(Command::AddBox);
+        other.open(path.clone(), FakeKernel::default()).unwrap();
+        assert_eq!(
+            other.document().len(),
+            3,
+            "the opened document replaced, not merged"
+        );
+        assert_eq!(other.path(), Some(path.as_path()));
+        // Opening frames what was opened, or the file appears to be empty.
+        assert!(other.camera().distance > 0.0);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn opening_something_that_is_not_a_document_leaves_the_document_alone() {
+        let dir = std::env::temp_dir().join(format!("w3d-bad-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("nonsense.w3d");
+        std::fs::write(&path, b"this is not a zip").unwrap();
+
+        let mut e = editor();
+        e.run(Command::AddBox);
+        let err = e.open(path, FakeKernel::default()).unwrap_err();
+        assert!(err.contains("zip"), "{err}");
+        assert_eq!(
+            e.document().len(),
+            1,
+            "a failed open destroyed the document"
+        );
+        assert!(e.path().is_none(), "a failed open claimed a path");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -1,0 +1,22 @@
+[package]
+name = "w3d-format"
+description = "The document on disk: a zip of a manifest and one geometry blob per body."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+w3d-core = { path = "../core" }
+# JSON, because a file format wants escaping rules somebody else already got
+# right. This crate exists so that `w3d-core` keeps its no-dependency property:
+# the document does not know what a file is, and the format does not know what
+# a GPU is.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+w3d-kernel-fake = { path = "../kernel-fake" }
+
+[lints]
+workspace = true

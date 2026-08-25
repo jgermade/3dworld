@@ -255,4 +255,137 @@ impl GeometryKernel for FakeKernel {
         let bounds = self.get(body)?.bounds();
         Ok(tessellate_box(&bounds, subdivisions(&bounds, quality)))
     }
+
+    fn geometry_format(&self) -> &'static str {
+        FORMAT
+    }
+
+    fn save_body(&self, body: Body) -> Result<Vec<u8>> {
+        let mut out = MAGIC.to_vec();
+        encode(self.get(body)?, &mut out);
+        Ok(out)
+    }
+
+    fn load_body(&mut self, bytes: &[u8]) -> Result<Body> {
+        let Some(rest) = bytes.strip_prefix(MAGIC) else {
+            return Err(KernelError::Unsupported(
+                "these bytes were not written by the fake kernel",
+            ));
+        };
+        let mut at = 0;
+        let shape = decode(rest, &mut at)?;
+        if at != rest.len() {
+            return Err(KernelError::Failed(format!(
+                "{} trailing bytes after the shape",
+                rest.len() - at
+            )));
+        }
+        Ok(self.insert(shape))
+    }
+}
+
+/// Named in `geometry_format`, and versioned because changing what `encode`
+/// writes without changing this would break every file already saved.
+const FORMAT: &str = "fake-csg-1";
+
+/// A prefix, so that bytes from a different kernel are refused rather than
+/// misread. The conformance suite checks that they are.
+const MAGIC: &[u8] = b"w3d-fake-csg-1\0";
+
+fn push_f64(out: &mut Vec<u8>, v: f64) {
+    out.extend_from_slice(&v.to_le_bytes());
+}
+
+fn encode(shape: &Shape, out: &mut Vec<u8>) {
+    match shape {
+        Shape::Box(size) => {
+            out.push(1);
+            for v in [size.x, size.y, size.z] {
+                push_f64(out, v);
+            }
+        }
+        Shape::Sphere(r) => {
+            out.push(2);
+            push_f64(out, *r);
+        }
+        Shape::Cylinder { radius, height } => {
+            out.push(3);
+            push_f64(out, *radius);
+            push_f64(out, *height);
+        }
+        Shape::Boolean(op, a, b) => {
+            out.push(4);
+            out.push(match op {
+                BooleanOp::Union => 0,
+                BooleanOp::Difference => 1,
+                BooleanOp::Intersection => 2,
+            });
+            encode(a, out);
+            encode(b, out);
+        }
+        Shape::Transformed(m, inner) => {
+            out.push(5);
+            for row in m.0 {
+                for v in row {
+                    push_f64(out, v);
+                }
+            }
+            encode(inner, out);
+        }
+    }
+}
+
+fn take_f64(bytes: &[u8], at: &mut usize) -> Result<f64> {
+    let end = *at + 8;
+    let slice = bytes
+        .get(*at..end)
+        .ok_or_else(|| KernelError::Failed(String::from("the file ends inside a number")))?;
+    *at = end;
+    Ok(f64::from_le_bytes(slice.try_into().expect("eight bytes")))
+}
+
+/// Recursive, and so is the data — a deeply nested document would recurse
+/// deeply here. Bounded in practice by how many booleans a person performs,
+/// and named in the session file rather than defended against.
+fn decode(bytes: &[u8], at: &mut usize) -> Result<Shape> {
+    let tag = *bytes.get(*at).ok_or_else(|| {
+        KernelError::Failed(String::from("the file ends where a shape should be"))
+    })?;
+    *at += 1;
+    Ok(match tag {
+        1 => Shape::Box(Vec3::new(
+            take_f64(bytes, at)?,
+            take_f64(bytes, at)?,
+            take_f64(bytes, at)?,
+        )),
+        2 => Shape::Sphere(take_f64(bytes, at)?),
+        3 => Shape::Cylinder {
+            radius: take_f64(bytes, at)?,
+            height: take_f64(bytes, at)?,
+        },
+        4 => {
+            let op = match bytes.get(*at) {
+                Some(0) => BooleanOp::Union,
+                Some(1) => BooleanOp::Difference,
+                Some(2) => BooleanOp::Intersection,
+                _ => return Err(KernelError::Failed(String::from("unknown boolean"))),
+            };
+            *at += 1;
+            let a = decode(bytes, at)?;
+            let b = decode(bytes, at)?;
+            Shape::Boolean(op, Box::new(a), Box::new(b))
+        }
+        5 => {
+            let mut m = [[0.0f64; 4]; 4];
+            for row in &mut m {
+                for cell in row {
+                    *cell = take_f64(bytes, at)?;
+                }
+            }
+            Shape::Transformed(Mat4(m), Box::new(decode(bytes, at)?))
+        }
+        other => {
+            return Err(KernelError::Failed(format!("unknown shape tag {other}")));
+        }
+    })
 }

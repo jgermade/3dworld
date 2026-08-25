@@ -11,8 +11,11 @@ box, a cylinder and a real OpenCASCADE difference between them: drag to orbit, m
 wheel to zoom, click to select. The viewport also runs in a browser, on WebGL2, where a click
 names a face.
 
-It is early. No file format, so closing the window loses everything; no edges drawn; no fillets;
-and the browser build has no real geometry behind it until OCCT is built for Emscripten.
+Ctrl-S writes a `.w3d` — a zip you can open with `unzip`, specified in
+[FORMAT.md](FORMAT.md) — and `--open` reads one back.
+
+It is early. No STEP yet, so nothing leaves for another tool; no edges drawn; no fillets; and the
+browser build has no real geometry behind it until OCCT is built for Emscripten.
 
 ```
 make test       # check, clippy -D warnings, licences, and the tests
@@ -66,6 +69,7 @@ rather than leaving you with forty lines of include trace.
 What to read:
 
 - [STACK.md](STACK.md) — the shape, and every choice with what forced it.
+- [FORMAT.md](FORMAT.md) — the `.w3d` file, specified well enough to implement from.
 - [AGENTS.md](AGENTS.md) — conventions, and the rules that are not style.
 - [SESSIONS/](SESSIONS/) — the record. `*.md` is open, `*.completed.md` is finished and why.
   **The plan is [`what-is-not-built-yet`](SESSIONS/2026-08-25_19h22.what-is-not-built-yet.md)**,

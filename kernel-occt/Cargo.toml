@@ -17,6 +17,8 @@ w3d-kernel = { path = "../kernel" }
 # of the shared lint is a visible act rather than an `#[allow]` buried in a file.
 [dev-dependencies]
 w3d-core = { path = "../core" }
+w3d-format = { path = "../format" }
+w3d-kernel-fake = { path = "../kernel-fake" }
 # Real geometry through the real viewport. `render/` cannot depend on this
 # crate — it must not know a backend exists — so the end-to-end test lives on
 # this side of the seam, where OCCT is already a prerequisite.

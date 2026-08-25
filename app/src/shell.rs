@@ -34,6 +34,11 @@ pub struct Options {
     pub screenshot: Option<String>,
     /// Commands to run at startup, so a screenshot has something in it.
     pub startup: Vec<Command>,
+    /// A document to open before anything else.
+    pub open: Option<std::path::PathBuf>,
+    /// Save here once the startup commands have run, then carry on. Exists so
+    /// that a headless run can produce a file to check.
+    pub save_as: Option<std::path::PathBuf>,
 }
 
 struct Live<K: GeometryKernel> {
@@ -78,7 +83,7 @@ impl<K: GeometryKernel> Shell<K> {
 
 const INITIAL: (u32, u32) = (1100, 720);
 
-impl<K: GeometryKernel> ApplicationHandler for Shell<K> {
+impl<K: GeometryKernel + Default> ApplicationHandler for Shell<K> {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.live.is_some() {
             return;
@@ -173,8 +178,32 @@ impl<K: GeometryKernel> ApplicationHandler for Shell<K> {
 
         let mut editor = Editor::new(self.kernel.take().expect("one window"));
         editor.set_viewport(config.width, config.height);
+        if let Some(path) = self.options.open.clone() {
+            // A second kernel, because opening replaces the document around a
+            // kernel rather than adding to the one already loaded.
+            match editor.open(path, K::default()) {
+                Ok(message) => println!("{message}"),
+                Err(e) => {
+                    eprintln!("{e}");
+                    self.exit_code = 1;
+                    event_loop.exit();
+                    return;
+                }
+            }
+        }
         for command in &self.options.startup {
             editor.run(*command);
+        }
+        if let Some(path) = self.options.save_as.clone() {
+            match editor.save(Some(path)) {
+                Ok(message) => println!("{message}"),
+                Err(e) => {
+                    eprintln!("{e}");
+                    self.exit_code = 1;
+                    event_loop.exit();
+                    return;
+                }
+            }
         }
 
         self.live = Some(Live {
@@ -295,6 +324,7 @@ fn map_key(key: &Key, modifiers: ModifiersState) -> Option<Command> {
             ("c", false, _) => Some(Command::AddCylinder),
             ("f", false, _) => Some(Command::ZoomToFit),
             ("a", true, _) => Some(Command::SelectAll),
+            ("s", true, _) => Some(Command::Save),
             ("u", false, _) => Some(Command::Boolean(BooleanOp::Union)),
             ("d", false, _) => Some(Command::Boolean(BooleanOp::Difference)),
             ("i", false, _) => Some(Command::Boolean(BooleanOp::Intersection)),
@@ -586,6 +616,9 @@ fn chrome<K: GeometryKernel>(root: &mut egui::Ui, editor: &mut Editor<K>, scene:
                 }
             });
             ui.horizontal_wrapped(|ui| {
+                if ui.button("Save").clicked() {
+                    editor.run(Command::Save);
+                }
                 if ui.button("Undo").clicked() {
                     editor.run(Command::Undo);
                 }

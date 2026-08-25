@@ -17,6 +17,8 @@ fn main() -> std::process::ExitCode {
         match arg.as_str() {
             "--frames" => options.frames = args.next().and_then(|n| n.parse().ok()),
             "--screenshot" => options.screenshot = args.next(),
+            "--open" => options.open = args.next().map(Into::into),
+            "--save-as" => options.save_as = args.next().map(Into::into),
             // A scene to start with, so that a screenshot has something in it
             // and so that `cargo run -- --demo` is a one-command look at the
             // thing.
@@ -35,7 +37,9 @@ fn main() -> std::process::ExitCode {
                      \n\
                      b/s/c add a box, sphere or cylinder · u/d/i union, difference, intersect\n\
                      f frames · ctrl-a selects all · Delete removes · Esc clears · ctrl-z undo\n\
-                     drag orbits · middle-drag pans · wheel zooms · click selects"
+                     ctrl-s saves · drag orbits · middle-drag pans · wheel zooms\n\
+                     \n\
+                     --open FILE reads a .w3d · --save-as FILE writes one"
                 );
                 return std::process::ExitCode::SUCCESS;
             }

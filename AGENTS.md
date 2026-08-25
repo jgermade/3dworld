@@ -104,6 +104,8 @@ kernel-fake/   w3d-kernel-fake  a backend that satisfies the contract without   
                                 doing geometry
 core/          w3d-core         document · history/undo · selection ·            ✅ built
                                 tessellation cache — generic over the kernel
+format/        w3d-format       the .w3d file: a zip, a manifest, and one       ✅ built
+                                geometry blob per body — see FORMAT.md
 
 kernel-occt/   w3d-kernel-occt  the OpenCASCADE backend: a C ABI of thirteen    ✅ native
                                 entry points, and the Rust side of it            ⬜ wasm
@@ -205,6 +207,7 @@ used.
 | `make wasm` | The default members build for `wasm32-unknown-unknown`, **and the WebGL2 backend is really in the tree**. Nothing above the seam may acquire a host assumption without the first half failing; the second half exists because asking wgpu for `gles` instead of `webgl` compiles cleanly and ships no fallback at all. |
 | `make test-occt` | The same conformance suite against **real geometry**, plus the document driven by OpenCASCADE, plus the only end-to-end test there is: real geometry through the real viewport, and a click that names a face. Not part of `make test`, because it needs OCCT installed; `w3d-kernel-occt` is excluded from the workspace's `default-members` so that `make test` stays a no-setup command. |
 | `make web` | Not a check. Builds the browser bundle into `web/dist/` — needs `wasm-bindgen-cli` at the same version as the `wasm-bindgen` dependency; a mismatch is a runtime error about an unknown import, not a build failure. |
+| `w3d_format` round-trip | A document saved and loaded keeps its nodes, names, visibility, tolerance, quality and shared bodies, and refuses a file written by another kernel — in both directions. The container is asserted to be a zip a standard tool can open. |
 | `make app-test` | The modeller **in a real window**: `xvfb-run`, thirty frames, and a screenshot in which the chrome and the viewport are checked *separately* — a run where egui drew and the scene did not looks identical in a colour count. Carries its own negative controls. Needs `xvfb`, a rasteriser and `libxkbcommon-x11-0`. |
 | `make web-test` | The viewport **in a real browser**: WebGPU offered, WebGL2 forced, and a run with no COOP/COEP that must degrade visibly. The only check here that is not native. Needs `npm install` in `web/test/`, so it is not part of `make test`. |
 | `make occt-headers` | Not a check. Fetches headers a distribution failed to ship, at the revision in `kernel-occt/native/UPSTREAM` — needed on Ubuntu Noble. Deliberately not run from `build.rs`: a build that reaches the network on its own is not a build anybody can reproduce. |
@@ -240,6 +243,32 @@ And when a check belongs to *the contract* rather than to one backend, it goes i
 `kernel/src/conformance.rs`, not in a test file. Everything there has to be true of any correct
 kernel — which rules out most interesting assertions, and is the discipline that makes the ones
 left over mean something.
+
+## The file format
+
+`FORMAT.md` is the specification and it is the thing that makes the format open — not the
+container. `format/` is one implementation of it, and a reader written from that page alone must
+be able to read what this one writes.
+
+One rule matters more than the rest, and it is the seam wearing a different hat: **the geometry
+blobs are the writing kernel's own bytes, and the manifest records which kernel wrote them.** A
+build whose kernel does not match must refuse the file by name. It must not convert, and it must
+not open the document with the geometry missing.
+
+> A native file that silently half-converts is the worst outcome a format can have. A file that
+> will not open is a problem you can see.
+
+Moving geometry *between* kernels is what STEP is for: a different operation, with a different
+name in the interface, lossy in ways a user should be asked to accept.
+
+Two consequences worth knowing before changing anything here:
+
+- **`GeometryKernel::geometry_format` is a promise about bytes on somebody's disk.** Changing what
+  `save_body` produces means changing that string, and a backend that does not is breaking every
+  file anyone has saved.
+- **The round-trip is a conformance check**, not a backend test. "Saving and loading a body keeps
+  its topology and its bounds" is true of any correct kernel, so it lives in
+  `kernel/src/conformance.rs` with everything else that is.
 
 ## Licensing
 

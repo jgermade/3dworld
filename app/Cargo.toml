@@ -19,6 +19,7 @@ path = "src/main.rs"
 [dependencies]
 w3d-core = { path = "../core" }
 w3d-render = { path = "../render" }
+w3d-format = { path = "../format" }
 w3d-kernel-fake = { path = "../kernel-fake" }
 
 egui = "0.36"

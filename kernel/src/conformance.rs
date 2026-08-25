@@ -12,7 +12,7 @@
 //! the way set operations require, tessellation is well-formed and lies inside
 //! the body it came from, and errors happen where they are promised.
 
-use crate::{Aabb, BooleanOp, GeometryKernel, Mat4, Mesh, Quality, Tolerance, Vec3};
+use crate::{Aabb, BooleanOp, GeometryKernel, KernelError, Mat4, Mesh, Quality, Tolerance, Vec3};
 
 pub struct Check {
     pub name: &'static str,
@@ -342,6 +342,76 @@ pub fn run<K: GeometryKernel>(k: &mut K, tol: Tolerance, quality: Quality) -> Re
             "tessellating changed the body",
         )
     });
+
+    check!(checks, "a saved body loads back the same", {
+        let plate = k
+            .create_box(Vec3::new(4.0, 4.0, 4.0))
+            .map_err(|e| e.to_string())?;
+        let drill = k.create_cylinder(1.0, 8.0).map_err(|e| e.to_string())?;
+        // Something with a curved face and a seam, so a backend that only
+        // round-trips planes does not pass.
+        let a = k
+            .boolean(BooleanOp::Difference, plate, drill, tol)
+            .map_err(|e| e.to_string())?;
+        let before = k.topology(a).map_err(|e| e.to_string())?;
+        let bounds = k.bounds(a).map_err(|e| e.to_string())?;
+
+        let bytes = k.save_body(a).map_err(|e| e.to_string())?;
+        require(!bytes.is_empty(), "save_body produced nothing")?;
+
+        let b = k.load_body(&bytes).map_err(|e| e.to_string())?;
+        require(b != a, "load_body returned the body it was given")?;
+        require(
+            k.topology(b).map_err(|e| e.to_string())? == before,
+            "the topology changed across a save and a load",
+        )?;
+        require(
+            boxes_close(
+                &k.bounds(b).map_err(|e| e.to_string())?,
+                &bounds,
+                tol.linear,
+            ),
+            "the bounds changed across a save and a load",
+        )?;
+        // The original must survive, like every other operation's operands.
+        require(
+            k.topology(a).map_err(|e| e.to_string())? == before,
+            "saving consumed the body",
+        )
+    });
+
+    check!(
+        checks,
+        "bytes from another kernel are refused, not guessed at",
+        {
+            // A file written by a different backend must fail loudly. The
+            // alternative is a document that opens and is quietly wrong, which is
+            // the worst outcome a file format has.
+            let refused = k.load_body(b"this is not any kernel's geometry");
+            require(refused.is_err(), "nonsense loaded as a body")?;
+            match refused {
+                Err(KernelError::Unsupported(_) | KernelError::Failed(_)) => Ok(()),
+                Err(e) => Err(format!(
+                    "refused, but as `{e}` — a caller cannot tell a foreign file \
+                     from a damaged one"
+                )),
+                Ok(_) => unreachable!("checked above"),
+            }
+        }
+    );
+
+    check!(
+        checks,
+        "the geometry format is named and looks like a version",
+        {
+            let format = k.geometry_format();
+            require(!format.is_empty(), "the geometry format has no name")?;
+            require(
+                format.chars().any(|c| c.is_ascii_digit()),
+                format!("`{format}` carries no version, so it cannot be changed safely"),
+            )
+        }
+    );
 
     Report {
         kernel: k.name(),
