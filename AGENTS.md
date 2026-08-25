@@ -70,6 +70,12 @@ opens against a document that is nothing but what is left. `2026-08-25_19h22.wha
 is that file today. It has no `Walkthrough · as built` and will never grow one — work that acts on
 it opens its own file and says which items it took.
 
+**It is also the one file in `SESSIONS/` that is maintained rather than appended**, and the
+distinction is the whole reason the append rule exists: that rule protects a *record*, where the
+wrong turns are most of the value. A register is a *plan*, and a plan that only grows stops being
+one. Items leave it as they are done and a `## Taken` table says which file took each, so the
+reasoning is still one link away. Everything else in the folder stays append-only.
+
 ### Always append, never rewrite
 
 Extensions are `## Extension · <date> · <summary>`, corrections are `### Correction · …`. When a
@@ -191,6 +197,7 @@ used.
 | --- | --- |
 | `make check` | Every crate compiles, tests and all. |
 | `make clippy` | `-D warnings`. There is no allow-list; a lint that has to be silenced gets an argument in a session file. |
+| `make licences` | Every crate on **both** targets is compatible with GPL-3.0-or-later, checked against an explicit allowlist in `tools/licences.py`. A dependency with an unlisted licence fails the build. The tool runs its own negative controls first, because a checker that cannot fail is a checker that says yes. |
 | `cargo test --workspace` | The document, history, selection and the arena's identity rules — driven against `w3d-kernel-fake`, with no OCCT, no browser and no `.wasm` anywhere. |
 | `w3d_kernel::conformance` | One suite, run against *every* backend, `FakeKernel` included. A backend is only a backend if it passes it, and this is what keeps the kernel decision reversible. |
 | `make wasm` | The default members build for `wasm32-unknown-unknown`, **and the WebGL2 backend is really in the tree**. Nothing above the seam may acquire a host assumption without the first half failing; the second half exists because asking wgpu for `gles` instead of `webgl` compiles cleanly and ships no fallback at all. |
@@ -252,7 +259,20 @@ Plasticity's own model. Relicensing later would mean removing OCCT.
 Serving the `.wasm` to a browser is **distribution** — GPL-3, not AGPL, and the SaaS distinction
 neither saves us nor is needed. Ship a link to the corresponding source alongside the build.
 
-Do not add a dependency whose licence is incompatible with GPL-3.0-or-later.
+Do not add a dependency whose licence is incompatible with GPL-3.0-or-later. **`make licences`
+enforces this** — it is part of `make test`, it reads both targets because the dependency sets
+differ, and it fails on any licence not on the allowlist in `tools/licences.py`. Widening that list
+is a decision that gets an argument in a session file, not an edit.
+
+Two consequences of the tree as it stands, worth knowing before they surprise someone:
+
+- **Two crates are Apache-2.0-only** (`codespan-reporting`, `spirv`, both reached through `naga`).
+  Apache-2.0 is compatible with GPL-**3** and not with GPL-2, so the licence that was chosen for
+  the kernel's sake is also the one the renderer's dependencies require. There is no version of
+  this project that is GPL-2.
+- **`cargo metadata` cannot see everything**, and the omissions are the interesting ones: OCCT
+  itself, the header `make occt-headers` fetches, Playwright, and the browsers and drivers a test
+  run needs. `tools/licences.py` lists them in its report rather than leaving them out.
 
 ## Temporary files and scripts
 

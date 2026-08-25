@@ -11,7 +11,7 @@ viewport runs in a browser: **it draws on WebGL2 and a click there names a face.
 yet — no window on the desktop, and `web/index.html` is a harness rather than an application.
 
 ```
-make test       # check, clippy -D warnings, and the tests — no setup needed
+make test       # check, clippy -D warnings, licences, and the tests
 make wasm       # the same code, built for wasm32-unknown-unknown
 make test-occt  # real geometry, and a click that names a face (needs OCCT)
 make web        # the browser bundle, into web/dist/ (needs wasm-bindgen-cli)

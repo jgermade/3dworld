@@ -6,7 +6,7 @@ WASM_TARGET := wasm32-unknown-unknown
 
 ## Everything CI runs, and everything a contributor should run before pushing.
 ## Needs no setup: the OpenCASCADE backend is not a default workspace member.
-test: check clippy fmt-check
+test: check clippy fmt-check licences
 	$(CARGO) test
 
 ## The implementation compiles, and so does every crate on its own.
@@ -39,6 +39,14 @@ occt-headers:
 	curl -sSfL -o $(VENDOR)/NCollection_AliasedArray.hxx \
 	    $(OCCT_RAW)/NCollection/NCollection_AliasedArray.hxx
 	@echo "fetched into $(VENDOR) at $(OCCT_TAG); these files are OCCT's, LGPL-2.1"
+
+## Every crate this project links is compatible with GPL-3.0-or-later, which
+## AGENTS.md has required since the licence was settled and nothing checked
+## until there was a check. Reads both targets, because the dependency sets
+## differ. Carries its own negative controls and runs them first.
+.PHONY: licences
+licences:
+	python3 tools/licences.py
 
 clippy:
 	$(CARGO) clippy --all-targets -- -D warnings
