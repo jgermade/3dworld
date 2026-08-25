@@ -4,18 +4,18 @@
 
 Check [STACK.md](STACK.md).
 
-## Sessions
+## The record
 
-Work is recorded in [`SESSIONS/`](./SESSIONS/), one file per **body of work** — not one per
-sitting. A file is opened when a piece of work starts, named
+Work is recorded in [`RECORD/`](./RECORD/), one file per **body of work** — not one per
+session. A file is opened when a piece of work starts, named
 `YYYY-MM-DD_HHhMM.<kebab-case-summary>.md` for the moment it was opened, and written in English.
 Several sessions may extend the same file; one session may open more than one.
 
 Two rules, and they pull in different directions on purpose:
 
 - **No prior approval is needed.** Work proceeds — no waiting on a plan being signed off.
-- **But it must end up written down.** A session file is not a changelog of commits; it is the
-  record of what was decided, what was learned, and what is *not* true yet. The parts that earn
+- **But it must end up written down.** A record file is not a changelog of commits; it is the
+  account of what was decided, what was learned, and what is *not* true yet. The parts that earn
   their keep are the ones a commit message cannot hold:
 
   | Section | What it is for |
@@ -25,7 +25,7 @@ Two rules, and they pull in different directions on purpose:
   | `Bugs found by building, not by reading` | Defects the *process* surfaced, with their cause. These are the ones that get re-introduced otherwise. |
   | `Verified, and not` | Two explicit lists. The second one matters more: name the caveat and the risk taken. |
   | `Loose ends, deliberately left` | What was not done, and what it would cost. |
-  | `Next` | What remains. Without it a session file is a diary; with it, the folder is a plan. |
+  | `Next` | What remains. Without it a record file is a diary; with it, the folder is a plan. |
 
 A geometry kernel makes one section carry more than its share. **`Verified, and not` is where a
 numerical claim goes to be qualified**: "the boolean is correct" is not a finding, "the boolean is
@@ -41,7 +41,7 @@ When everything a file set out to do is done:
    body of work, not a summary of what was planned.
 2. **Rename it from `.md` to `.completed.md`.**
 
-So `SESSIONS/` read at a glance answers the two questions that matter: `*.md` is what is still
+So `RECORD/` read at a glance answers the two questions that matter: `*.md` is what is still
 open, `*.completed.md` is what is finished and why. Nothing is deleted, and nothing moves out of
 the folder.
 
@@ -59,7 +59,7 @@ single `## The pending register` that says out loud which registers and `Next` b
 supersedes, and gather into it what the `Next` blocks never held — the owed work named in
 `Loose ends, deliberately left` and in the second half of `Verified, and not`.
 
-There is exactly one live register across the whole of `SESSIONS/` at any time, and it is in the
+There is exactly one live register across the whole of `RECORD/` at any time, and it is in the
 open file — `*.md`, of which there should normally be one. When a new file takes the register
 over, the old file says so and points at the new one; everything above stays standing, because the
 order in which things became pending is part of the record.
@@ -70,7 +70,7 @@ opens against a document that is nothing but what is left. `2026-08-25_21h59.wha
 is that file today. It has no `Walkthrough · as built` and will never grow one — work that acts on
 it opens its own file and says which items it took.
 
-**It is also the one file in `SESSIONS/` that is maintained rather than appended**, and the
+**It is also the one file in `RECORD/` that is maintained rather than appended**, and the
 distinction is the whole reason the append rule exists: that rule protects a *record*, where the
 wrong turns are most of the value. A register is a *plan*, and a plan that only grows stops being
 one. Items leave it as they are done and a `## Taken` table says which file took each, so the
@@ -80,13 +80,21 @@ reasoning is still one link away. Everything else in the folder stays append-onl
 
 Extensions are `## Extension · <date> · <summary>`, corrections are `### Correction · …`. When a
 decision supersedes an earlier one, say so out loud in the new text and leave the old text
-standing — a session file edited to look right is worth nothing, because the wrong turns are most
+standing — a record file edited to look right is worth nothing, because the wrong turns are most
 of the value. The wasm64 reversal in the 2026-08-25 file is the worked example: the first claim
 was that 64-bit memory "is not viable yet", which was wrong on the facts and right on the
 conclusion, and both halves of that are worth more than the tidy version.
 
-This rule governs `SESSIONS/` only. Documents that describe how things *are* — this file,
+This rule governs `RECORD/` only. Documents that describe how things *are* — this file,
 `README.md`, `STACK.md` — are kept correct by editing them.
+
+**The folder was called `SESSIONS/` until 2026-08-25**, and the files closed before then still
+name it that. They are not stale and are not to be corrected: a closed file is right about its own
+moment, and a path fixed up by hand is the first step to a record that gets tidied. The name
+changed because it was wrong in the one way that matters — a file here is one **body of work**,
+never one session, so the folder was named after the exact unit its files are not. That frees the
+word for its only remaining sense, the sitting in which work happens, which is what it means in
+the two rules at the top of this section.
 
 ## What this repository is
 
@@ -200,7 +208,7 @@ used.
 | Command | What it proves |
 | --- | --- |
 | `make check` | Every crate compiles, tests and all. |
-| `make clippy` | `-D warnings`. There is no allow-list; a lint that has to be silenced gets an argument in a session file. |
+| `make clippy` | `-D warnings`. There is no allow-list; a lint that has to be silenced gets an argument in a record file. |
 | `make licences` | Every crate on **both** targets is compatible with GPL-3.0-or-later, checked against an explicit allowlist in `tools/licences.py`. A dependency with an unlisted licence fails the build. The tool runs its own negative controls first, because a checker that cannot fail is a checker that says yes. |
 | `cargo test --workspace` | The document, history, selection and the arena's identity rules — driven against `w3d-kernel-fake`, with no OCCT, no browser and no `.wasm` anywhere. |
 | `w3d_kernel::conformance` | One suite, run against *every* backend, `FakeKernel` included. A backend is only a backend if it passes it, and this is what keeps the kernel decision reversible. |
@@ -272,7 +280,7 @@ Two consequences worth knowing before changing anything here:
 
 ## Licensing
 
-**This repository is GPL-3.0-or-later**, and the reasoning is in the 2026-08-25 session file
+**This repository is GPL-3.0-or-later**, and the reasoning is in the 2026-08-25 record file
 under `Extension · the licence and the first backend`. The short version:
 
 - **OpenCASCADE is LGPL-2.1-*only*.** Its §3 carries the permission to apply "the ordinary GNU
@@ -300,7 +308,7 @@ neither saves us nor is needed. Ship a link to the corresponding source alongsid
 Do not add a dependency whose licence is incompatible with GPL-3.0-or-later. **`make licences`
 enforces this** — it is part of `make test`, it reads both targets because the dependency sets
 differ, and it fails on any licence not on the allowlist in `tools/licences.py`. Widening that list
-is a decision that gets an argument in a session file, not an edit.
+is a decision that gets an argument in a record file, not an edit.
 
 Two consequences of the tree as it stands, worth knowing before they surprise someone:
 
