@@ -45,9 +45,11 @@ So `SESSIONS/` read at a glance answers the two questions that matter: `*.md` is
 open, `*.completed.md` is what is finished and why. Nothing is deleted, and nothing moves out of
 the folder.
 
-A file is only closed when its `Next` is empty. If part of the work is being abandoned rather
-than finished, say so in the walkthrough — an abandoned item closed quietly is indistinguishable
-from a forgotten one.
+A file is only closed when nothing is still pending *in it*. That is not the same as everything
+being done: a file closes when its own work has landed and whatever it left owed has moved into
+the live register (below), which the walkthrough must name. If part of the work is being abandoned
+rather than finished, say so in the walkthrough — an abandoned item closed quietly is
+indistinguishable from a forgotten one.
 
 ### The plan is the last register, not the last `Next`
 
@@ -57,9 +59,16 @@ single `## The pending register` that says out loud which registers and `Next` b
 supersedes, and gather into it what the `Next` blocks never held — the owed work named in
 `Loose ends, deliberately left` and in the second half of `Verified, and not`.
 
-There is exactly one live register across the whole of `SESSIONS/` at any time. When a new file
-takes it over, the old file gets a one-paragraph extension saying so and pointing at the new one.
-Everything above stays standing: the order in which things became pending is part of the record.
+There is exactly one live register across the whole of `SESSIONS/` at any time, and it is in the
+open file — `*.md`, of which there should normally be one. When a new file takes the register
+over, the old file says so and points at the new one; everything above stays standing, because the
+order in which things became pending is part of the record.
+
+**The register may be a file of its own**, and once a body of work is finished that is the tidier
+place for it: the closed file stops carrying a plan that has outgrown it, and the next session
+opens against a document that is nothing but what is left. `2026-08-25_19h22.what-is-not-built-yet.md`
+is that file today. It has no `Walkthrough · as built` and will never grow one — work that acts on
+it opens its own file and says which items it took.
 
 ### Always append, never rewrite
 

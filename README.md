@@ -58,10 +58,10 @@ What to read:
 
 - [STACK.md](STACK.md) — the shape, and every choice with what forced it.
 - [AGENTS.md](AGENTS.md) — conventions, and the rules that are not style.
-- [SESSIONS/](SESSIONS/) — the record. `*.md` is open, `*.completed.md` is finished. **The plan is
-  `## The pending register` at the end of the newest file**; there is exactly one live register
-  across the folder, and every `Next` block above it is superseded and kept only for the order in
-  which things became pending.
+- [SESSIONS/](SESSIONS/) — the record. `*.md` is open, `*.completed.md` is finished and why.
+  **The plan is [`what-is-not-built-yet`](SESSIONS/2026-08-25_19h22.what-is-not-built-yet.md)**,
+  the one open file; every register and `Next` block inside the completed ones is superseded and
+  kept only for the order in which things became pending.
 - [`kernel/src/lib.rs`](kernel/src/lib.rs) — the contract, and the two properties of it that
   everything above depends on.
 - [`kernel-occt/native/w3d_occt.h`](kernel-occt/native/w3d_occt.h) — the C ABI, which is the
