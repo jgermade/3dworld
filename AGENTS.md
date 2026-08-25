@@ -66,7 +66,7 @@ order in which things became pending is part of the record.
 
 **The register may be a file of its own**, and once a body of work is finished that is the tidier
 place for it: the closed file stops carrying a plan that has outgrown it, and the next session
-opens against a document that is nothing but what is left. `2026-08-25_19h22.what-is-not-built-yet.md`
+opens against a document that is nothing but what is left. `2026-08-25_21h59.what-is-not-built-yet.md`
 is that file today. It has no `Walkthrough · as built` and will never grow one — work that acts on
 it opens its own file and says which items it took.
 
