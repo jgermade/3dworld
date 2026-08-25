@@ -159,17 +159,32 @@ left over mean something.
 
 ## Licensing
 
-**Undecided, and it is blocking a real choice, not a formality.** The kernel decision and the
-licence decision are the same decision:
+**This repository is GPL-3.0-or-later**, and the reasoning is in the 2026-08-25 session file
+under `Extension · the licence and the first backend`. The short version:
 
-- **OpenCASCADE** is LGPL-2.1 with an exception. Usable commercially, but read the exception
-  before, not after, `kernel/occt/` exists.
-- **truck** is MIT/Apache-2.0 and imposes nothing.
+- **OpenCASCADE is LGPL-2.1-*only*.** Its §3 carries the permission to apply "the ordinary GNU
+  General Public License" to a copy, of any version — the clause anticipates versions later than
+  2 explicitly. That is the route by which an LGPL-2.1-only kernel lives inside a GPL-3 work, and
+  it is the whole of why this licence was available to choose.
+- **The `OCCT-exception-1.0` is not what it is usually said to be**, and this repository does not
+  rely on it. It covers exactly one thing: header material — inlines and templates — incorporated
+  into object code, so that LGPL does not leak into proprietary callers through C++ headers. It
+  does **not** waive LGPL-2.1 §6, the right to relink against a modified library. A wasm build is
+  static linking, so a closed distribution would have owed §6 a real answer. GPL-3 owes it
+  nothing, because the source ships.
+- **Modifications to OCCT are OCCT's**, whatever this repository is licensed as. Emscripten port
+  patches live in their own series and are published under LGPL-2.1.
 - **Parasolid**, which is what actually makes Plasticity good, is a commercial Siemens licence
-  and is not distributed as a WebAssembly build. It is not an option here; the gap it leaves is
-  the whole difficulty of this project and should be named as such rather than wished away.
+  with no WebAssembly distribution. It is not an option here; the gap it leaves is the whole
+  difficulty of this project and should be named as such rather than wished away.
 
-Do not add a dependency until this is settled, and record the settlement in a session file.
+What this forecloses, deliberately: a closed binary sold under a perpetual licence, which is
+Plasticity's own model. Relicensing later would mean removing OCCT.
+
+Serving the `.wasm` to a browser is **distribution** — GPL-3, not AGPL, and the SaaS distinction
+neither saves us nor is needed. Ship a link to the corresponding source alongside the build.
+
+Do not add a dependency whose licence is incompatible with GPL-3.0-or-later.
 
 ## Temporary files and scripts
 

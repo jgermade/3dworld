@@ -4,6 +4,8 @@ A B-rep modeller in the mould of [Plasticity](https://www.plasticity.xyz/): NURB
 exact solids, direct modelling rather than parametric history, running in the browser on
 WebAssembly and on the desktop from the same Rust core.
 
+**GPL-3.0-or-later.**
+
 The seam and the document are built and tested; no real kernel is chosen yet.
 
 ```
