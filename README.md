@@ -6,20 +6,27 @@ WebAssembly and on the desktop from the same Rust core.
 
 **GPL-3.0-or-later.**
 
-The seam, the document, an OpenCASCADE backend and the viewport are built and tested. Nothing
-presents to a window or a canvas yet: `w3d-render` draws into textures, and the application shell
-that owns a surface does not exist.
+The seam, the document, an OpenCASCADE backend and the viewport are built and tested, and the
+viewport runs in a browser: **it draws on WebGL2 and a click there names a face.** There is no UI
+yet — no window on the desktop, and `web/index.html` is a harness rather than an application.
 
 ```
 make test       # check, clippy -D warnings, and the tests — no setup needed
 make wasm       # the same code, built for wasm32-unknown-unknown
 make test-occt  # real geometry, and a click that names a face (needs OCCT)
+make web        # the browser bundle, into web/dist/ (needs wasm-bindgen-cli)
+make web-serve  # serve it with COOP/COEP; --no-isolation to watch it degrade
+make web-test   # drive it in headless Chromium (needs npm install in web/test/)
 ```
 
 `w3d-render`'s tests need a graphics adapter. Without one they **skip**, printing `SKIPPED:` and
 the reason — so a green `make test` on a machine with no GPU is not evidence the viewport works.
 Run `cargo test -p w3d-render -- --nocapture` to see which happened. A software rasteriser is
 enough: `apt install mesa-vulkan-drivers` gets lavapipe.
+
+**WebGPU has never rendered a pixel here.** The native tests run on Vulkan, and headless Chromium
+reports WebGPU and then draws nothing — so the loader renders a frame, looks at the canvas, and
+falls back to WebGL2 when it is blank. Everything the fast path claims is still an argument.
 
 ## Building the OpenCASCADE backend
 

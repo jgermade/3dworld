@@ -43,7 +43,7 @@ fn harness() -> Option<Harness> {
             if let Some(warning) = gpu.capabilities.degradation() {
                 println!("degraded: {warning}");
             }
-            let renderer = Renderer::new(&gpu.device);
+            let renderer = Renderer::new(&gpu.device, w3d_render::COLOR_FORMAT);
             Some(Harness { gpu, renderer })
         }
         Err(e) => {

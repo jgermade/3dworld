@@ -94,11 +94,13 @@ kernel-occt/   w3d-kernel-occt  the OpenCASCADE backend: a C ABI of thirteen    
                                 entry points, and the Rust side of it            ⬜ wasm
 
 render/        w3d-render       wgpu: capability detection, mesh upload,        ✅ built
-                                camera, and ID-buffer picking                    ⬜ WebGL2 untried
+                                camera, and ID-buffer picking                    ✅ WebGL2
+                                                                                 ⬜ WebGPU
+web/           w3d-web          the loader: probe, dispatch, COOP/COEP, and     ✅ built
+                                a canvas that draws and picks                    ⬜ threaded
 
 kernel-native/                  a kernel of our own, or truck                    ⬜
 app/                            the modeller; native and web from one source     ⬜
-web/                            the loader: feature probe, dispatch, COOP/COEP   ⬜
 ```
 
 Crates are prefixed `w3d-` because `3dworld` is not a valid Rust identifier and the name is not
@@ -150,14 +152,17 @@ used.
   through `EMSCRIPTEN_KEEPALIVE`. It carries thirteen entry points because the trait has thirteen
   methods. Declare there first, then implement in C++, then use from Rust — and never widen it to
   "expose a bit more of OCCT".
-- **What the machine can do is read, not assumed — and a capability cannot report a backend that
-  is not in the binary.** `Capabilities` is built from the adapter, never from `cfg!`, because a
-  web build compiled with both backends can land on WebGPU or on WebGL2 and there is no way to
-  know which until it has. That covers the runtime half. The build half is not something a probe
-  can see: wgpu's `gles` feature is the *native* GL backend and does nothing on wasm32, so asking
-  for it instead of `webgl` compiles, type-checks and ships with no fallback at all. `make wasm`
-  greps the tree for `glow` for that reason. A degradation nobody can name is a bug report about
-  performance six months later.
+- **A capability probe cannot certify a driver.** What the machine can do is read from the adapter
+  and never inferred from `cfg!` — but that is only the first of three ways this goes wrong, and
+  the other two cost more. A backend that is not compiled in cannot be reported at all: wgpu's
+  `gles` feature is the *native* GL backend and does nothing on wasm32, so asking for it instead of
+  `webgl` compiles, type-checks and ships with no fallback, which is why `make wasm` greps the tree
+  for `glow`. And a driver can answer every question correctly and still draw nothing: headless
+  Chromium reports WebGPU, hands back an adapter with compute shaders and a gigabyte of buffer, and
+  rasterises a black canvas with no error anywhere. **The last word therefore belongs to whoever
+  can look at the result** — `web/`'s loader renders a frame, counts the colours on the canvas, and
+  falls back to WebGL2 from evidence rather than from a feature flag. A degradation nobody can name
+  is a bug report about performance six months later.
 - **Dependencies are declared per target, with `default-features = false` and the backend list
   spelled out.** This workspace had none until `w3d-render`, and the first one is where the habit
   gets set: the enabled backend list *is* the platform decision in STACK.md, and a
@@ -181,6 +186,8 @@ used.
 | `w3d_kernel::conformance` | One suite, run against *every* backend, `FakeKernel` included. A backend is only a backend if it passes it, and this is what keeps the kernel decision reversible. |
 | `make wasm` | The default members build for `wasm32-unknown-unknown`, **and the WebGL2 backend is really in the tree**. Nothing above the seam may acquire a host assumption without the first half failing; the second half exists because asking wgpu for `gles` instead of `webgl` compiles cleanly and ships no fallback at all. |
 | `make test-occt` | The same conformance suite against **real geometry**, plus the document driven by OpenCASCADE, plus the only end-to-end test there is: real geometry through the real viewport, and a click that names a face. Not part of `make test`, because it needs OCCT installed; `w3d-kernel-occt` is excluded from the workspace's `default-members` so that `make test` stays a no-setup command. |
+| `make web` | Not a check. Builds the browser bundle into `web/dist/` — needs `wasm-bindgen-cli` at the same version as the `wasm-bindgen` dependency; a mismatch is a runtime error about an unknown import, not a build failure. |
+| `make web-test` | The viewport **in a real browser**: WebGPU offered, WebGL2 forced, and a run with no COOP/COEP that must degrade visibly. The only check here that is not native. Needs `npm install` in `web/test/`, so it is not part of `make test`. |
 | `make occt-headers` | Not a check. Fetches headers a distribution failed to ship, at the revision in `kernel-occt/native/UPSTREAM` — needed on Ubuntu Noble. Deliberately not run from `build.rs`: a build that reaches the network on its own is not a build anybody can reproduce. |
 
 Still owed, and named so that the gap is not mistaken for coverage:
@@ -191,12 +198,13 @@ Still owed, and named so that the gap is not mistaken for coverage:
   not a suite, and none of them is degenerate.
 - **`wasm-pack test --headless`** — that the thing actually instantiates under COOP/COEP with
   threads. Needs `web/` to exist.
-- **A GPU in CI.** `w3d-render`'s tests need an adapter and *skip*, printing `SKIPPED:`, when there
-  is none — and `cargo test` then reports `ok`. They pass here against lavapipe, Mesa's software
-  rasteriser. Until CI has one, a green run is not evidence the viewport works.
-- **WebGL2 has never been run.** It is compiled and asserted present. Every claim about the
-  fallback — `Rg32Uint` as a render target, the scissored pick, the downlevel limits — is an
-  argument until a browser has executed it.
+- **A GPU in CI, and a browser in CI.** `w3d-render`'s tests need an adapter and *skip*, printing
+  `SKIPPED:`, when there is none — and `cargo test` then reports `ok`. `make web-test` is not part
+  of `make test` at all. Two holes of the same shape; until both are closed, a green run is not
+  evidence the viewport works.
+- **WebGPU has never rendered a pixel.** The native tests run on Vulkan through lavapipe, which is
+  not WebGPU, and the browser's WebGPU is broken in this container. WebGL2 *is* exercised
+  end-to-end, picking included. The fast path is still an argument.
 - **An OCCT build for wasm.** `kernel-occt` compiles and passes natively; no Emscripten build
   exists, and `-fwasm-exceptions` against `-fexceptions` has not been decided.
 

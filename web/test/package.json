@@ -1,0 +1,12 @@
+{
+  "name": "w3d-web-test",
+  "private": true,
+  "type": "module",
+  "description": "Drives the built page in a real browser. Not part of the crate graph.",
+  "scripts": {
+    "test": "node browser.mjs"
+  },
+  "devDependencies": {
+    "playwright": "^1.49.0"
+  }
+}

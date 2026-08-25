@@ -1,10 +1,10 @@
 [workspace]
 resolver = "3"
-members = ["kernel", "kernel-fake", "kernel-occt", "core", "render"]
+members = ["kernel", "kernel-fake", "kernel-occt", "core", "render", "web"]
 # kernel-occt needs OpenCASCADE headers and libraries present, so it is not a
 # default member: `cargo test` stays a no-setup command. Run it explicitly with
 # `cargo test -p w3d-kernel-occt`, or `make test-occt`.
-default-members = ["kernel", "kernel-fake", "core", "render"]
+default-members = ["kernel", "kernel-fake", "core", "render", "web"]
 
 [workspace.package]
 version = "0.0.0"

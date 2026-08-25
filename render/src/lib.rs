@@ -26,6 +26,11 @@ pub use camera::Camera;
 pub use gpu::{Capabilities, Gpu, GpuError};
 pub use scene::{GpuMesh, MeshError};
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// What [`offscreen_targets`] makes, and what a test renders into. A surface
+/// picks its own — see [`Renderer::new`].
 pub const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
 pub const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 /// Two `u32`: the object, and the face within it.
@@ -102,6 +107,52 @@ impl Pick {
     }
 }
 
+/// A submitted pick, waiting on the device.
+///
+/// Carries no lifetime, so it can sit in an application's state between
+/// frames — which is the whole point of it existing.
+pub struct PickPending {
+    /// `None` for a pick outside the viewport, which is a miss decided without
+    /// touching the GPU.
+    readback: Option<wgpu::Buffer>,
+    ready: Arc<AtomicBool>,
+}
+
+impl PickPending {
+    /// `None` while the readback is still in flight.
+    ///
+    /// Call it once a frame. On native it nudges the device; in a browser the
+    /// map callback arrives on the event loop and this only reads the flag.
+    /// Calling it after it has answered once returns `None` — the buffer is
+    /// consumed, and a receipt is good for one answer.
+    pub fn collect(&self, device: &wgpu::Device) -> Option<Pick> {
+        let Some(readback) = &self.readback else {
+            // Nothing was submitted, so there is nothing to wait for.
+            return self
+                .ready
+                .swap(false, Ordering::Acquire)
+                .then_some(Pick::MISS);
+        };
+        let _ = device.poll(wgpu::PollType::Poll);
+        if !self.ready.swap(false, Ordering::Acquire) {
+            return None;
+        }
+        let slice = readback.slice(..);
+        let Ok(data) = slice.get_mapped_range() else {
+            return Some(Pick::MISS);
+        };
+        let read =
+            |at: usize| u32::from_le_bytes([data[at], data[at + 1], data[at + 2], data[at + 3]]);
+        let pick = Pick {
+            object: read(0),
+            face: read(4),
+        };
+        drop(data);
+        readback.unmap();
+        Some(pick)
+    }
+}
+
 /// Globals: a 4x4 and an eye position, padded to what `uniform` requires.
 const GLOBALS_SIZE: u64 = 80;
 /// `vec4` colour plus four `u32`.
@@ -126,7 +177,12 @@ pub struct Renderer {
 }
 
 impl Renderer {
-    pub fn new(device: &wgpu::Device) -> Self {
+    /// `color_format` is the format of whatever will be drawn into, and it is
+    /// an argument because it is not ours to choose: a canvas or a window hands
+    /// back the format its compositor wants — usually `Bgra8Unorm` — and a
+    /// pipeline built for a different one is a validation error at the first
+    /// frame, not at construction.
+    pub fn new(device: &wgpu::Device, color_format: wgpu::TextureFormat) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("w3d shade"),
             source: wgpu::ShaderSource::Wgsl(include_str!("shade.wgsl").into()),
@@ -167,7 +223,7 @@ impl Renderer {
             immediate_size: 0,
         });
 
-        let shade = pipeline(device, &layout, &shader, "fs_shade", COLOR_FORMAT);
+        let shade = pipeline(device, &layout, &shader, "fs_shade", color_format);
         let pick = pipeline(device, &layout, &shader, "fs_pick", ID_FORMAT);
 
         Self {
@@ -240,8 +296,11 @@ impl Renderer {
     /// and is the obvious optimisation; it is not written, because a click is
     /// not a hot path and a wrong pick is much worse than a slow one.
     ///
-    /// Blocking: it maps a buffer and waits. Callers on the web must not run
-    /// it on the render loop's frame — see the loose ends in the session file.
+    /// **Blocking**, and only honestly so on native: it waits on the device.
+    /// A browser has no such wait — WebGPU's map completion arrives on the JS
+    /// event loop, so a blocking poll there returns without the buffer being
+    /// mapped and this method answers `MISS` for every click. Anything with an
+    /// event loop wants [`Renderer::pick_begin`] and [`PickPending::collect`].
     pub fn pick(
         &mut self,
         vp: &Viewport<'_>,
@@ -250,9 +309,32 @@ impl Renderer {
         y: u32,
         objects: &[Object<'_>],
     ) -> Pick {
+        let pending = self.pick_begin(vp, camera, x, y, objects);
+        let _ = vp.device.poll(wgpu::PollType::wait_indefinitely());
+        pending.collect(vp.device).unwrap_or(Pick::MISS)
+    }
+
+    /// Submits the pick and hands back a receipt.
+    ///
+    /// Split from [`Renderer::pick`] because a readback is not something a
+    /// browser can be made to do synchronously, and pretending otherwise
+    /// produces a modeller where nothing is ever selected. A caller polls
+    /// [`PickPending::collect`] on each frame; it is one atomic load until the
+    /// answer is there.
+    pub fn pick_begin(
+        &mut self,
+        vp: &Viewport<'_>,
+        camera: &Camera,
+        x: u32,
+        y: u32,
+        objects: &[Object<'_>],
+    ) -> PickPending {
         let (width, height) = (vp.width, vp.height);
         if x >= width || y >= height || width == 0 || height == 0 {
-            return Pick::MISS;
+            return PickPending {
+                readback: None,
+                ready: Arc::new(AtomicBool::new(true)),
+            };
         }
         let device = vp.device;
         self.write_globals(vp.queue, camera, vp.aspect());
@@ -326,21 +408,18 @@ impl Renderer {
         );
         vp.queue.submit([encoder.finish()]);
 
-        let slice = readback.slice(..);
-        slice.map_async(wgpu::MapMode::Read, |_| {});
-        let _ = device.poll(wgpu::PollType::wait_indefinitely());
-        let Ok(data) = slice.get_mapped_range() else {
-            return Pick::MISS;
-        };
-        let read =
-            |at: usize| u32::from_le_bytes([data[at], data[at + 1], data[at + 2], data[at + 3]]);
-        let pick = Pick {
-            object: read(0),
-            face: read(4),
-        };
-        drop(data);
-        readback.unmap();
-        pick
+        let ready = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&ready);
+        readback.slice(..).map_async(wgpu::MapMode::Read, move |_| {
+            // The result is discarded and the flag set either way: a failed
+            // map is a miss, and `collect` reads a `None` range as one.
+            flag.store(true, Ordering::Release);
+        });
+
+        PickPending {
+            readback: Some(readback),
+            ready,
+        }
     }
 
     fn record(&self, pass: &mut wgpu::RenderPass<'_>, objects: &[Object<'_>]) {

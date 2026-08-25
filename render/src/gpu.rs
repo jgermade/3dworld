@@ -98,6 +98,9 @@ impl core::error::Error for GpuError {}
 pub struct Gpu {
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
+    /// Kept because a surface has to be asked what formats *it* supports, and
+    /// only the adapter can answer. Nothing else should reach for it.
+    pub adapter: wgpu::Adapter,
     pub capabilities: Capabilities,
 }
 
@@ -159,6 +162,7 @@ impl Gpu {
         Ok(Self {
             device,
             queue,
+            adapter,
             capabilities,
         })
     }
@@ -175,8 +179,24 @@ impl Gpu {
     /// Async because that probe is async on the web. On native it resolves
     /// immediately.
     pub async fn instance() -> wgpu::Instance {
+        Self::instance_for(wgpu::Backends::from_env().unwrap_or_else(wgpu::Backends::all)).await
+    }
+
+    /// The same, restricted to `backends`.
+    ///
+    /// This exists because the detection above is necessary and **not
+    /// sufficient**. A browser can pass every check it makes — `navigator.gpu`
+    /// present, an adapter returned, a device created, generous limits
+    /// reported — and still rasterise nothing at all. That is not
+    /// hypothetical: it is what headless Chromium does in a container with no
+    /// working GPU, and the failure is a black canvas with no error anywhere.
+    ///
+    /// So the last word belongs to whoever can look at the result. `web/`'s
+    /// loader draws a frame, checks the canvas is not one flat colour, and
+    /// comes back through here with `Backends::GL` when it is.
+    pub async fn instance_for(backends: wgpu::Backends) -> wgpu::Instance {
         let mut desc = wgpu::InstanceDescriptor::new_without_display_handle();
-        desc.backends = wgpu::Backends::from_env().unwrap_or_else(wgpu::Backends::all);
+        desc.backends = backends;
         wgpu::util::new_instance_with_webgpu_detection(desc).await
     }
 }

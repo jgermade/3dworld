@@ -1,0 +1,138 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>3dworld — viewport</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #0e0f11; color: #c8ccd2;
+               font: 13px/1.5 ui-monospace, monospace; }
+  #stage { display: grid; grid-template-rows: 1fr auto; height: 100%; }
+  #viewport { position: relative; min-height: 0; }
+  canvas { width: 100%; height: 100%; display: block; }
+  #status { padding: .6rem .9rem; border-top: 1px solid #24272c; white-space: pre-wrap; }
+  .warn { color: #e8a13c; }
+  .bad { color: #e06c5a; }
+</style>
+<div id="stage">
+  <!-- The canvas is created by the loader, not written here: a canvas keeps
+       the first context it is given, so falling back from WebGPU to WebGL2
+       means replacing the element. -->
+  <div id="viewport"></div>
+  <div id="status">starting…</div>
+</div>
+<script type="module">
+  import { boot, distinctColours } from './loader.js';
+
+  const container = document.getElementById('viewport');
+  const status = document.getElementById('status');
+
+  // Everything the page learns is also hung off `window.__w3d`, because that
+  // is what a headless browser reads. The test and the user see the same
+  // facts — a test that inspects something the page does not show is a test
+  // that can pass while the page is blank.
+  const state = { ready: false, frames: 0, error: null, picks: [] };
+  window.__w3d = state;
+
+  try {
+    const { viewer, canvas, caps, wanted, chosen, note, graphics, report } =
+      await boot(container);
+    Object.assign(state, { caps, wanted, chosen, note, graphics, report, viewer });
+
+    const dpr = Math.min(globalThis.devicePixelRatio || 1, 2);
+    const fit = () => {
+      const w = Math.max(1, Math.round(container.clientWidth * dpr));
+      const h = Math.max(1, Math.round(container.clientHeight * dpr));
+      canvas.width = w;
+      canvas.height = h;
+      viewer.resize(w, h);
+    };
+    fit();
+    addEventListener('resize', fit);
+
+    let dragging = null;
+    canvas.addEventListener('pointerdown', (e) => {
+      dragging = { x: e.clientX, y: e.clientY, moved: false };
+      canvas.setPointerCapture(e.pointerId);
+    });
+    canvas.addEventListener('pointermove', (e) => {
+      if (!dragging) return;
+      const dx = e.clientX - dragging.x, dy = e.clientY - dragging.y;
+      if (Math.abs(dx) + Math.abs(dy) > 3) dragging.moved = true;
+      viewer.orbit(-dx * 0.01, dy * 0.01);
+      dragging.x = e.clientX;
+      dragging.y = e.clientY;
+    });
+    canvas.addEventListener('pointerup', (e) => {
+      // A drag that orbited is not a click. Otherwise every rotation ends by
+      // selecting whatever the cursor stopped over.
+      if (dragging && !dragging.moved) {
+        const r = canvas.getBoundingClientRect();
+        pick((e.clientX - r.left) * dpr, (e.clientY - r.top) * dpr);
+      }
+      dragging = null;
+    });
+    canvas.addEventListener('wheel', (e) => {
+      e.preventDefault();
+      viewer.dolly(Math.exp(e.deltaY * 0.001));
+    }, { passive: false });
+
+    // Picks are submitted here and collected in the frame loop, because a GPU
+    // readback finishes on the event loop and not in the handler that asked
+    // for it.
+    globalThis.__w3dPick = pick;
+    function pick(x, y) {
+      viewer.pickBegin(Math.round(x), Math.round(y));
+    }
+
+    const frame = () => {
+      viewer.render();
+      state.frames += 1;
+      const hit = viewer.pickCollect();
+      if (hit) {
+        state.lastPick = hit;
+        state.picks.push(hit);
+        show(hit);
+      }
+      requestAnimationFrame(frame);
+    };
+    requestAnimationFrame(frame);
+
+    // Render and sample in one task, because a WebGL2 drawing buffer does not
+    // survive being composited — see `distinctColours`. Exposed so that a
+    // headless run can ask the page what it is actually showing rather than
+    // guess from a screenshot's byte count.
+    state.sample = () => {
+      viewer.render();
+      return distinctColours(canvas);
+    };
+
+    state.ready = true;
+    show(null);
+
+    function show(hit) {
+      const lines = [
+        `${report.backend} · ${report.adapter}`,
+        `compute ${report.compute ? 'yes' : 'NO'} · vertex storage ` +
+          `${report.vertexStorageBuffers ? 'yes' : 'NO'} · ` +
+          `${report.triangles} triangles${report.deindexed ? ' (de-indexed)' : ''}`,
+        `variant ${chosen}${chosen === wanted ? '' : ` (wanted ${wanted})`} · ` +
+          `threads ${caps.threads ? 'yes' : 'no'} · isolated ` +
+          `${caps.isolated ? 'yes' : 'no'} · simd ${caps.simd ? 'yes' : 'no'}`,
+      ];
+      if (hit) {
+        lines.push(hit.object === null
+          ? 'clicked: nothing'
+          : `clicked: body ${hit.object}, face ${hit.face}`);
+      }
+      status.textContent = lines.join('\n');
+      status.className = '';
+      for (const text of [note, graphics, report.degradation]) {
+        if (!text) continue;
+        status.textContent += `\n${text}`;
+        status.className = 'warn';
+      }
+    }
+  } catch (e) {
+    state.error = String(e && e.message ? e.message : e);
+    status.textContent = state.error;
+    status.className = 'bad';
+  }
+</script>

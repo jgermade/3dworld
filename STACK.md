@@ -5,7 +5,7 @@
 ```
    the browser tab                                   the desktop binary
         │                                                     │
-        │  web/loader.ts — probe, then choose a variant       │  winit
+        │  web/loader.js — probe, then look at the result     │  winit
         ▼                                                     ▼
 ┌─────────────────────────────────────────────────────────────────────┐
 │  3dworld                                                            │
@@ -14,6 +14,7 @@
 │     document · undo · selection    w3d-core                       ✅ │
 │     tessellation cache             w3d-core                       ✅ │
 │     viewport · camera · picking    w3d-render                     ✅ │
+│     the loader, and a canvas       w3d-web                        ✅ │
 │                                                                     │
 │   ═════ w3d_kernel::GeometryKernel ═════  the seam, and the spec  ✅ │
 │         + conformance: one suite, every backend                     │
@@ -25,7 +26,7 @@
 └─────────────────────────────────────────────────────────────────────┘
         │                                                     │
         ▼                                                     ▼
-   wgpu → WebGPU  (WebGL2 fallback: no compute)          wgpu → Vulkan / Metal
+   wgpu → WebGL2 ✅  WebGPU ⬜ never yet drawn            wgpu → Vulkan / Metal
    SIMD128 · shared memory + rayon · COOP/COEP           AVX-512 · real threads · no 4 GB
 ```
 
@@ -46,7 +47,7 @@ the parts wasm constrains.
 | **OCCT first, ours later** | OpenCASCADE is mature B-rep and brings STEP/IGES for free. It is also 5–40 MB of wasm, an unpleasant C++ API, LGPL-with-exception, and fillets well short of Parasolid. It buys time, not the product. |
 | **wasm32, not wasm64** | Memory64 is standardised (Wasm 3.0) and shipping in Chrome 133+ and Firefox 143+, so the objection is not availability. It is that 64-bit memory cannot use the 4 GB guard-page trick, so every access is bounds-checked: SpiderMonkey measured 10% to over 100%. A memory-bound kernel sits at the wrong end of that. Rust's target is Tier 3 besides. |
 | **Sharding across wasm32 heaps, not one wasm64 heap** | The interactive document lives in one shared memory with a rayon pool over it. Bulk work — large booleans, mass tessellation, a huge STEP import — goes to workers with their *own* memory, each with its own 4 GB. Total addressable exceeds the ceiling without paying for 64-bit pointers anywhere. Exchange is by transferable `ArrayBuffer`, which is a move. |
-| **`wgpu`, targeting WebGPU** | One API over WebGPU, Vulkan and Metal, which is what makes one source serve both columns above. The WebGL2 fallback is a fallback for *rendering*: it has no compute shaders, so anything built on compute degrades to the CPU rather than to a slower GPU. Budget for that, do not discover it. |
+| **`wgpu`, targeting WebGPU** | One API over WebGPU, Vulkan and Metal, which is what makes one source serve both columns above. The WebGL2 fallback is a fallback for *rendering*: it has no compute shaders, so anything built on compute degrades to the CPU rather than to a slower GPU. Budget for that, do not discover it. **Which of the two you get is decided by looking, not by asking** — a browser can report WebGPU, hand back a generous adapter and rasterise nothing, so the loader renders a frame and counts the colours before it believes the answer. |
 | **`egui`, not a DOM framework** | In a modeller the UI is not the viewport, and that is what decides it. On the web a DOM shell composes fine around a `<canvas>`; on the desktop, any DOM framework is a webview, and compositing a native wgpu surface with a webview has only two answers — a transparent overlay whose mouse events fight the viewport's, or blitting frames into the webview at unusable latency. egui draws the chrome as GPU geometry in the same pass as the scene: one surface, one loop, nothing to composite. Blender, Fusion and Plasticity all land here. Dioxus was the strongest candidate against it and fails on exactly this; keep it in mind for auxiliary surfaces that composite with nothing. |
 | **The kernel stays on the CPU** | WGSL has no `f64`. The GPU takes display tessellation and LOD, BVH build, culling, ID-buffer picking, silhouette and edge extraction, instance transforms. It does not take anything whose correctness is numerical. |
 | **SIMD128 as the baseline, threads as the branch** | `+simd128` is universal since Safari 16.4, so it is not worth a variant. Threads are: they need `SharedArrayBuffer`, which needs COOP/COEP, which depends on the host's headers rather than the user's hardware. That is the one axis the loader really has to probe. |
@@ -59,9 +60,16 @@ the parts wasm constrains.
   `SharedArrayBuffer` is unavailable. The loader must probe and fall back to the single-threaded
   variant with a named, visible degradation — not fail obscurely, and not pretend it is fine.
 - **There is no CPUID inside wasm.** A module cannot ask what the machine can do; detection
-  happens in JS before instantiation, via `WebAssembly.validate()` on probe modules
-  (`wasm-feature-detect`). That means a build matrix and payload cost, which is why the matrix is
-  kept to two entries.
+  happens in JS before instantiation, via `WebAssembly.validate()` on probe modules —
+  `web/loader.js` carries them inline rather than fetching `wasm-feature-detect` before it can
+  decide anything. That means a build matrix and payload cost, which is why the matrix is kept to
+  two entries. **Only one of the two is built today**: the loader dispatches to the threaded
+  variant, finds it missing, and says so on the page.
+- **A probe cannot certify a driver.** Validation answers what the *engine* accepts and
+  `crossOriginIsolated` answers what the *page* was served, but neither can tell you whether the
+  GPU will actually rasterise. Headless Chromium reports WebGPU, returns an adapter claiming
+  compute shaders and a gigabyte of buffer, and draws a black canvas with no error. The loader
+  therefore renders a frame, samples the canvas, and falls back to WebGL2 from evidence.
 - **4 GB is a per-heap ceiling and a design constraint.** Tessellation lives in GPU buffers, not
   in linear memory. Inactive bodies go out of core. If a document is approaching the ceiling in
   the *interactive* heap, the answer is sharding, not wasm64.
@@ -78,10 +86,12 @@ the parts wasm constrains.
 | --- | --- |
 | Rust | 1.94.1 stable, edition 2024; `unsafe_code = "forbid"` workspace-wide |
 | Targets | `x86_64-unknown-linux-gnu` and `wasm32-unknown-unknown`, both checked; `+simd128` checked |
-| Dependencies | **one, and it is `wgpu` 30** (MIT OR Apache-2.0), taken by `w3d-render` and declared per target with `default-features = false`. The four crates above the viewport still depend on each other and on nothing else. |
-| Threads | `wasm-bindgen-rayon`, `+atomics,+bulk-memory,+mutable-globals`, nightly for `build-std` |
+| Dependencies | **`wgpu` 30** (MIT OR Apache-2.0) in `w3d-render`, plus `wasm-bindgen`/`js-sys`/`web-sys` in `w3d-web` — all declared per target with `default-features = false`. The kernel, the fake and the document still depend on each other and on nothing else. Playwright is a devDependency of `web/test/` and is not in the crate graph. |
+| Threads | `wasm-bindgen-rayon`, `+atomics,+bulk-memory,+mutable-globals`, nightly for `build-std`. **Not built.** The loader probes for them, reports them present, and runs the single-threaded variant because that is the only one that exists. |
 | Graphics | `wgpu` 30 — WebGPU where present, WebGL2 fallback. Both compiled for wasm; only WebGPU-class backends have been *run*, and those under lavapipe. The wasm feature is `webgl`, **not** `gles`; `gles` is the native GL backend and silently does nothing on wasm32. |
 | Kernel | OpenCASCADE (LGPL-2.1-only, taken to GPL-3 via its §3) behind `GeometryKernel` |
 | Licence | GPL-3.0-or-later — see AGENTS.md § Licensing |
 | OpenCASCADE | 7.6.3 (Ubuntu Noble), recorded in `kernel-occt/native/UPSTREAM`. That file names a version; it does not enforce one — the build takes whatever the system has. A real pin arrives with the Emscripten build. Noble's `libocct-foundation-dev` is missing a header: `make occt-headers`. |
-| Emscripten | not yet — the OCCT wasm build does not exist |
+| Emscripten | not yet — the OCCT wasm build does not exist, so the browser draws a `FakeKernel` bounding box |
+| Browser build | `wasm-bindgen` 0.2.127 and a matching `wasm-bindgen-cli`; `make web` → 3.34 MiB of wasm, 1.12 MiB gzipped. No `wasm-opt`, no brotli. |
+| Browser check | `make web-test` — Chromium via Playwright, three runs: WebGPU offered, WebGL2 forced, and no COOP/COEP |

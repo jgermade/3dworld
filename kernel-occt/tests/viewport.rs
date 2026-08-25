@@ -79,7 +79,7 @@ fn faces(picks: &[Pick]) -> BTreeSet<u32> {
 #[test]
 fn a_click_on_a_drilled_plate_names_the_face_under_the_cursor() {
     let Some(gpu) = gpu() else { return };
-    let mut renderer = Renderer::new(&gpu.device);
+    let mut renderer = Renderer::new(&gpu.device, w3d_render::COLOR_FORMAT);
     let mut doc = drilled_plate();
 
     let (node, _) = doc.nodes().next().unwrap();
@@ -141,7 +141,7 @@ fn a_click_on_a_drilled_plate_names_the_face_under_the_cursor() {
 #[test]
 fn every_face_of_a_drilled_plate_is_reachable_by_a_click() {
     let Some(gpu) = gpu() else { return };
-    let mut renderer = Renderer::new(&gpu.device);
+    let mut renderer = Renderer::new(&gpu.device, w3d_render::COLOR_FORMAT);
     let mut doc = drilled_plate();
     let (node, _) = doc.nodes().next().unwrap();
     let mesh = doc.mesh(node).unwrap().clone();

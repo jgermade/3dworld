@@ -852,6 +852,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "w3d-web"
+version = "0.0.0"
+dependencies = [
+ "js-sys",
+ "w3d-core",
+ "w3d-kernel-fake",
+ "w3d-render",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
+ "wgpu",
+]
+
+[[package]]
 name = "wasm-bindgen"
 version = "0.2.127"
 source = "registry+https://github.com/rust-lang/crates.io-index"

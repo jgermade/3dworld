@@ -66,6 +66,33 @@ wasm:
 	    || (echo "the wasm build has no WebGL2 fallback: glow is not in the \
 tree. Check render/Cargo.toml's wgpu features."; exit 1)
 
+## The browser build. `wasm-bindgen` is a separate tool, not a crate: install
+## it with `cargo install wasm-bindgen-cli --version <the wasm-bindgen dep's
+## version>`, and keep the two in step — a mismatch is a runtime error about
+## an unknown import, not a build failure.
+##
+## Output goes to web/dist/, which is gitignored. Nothing built is committed.
+WASM_OUT := web/dist
+
+.PHONY: web web-serve web-test
+web:
+	rustup target add $(WASM_TARGET)
+	$(CARGO) build -p w3d-web --release --target $(WASM_TARGET)
+	wasm-bindgen --target web --no-typescript --out-dir $(WASM_OUT) \
+	    target/$(WASM_TARGET)/release/w3d_web.wasm
+	@ls -l $(WASM_OUT)/w3d_web_bg.wasm | awk '{printf "wasm: %.2f MiB\n", $$5/1048576}'
+
+## Serves web/ with COOP/COEP. `--no-isolation` omits them, which is the case
+## worth seeing: the loader must degrade visibly rather than fail obscurely.
+web-serve: web
+	python3 web/serve.py
+
+## Drives the built page in headless Chromium and asserts it drew and picked.
+## This is the only check in the repository that runs the viewport in a real
+## browser; everything else is native.
+web-test: web
+	node web/test/browser.mjs
+
 doc:
 	$(CARGO) doc --workspace --no-deps
 
