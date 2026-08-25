@@ -62,6 +62,29 @@ impl Camera {
         self.pitch = (self.pitch + d_pitch).clamp(-PITCH_LIMIT, PITCH_LIMIT);
     }
 
+    /// Slides the target across the view plane, in *pixels* of a viewport
+    /// `height` tall.
+    ///
+    /// Scaled by distance and field of view, so a drag moves what is under the
+    /// cursor by roughly that many pixels whatever the zoom — which is the
+    /// only pan that feels like dragging the model rather than nudging a
+    /// number.
+    pub fn pan(&mut self, dx: f64, dy: f64, height: f64) {
+        if height <= 0.0 {
+            return;
+        }
+        let Some(forward) = (self.target - self.eye()).normalize(1.0e-12) else {
+            return;
+        };
+        let Some(right) = forward.cross(UP).normalize(1.0e-12) else {
+            return;
+        };
+        let up = right.cross(forward);
+        // World units per pixel at the target's depth.
+        let scale = 2.0 * self.distance * (self.fov_y * 0.5).tan() / height;
+        self.target = self.target + right * (-dx * scale) + up * (dy * scale);
+    }
+
     /// Multiplicative, so a wheel notch is the same proportion of the view at
     /// every scale — which is the only zoom that works in a document whose
     /// contents span four orders of magnitude.
@@ -199,6 +222,49 @@ mod tests {
         // constant: a 2 mm fillet and a 40 m assembly cannot share 0.1..1000.
         assert!(c.near > 0.0 && c.near < c.distance - radius);
         assert!(c.far > c.distance + radius);
+    }
+
+    /// A pan of the full viewport height moves the target by the height of
+    /// what is visible at the target's depth. That is what makes a drag feel
+    /// like dragging the model.
+    #[test]
+    fn panning_moves_the_target_across_the_view_and_scales_with_distance() {
+        let mut near = Camera {
+            distance: 10.0,
+            yaw: 0.0,
+            pitch: 0.0,
+            ..Camera::default()
+        };
+        let mut far = Camera {
+            distance: 100.0,
+            ..near
+        };
+        near.pan(0.0, 100.0, 100.0);
+        far.pan(0.0, 100.0, 100.0);
+
+        let moved_near = (near.target - Vec3::ZERO).length();
+        let moved_far = (far.target - Vec3::ZERO).length();
+        assert!(moved_near > 0.0);
+        // Ten times the distance, ten times the world movement for the same
+        // drag — that is the whole point.
+        assert!(
+            (moved_far / moved_near - 10.0).abs() < 1.0e-9,
+            "{moved_far} vs {moved_near}"
+        );
+
+        // Looking down +X with Z up, dragging up the screen moves the target up.
+        assert!(near.target.z > 0.0, "target went {:?}", near.target);
+    }
+
+    #[test]
+    fn panning_a_degenerate_frame_does_nothing_rather_than_producing_nans() {
+        let mut c = Camera {
+            pitch: core::f64::consts::FRAC_PI_2,
+            ..Camera::default()
+        };
+        let before = c.target;
+        c.pan(10.0, 10.0, 0.0);
+        assert_eq!(c.target, before, "a zero-height viewport must be a no-op");
     }
 
     /// The scale-free property: a wheel notch is the same proportion of the

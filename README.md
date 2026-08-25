@@ -6,9 +6,13 @@ WebAssembly and on the desktop from the same Rust core.
 
 **GPL-3.0-or-later.**
 
-The seam, the document, an OpenCASCADE backend and the viewport are built and tested, and the
-viewport runs in a browser: **it draws on WebGL2 and a click there names a face.** There is no UI
-yet — no window on the desktop, and `web/index.html` is a harness rather than an application.
+**There is a modeller.** `cargo run -p w3d-app --features occt -- --demo` opens a window with a
+box, a cylinder and a real OpenCASCADE difference between them: drag to orbit, middle-drag to pan,
+wheel to zoom, click to select. The viewport also runs in a browser, on WebGL2, where a click
+names a face.
+
+It is early. No file format, so closing the window loses everything; no edges drawn; no fillets;
+and the browser build has no real geometry behind it until OCCT is built for Emscripten.
 
 ```
 make test       # check, clippy -D warnings, licences, and the tests
@@ -17,7 +21,12 @@ make test-occt  # real geometry, and a click that names a face (needs OCCT)
 make web        # the browser bundle, into web/dist/ (needs wasm-bindgen-cli)
 make web-serve  # serve it with COOP/COEP; --no-isolation to watch it degrade
 make web-test   # drive it in headless Chromium (needs npm install in web/test/)
+make app-test   # open the modeller in a real window under Xvfb, and check it drew
 ```
+
+The desktop shell needs a display and, on X11, `libxkbcommon-x11-0` — without it the process
+panics inside `xkbcommon-dl` before a window exists. To run it headless:
+`apt install xvfb libxkbcommon-x11-0 mesa-vulkan-drivers`.
 
 `w3d-render`'s tests need a graphics adapter. Without one they **skip**, printing `SKIPPED:` and
 the reason — so a green `make test` on a machine with no GPU is not evidence the viewport works.

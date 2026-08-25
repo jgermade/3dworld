@@ -47,6 +47,30 @@ ALLOWED = {
 # Exceptions that only ever widen a permission.
 ALLOWED_EXCEPTIONS = {"LLVM-exception"}
 
+# Font licences, allowed **only for crates that are font data** — see
+# FONT_DATA below. Scoped rather than added to ALLOWED because the argument
+# for them is about fonts and would not survive being applied to code:
+#
+#   OFL-1.1 is a copyleft licence written so that fonts can be bundled with
+#   software under any licence. Its conditions — keep the notice, do not sell
+#   the font on its own, rename a modified font — are all satisfiable by a
+#   GPL-3 work, and every distribution ships OFL fonts alongside GPL programs.
+#
+#   Ubuntu-font-1.0 is DFSG-free and in Debian main. The FSF has never ruled on
+#   it, which is why it is not in ALLOWED, and the reason it is acceptable here
+#   is narrower than "it is compatible": a font is *data this program displays*,
+#   not code linked into it, so the font keeps its licence and the program keeps
+#   GPL-3. That is aggregation, and it is what every GUI toolkit relies on.
+#
+# Both **require their notices to be preserved in a distribution**, which this
+# project does not yet assemble. See the register's NOTICE item; these two make
+# it a requirement rather than good manners.
+ALLOWED_FONT_DATA = {"OFL-1.1", "Ubuntu-font-1.0"}
+
+# Crates that are fonts rather than code. Kept as a list of names so that
+# adding one is a visible act.
+FONT_DATA = {"epaint_default_fonts"}
+
 # Licences worth refusing with a *reason* rather than a shrug. Anything not
 # here and not allowed still fails; these just fail informatively.
 KNOWN_BAD = {
@@ -89,6 +113,14 @@ NON_CARGO = [
         "devDependency of web/test/, not in the crate graph",
         "A test driver. Nothing it touches is distributed, and it is not "
         "linked into anything.",
+    ),
+    (
+        "Hack, Ubuntu-Light, Noto Emoji, emoji-icon-font",
+        "OFL-1.1, Ubuntu-font-1.0, MIT",
+        "embedded in the binary by epaint_default_fonts, via egui",
+        "Font *data*, not code: the fonts keep their licences and the program "
+        "keeps GPL-3. Allowed only for crates named in FONT_DATA above. Their "
+        "notices must ship with any distribution, which nothing yet assembles.",
     ),
     (
         "Chromium, Mesa/lavapipe",
@@ -141,15 +173,17 @@ def parse(expression):
     return expr()
 
 
-def satisfiable(node):
-    """Can this expression be satisfied entirely from ALLOWED?"""
+def satisfiable(node, allowed=None):
+    """Can this expression be satisfied entirely from `allowed`?"""
+    allowed = ALLOWED if allowed is None else allowed
     if isinstance(node, str):
         if " WITH " in node:
             licence, exception = node.split(" WITH ")
-            return licence in ALLOWED and exception in ALLOWED_EXCEPTIONS
-        return node in ALLOWED
+            return licence in allowed and exception in ALLOWED_EXCEPTIONS
+        return node in allowed
     op, parts = node
-    return any(map(satisfiable, parts)) if op == "or" else all(map(satisfiable, parts))
+    results = (satisfiable(part, allowed) for part in parts)
+    return any(results) if op == "or" else all(results)
 
 
 def leaves(node):
@@ -191,6 +225,13 @@ SELF_TEST = [
     ("Apache-2.0 WITH Commons-Clause", False, "an unknown exception may narrow"),
     ("Sleepycat", False, "not on the list, so not assumed"),
     ("", False, "no licence at all is not permission"),
+    ("(MIT OR Apache-2.0) AND OFL-1.1 AND Ubuntu-font-1.0", False, "font licences are not allowed for code"),
+]
+
+# The same expression, allowed only because the crate is font data.
+FONT_SELF_TEST = [
+    ("(MIT OR Apache-2.0) AND OFL-1.1 AND Ubuntu-font-1.0", True, "epaint_default_fonts"),
+    ("GPL-2.0-only", False, "being a font does not excuse everything"),
 ]
 
 
@@ -202,6 +243,11 @@ def self_test():
         if got != expected:
             wrong += 1
             print(f"  SELF-TEST FAILED: {expression!r} -> {got}, expected {expected} ({why})")
+    for expression, expected, why in FONT_SELF_TEST:
+        got = satisfiable(parse(expression), ALLOWED | ALLOWED_FONT_DATA)
+        if got != expected:
+            wrong += 1
+            print(f"  SELF-TEST FAILED (font data): {expression!r} -> {got}, expected {expected} ({why})")
     if wrong:
         print(f"\n{wrong} of {len(SELF_TEST)} controls behaved wrongly. The checker is broken;")
         print("its verdict below means nothing until this passes.\n")
@@ -224,7 +270,8 @@ def main():
         if not licence:
             failures.append((name, version, "(no license field)", where, "Read the crate's LICENSE files by hand."))
             continue
-        if satisfiable(parse(licence)):
+        allowed = ALLOWED | ALLOWED_FONT_DATA if name in FONT_DATA else ALLOWED
+        if satisfiable(parse(licence), allowed):
             continue
         reason = next(
             (KNOWN_BAD[leaf] for leaf in leaves(parse(licence)) if leaf in KNOWN_BAD),

@@ -68,7 +68,12 @@ fmt-check:
 ## `glow` in the dependency tree is the evidence that the fallback is there.
 wasm:
 	rustup target add $(WASM_TARGET)
-	$(CARGO) check --target $(WASM_TARGET)
+	@# `w3d-app` is the *desktop* shell — winit and a native window — and does
+	@# not build for wasm by design; the browser's shell is `w3d-web`. It is
+	@# excluded by name rather than dropped from default-members, so that
+	@# `make test` still runs the editor's tests.
+	$(CARGO) check --target $(WASM_TARGET) --workspace \
+	    --exclude w3d-app --exclude w3d-kernel-occt
 	@$(CARGO) tree -p w3d-render --target $(WASM_TARGET) -e normal \
 	    | grep -q glow \
 	    || (echo "the wasm build has no WebGL2 fallback: glow is not in the \
@@ -82,7 +87,7 @@ tree. Check render/Cargo.toml's wgpu features."; exit 1)
 ## Output goes to web/dist/, which is gitignored. Nothing built is committed.
 WASM_OUT := web/dist
 
-.PHONY: web web-serve web-test
+.PHONY: web web-serve web-test app app-test
 web:
 	rustup target add $(WASM_TARGET)
 	$(CARGO) build -p w3d-web --release --target $(WASM_TARGET)
@@ -94,6 +99,15 @@ web:
 ## worth seeing: the loader must degrade visibly rather than fail obscurely.
 web-serve: web
 	python3 web/serve.py
+
+## The modeller, in a real window. Needs `xvfb-run` and a rasteriser:
+##   apt install xvfb mesa-vulkan-drivers libxkbcommon-x11-0
+## `--features occt` swaps the fake kernel for OpenCASCADE.
+app:
+	$(CARGO) build -p w3d-app
+
+app-test: app
+	python3 tools/app_smoke.py
 
 ## Drives the built page in headless Chromium and asserts it drew and picked.
 ## This is the only check in the repository that runs the viewport in a real

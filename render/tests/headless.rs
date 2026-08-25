@@ -181,8 +181,9 @@ fn a_document_reaches_the_framebuffer() {
     // encoding of it — 0.055 linear reads back as 65, not 14. A hard-coded
     // expectation here was the first thing this test got wrong.
     let background = [pixels[0], pixels[1], pixels[2]];
-    let lit = pixels
-        .chunks_exact(4)
+    let (rgba, _) = pixels.as_chunks::<4>();
+    let lit = rgba
+        .iter()
         .filter(|p| {
             p[0].abs_diff(background[0]) > 6
                 || p[1].abs_diff(background[1]) > 6

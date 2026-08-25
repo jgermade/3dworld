@@ -277,10 +277,30 @@ impl Renderer {
                 depth_stencil_attachment: Some(depth_attachment(depth)),
                 ..Default::default()
             });
-            pass.set_pipeline(&self.shade);
-            self.record(&mut pass, objects);
+            self.draw_into(&mut pass, objects);
         }
         vp.queue.submit([encoder.finish()]);
+    }
+
+    /// Writes this frame's uniforms. Call before [`Renderer::draw_into`].
+    ///
+    /// Split out because the chrome shares the scene's render pass rather than
+    /// compositing over it — that is the whole reason `egui` was chosen over a
+    /// DOM framework, and it means somebody else owns the pass. Uniforms must
+    /// be written before that pass begins, because a render pass borrows the
+    /// encoder and nothing may touch the queue while it is open.
+    pub fn prepare(&mut self, vp: &Viewport<'_>, camera: &Camera, objects: &[Object<'_>]) {
+        self.write_globals(vp.queue, camera, vp.aspect());
+        self.write_objects(vp.device, vp.queue, objects);
+    }
+
+    /// Records the scene into a pass the caller opened.
+    ///
+    /// The caller is responsible for the colour and depth attachments, and for
+    /// having called [`Renderer::prepare`] with the same objects.
+    pub fn draw_into(&self, pass: &mut wgpu::RenderPass<'_>, objects: &[Object<'_>]) {
+        pass.set_pipeline(&self.shade);
+        self.record(pass, objects);
     }
 
     /// What is under one pixel, by rendering ids into it.

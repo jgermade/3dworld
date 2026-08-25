@@ -10,7 +10,7 @@
 ┌─────────────────────────────────────────────────────────────────────┐
 │  3dworld                                                            │
 │                                                                     │
-│   the modeller                     app/        egui over wgpu     ⬜ │
+│   the modeller                     w3d-app     egui over wgpu     ✅ │
 │     document · undo · selection    w3d-core                       ✅ │
 │     tessellation cache             w3d-core                       ✅ │
 │     viewport · camera · picking    w3d-render                     ✅ │
@@ -84,8 +84,9 @@ the parts wasm constrains.
 
 | | |
 | --- | --- |
-| Rust | 1.94.1 stable, edition 2024; `unsafe_code = "forbid"` workspace-wide |
+| Rust | stable, edition 2024; `unsafe_code = "forbid"` workspace-wide. Built on **1.98**; the floor is egui 0.36's MSRV of **1.95**, which is what moved it off 1.94. |
 | Targets | `x86_64-unknown-linux-gnu` and `wasm32-unknown-unknown`, both checked; `+simd128` checked |
+| UI | `egui` 0.36 with `egui-wgpu` and `egui-winit`, `winit` 0.30. egui-wgpu 0.36 is built on wgpu 30, which is why the version had to be that one — egui 0.35 would have dragged in a second, incompatible wgpu. |
 | Dependencies | **`wgpu` 30** (MIT OR Apache-2.0) in `w3d-render`, plus `wasm-bindgen`/`js-sys`/`web-sys` in `w3d-web` — all declared per target with `default-features = false`. The kernel, the fake and the document still depend on each other and on nothing else. Playwright is a devDependency of `web/test/` and is not in the crate graph. |
 | Threads | `wasm-bindgen-rayon`, `+atomics,+bulk-memory,+mutable-globals`, nightly for `build-std`. **Not built.** The loader probes for them, reports them present, and runs the single-threaded variant because that is the only one that exists. |
 | Graphics | `wgpu` 30 — WebGPU where present, WebGL2 fallback. Both compiled for wasm; only WebGPU-class backends have been *run*, and those under lavapipe. The wasm feature is `webgl`, **not** `gles`; `gles` is the native GL backend and silently does nothing on wasm32. |

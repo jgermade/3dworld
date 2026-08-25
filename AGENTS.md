@@ -114,8 +114,10 @@ render/        w3d-render       wgpu: capability detection, mesh upload,        
 web/           w3d-web          the loader: probe, dispatch, COOP/COEP, and     ✅ built
                                 a canvas that draws and picks                    ⬜ threaded
 
+app/           w3d-app          the modeller: editor, scene, and a winit +      ✅ desktop
+                                egui shell that draws in one pass                ⬜ web
+
 kernel-native/                  a kernel of our own, or truck                    ⬜
-app/                            the modeller; native and web from one source     ⬜
 ```
 
 Crates are prefixed `w3d-` because `3dworld` is not a valid Rust identifier and the name is not
@@ -203,6 +205,7 @@ used.
 | `make wasm` | The default members build for `wasm32-unknown-unknown`, **and the WebGL2 backend is really in the tree**. Nothing above the seam may acquire a host assumption without the first half failing; the second half exists because asking wgpu for `gles` instead of `webgl` compiles cleanly and ships no fallback at all. |
 | `make test-occt` | The same conformance suite against **real geometry**, plus the document driven by OpenCASCADE, plus the only end-to-end test there is: real geometry through the real viewport, and a click that names a face. Not part of `make test`, because it needs OCCT installed; `w3d-kernel-occt` is excluded from the workspace's `default-members` so that `make test` stays a no-setup command. |
 | `make web` | Not a check. Builds the browser bundle into `web/dist/` — needs `wasm-bindgen-cli` at the same version as the `wasm-bindgen` dependency; a mismatch is a runtime error about an unknown import, not a build failure. |
+| `make app-test` | The modeller **in a real window**: `xvfb-run`, thirty frames, and a screenshot in which the chrome and the viewport are checked *separately* — a run where egui drew and the scene did not looks identical in a colour count. Carries its own negative controls. Needs `xvfb`, a rasteriser and `libxkbcommon-x11-0`. |
 | `make web-test` | The viewport **in a real browser**: WebGPU offered, WebGL2 forced, and a run with no COOP/COEP that must degrade visibly. The only check here that is not native. Needs `npm install` in `web/test/`, so it is not part of `make test`. |
 | `make occt-headers` | Not a check. Fetches headers a distribution failed to ship, at the revision in `kernel-occt/native/UPSTREAM` — needed on Ubuntu Noble. Deliberately not run from `build.rs`: a build that reaches the network on its own is not a build anybody can reproduce. |
 
@@ -223,6 +226,12 @@ Still owed, and named so that the gap is not mistaken for coverage:
   end-to-end, picking included. The fast path is still an argument.
 - **An OCCT build for wasm.** `kernel-occt` compiles and passes natively; no Emscripten build
   exists, and `-fwasm-exceptions` against `-fexceptions` has not been decided.
+
+**Keep the window out of what can be tested without one.** `w3d-app` is split into an editor that
+has no window and no GPU in it — commands, selection, the rule that a drag is not a click — and a
+shell that is winit, egui and a surface. A winit event loop cannot be driven from `cargo test` and a
+state machine can, so everything that could be wrong and could be caught belongs on the first side.
+The shell is thin by construction, and `make app-test` covers what is left of it.
 
 **Prefer extending `w3d-kernel-fake` over mocking `core`.** A test that stubs the document proves
 nothing; one that stubs the kernel proves the whole modeller.

@@ -1,0 +1,75 @@
+//! `w3d` — the modeller.
+//!
+//! Everything interesting is in the library; this is argument parsing and a
+//! choice of kernel. The kernel is a compile-time choice rather than a flag
+//! because `w3d-kernel-occt` needs OpenCASCADE installed, and `cargo run` must
+//! work without it.
+
+use w3d_app::editor::Command;
+use w3d_app::shell::{Options, Shell};
+use w3d_core::kernel::BooleanOp;
+use winit::event_loop::{ControlFlow, EventLoop};
+
+fn main() -> std::process::ExitCode {
+    let mut options = Options::default();
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--frames" => options.frames = args.next().and_then(|n| n.parse().ok()),
+            "--screenshot" => options.screenshot = args.next(),
+            // A scene to start with, so that a screenshot has something in it
+            // and so that `cargo run -- --demo` is a one-command look at the
+            // thing.
+            "--demo" => {
+                options.startup = vec![
+                    Command::AddBox,
+                    Command::AddCylinder,
+                    Command::SelectAll,
+                    Command::Boolean(BooleanOp::Difference),
+                    Command::ZoomToFit,
+                ];
+            }
+            "--help" | "-h" => {
+                println!(
+                    "w3d [--demo] [--frames N] [--screenshot PATH]\n\
+                     \n\
+                     b/s/c add a box, sphere or cylinder · u/d/i union, difference, intersect\n\
+                     f frames · ctrl-a selects all · Delete removes · Esc clears · ctrl-z undo\n\
+                     drag orbits · middle-drag pans · wheel zooms · click selects"
+                );
+                return std::process::ExitCode::SUCCESS;
+            }
+            other => {
+                eprintln!("unknown argument: {other}");
+                return std::process::ExitCode::FAILURE;
+            }
+        }
+    }
+
+    let event_loop = match EventLoop::new() {
+        Ok(event_loop) => event_loop,
+        Err(e) => {
+            // On a machine with no display this is the honest failure, and it
+            // says which one rather than panicking inside winit.
+            eprintln!("no event loop: {e}");
+            return std::process::ExitCode::FAILURE;
+        }
+    };
+    event_loop.set_control_flow(ControlFlow::Poll);
+
+    #[cfg(feature = "occt")]
+    let kernel = w3d_kernel_occt::OcctKernel::new();
+    #[cfg(not(feature = "occt"))]
+    let kernel = w3d_kernel_fake::FakeKernel::default();
+
+    let mut shell = Shell::new(kernel, options);
+    if let Err(e) = event_loop.run_app(&mut shell) {
+        eprintln!("{e}");
+        return std::process::ExitCode::FAILURE;
+    }
+    if shell.exit_code == 0 {
+        std::process::ExitCode::SUCCESS
+    } else {
+        std::process::ExitCode::FAILURE
+    }
+}

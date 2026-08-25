@@ -1,0 +1,51 @@
+[package]
+name = "w3d-app"
+description = "The modeller: a window, a UI, and the state machine between them."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# The library is the editor and is testable with no window at all. The binary
+# is the winit shell around it, and is the only part that needs a display.
+[lib]
+name = "w3d_app"
+path = "src/lib.rs"
+
+[[bin]]
+name = "w3d"
+path = "src/main.rs"
+
+[dependencies]
+w3d-core = { path = "../core" }
+w3d-render = { path = "../render" }
+w3d-kernel-fake = { path = "../kernel-fake" }
+
+egui = "0.36"
+egui-wgpu = "0.36"
+egui-winit = { version = "0.36", default-features = false, features = ["wayland", "x11"] }
+winit = "0.30"
+pollster = "0.4"
+wgpu = { version = "30", default-features = false, features = [
+    "std",
+    "wgsl",
+    "parking_lot",
+    "vulkan",
+    "metal",
+    "dx12",
+] }
+
+# OpenCASCADE is optional for the same reason it is not a default workspace
+# member: `cargo check` must not need OCCT installed. `cargo run --features occt`
+# is the modeller with real geometry; without it the fake kernel draws bounding
+# boxes, which is enough to develop the shell against.
+[dependencies.w3d-kernel-occt]
+path = "../kernel-occt"
+optional = true
+
+[features]
+default = []
+occt = ["dep:w3d-kernel-occt"]
+
+[lints]
+workspace = true
