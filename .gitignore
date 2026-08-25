@@ -1,0 +1,6 @@
+/target
+/.tmp
+/dist
+/pkg
+node_modules
+*.wasm
