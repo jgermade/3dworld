@@ -83,10 +83,20 @@ def main(path):
     import FreeCAD
     import Part
 
-    print(f"FreeCAD {FreeCAD.Version()[0]}.{FreeCAD.Version()[1]}.{FreeCAD.Version()[2]}")
+    # Whatever this build calls itself. The fields are not the same across
+    # versions — 0.19 leaves the third empty — so they are joined rather than
+    # formatted, because the point is to record which program answered.
+    version = ".".join(str(f) for f in FreeCAD.Version()[:3] if str(f).strip())
+    print(f"FreeCAD {version}")
 
-    shape = Part.Shape()
-    shape.read(path)
+    # `Part.read` is the documented general importer and dispatches on the
+    # extension; `Shape.read` does too on the versions that have it, and is the
+    # fallback rather than the first choice.
+    if hasattr(Part, "read"):
+        shape = Part.read(path)
+    else:
+        shape = Part.Shape()
+        shape.read(path)
     solids = shape.Solids
     failures = []
 

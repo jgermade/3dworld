@@ -26,21 +26,23 @@ jobs:
     name: make web-test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Rust, and the wasm target
+        id: rust
         run: |
           rustup update stable
           rustup default stable
           rustup target add wasm32-unknown-unknown
-      - uses: actions/cache@v4
+          echo "version=$(rustc --version | tr ' ()/' '____')" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             ~/.cargo/bin/wasm-bindgen
             target
-          key: cargo-web-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: cargo-web-
+          key: cargo-web-${{ steps.rust.outputs.version }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: cargo-web-${{ steps.rust.outputs.version }}-
       - name: wasm-bindgen-cli, at the version the dependency pins
         # A mismatch here is a runtime error in the browser about an unknown
         # import, not a build failure — which is why the version is read out of

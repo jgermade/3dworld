@@ -24,8 +24,15 @@ with no OCCT in it (`pip install steputils`) resolves every reference in a file 
 its faces by surface type — so the hole in the plate is asserted to be *in the file* — and real
 files from **Pro/ENGINEER**, **Siemens NX** and **STEP Tools** go through the real reader,
 including one that must be **refused**, because it is a surface model and this is a modeller for
-solids. What has still never happened is another program opening one of ours; nothing that could is
-installable here.
+solids. `make freecad-check` goes one step further: FreeCAD opens a file we wrote and reports the volume of
+each solid, which is compared against **arithmetic** — a plate of 40×40×10 with a ⌀12 hole is
+16000 − π·6²·10 mm³ because that is what a cylinder is. No CAD kernel has a vote on that number, so
+agreeing with it is not two kernels agreeing with each other.
+
+What it is *not* is a second geometry kernel: FreeCAD's is OpenCASCADE too. Another application's
+import path — its XDE layer, its units, its document model — is a real thing to test and not the
+thing still missing. A program built on Parasolid or ACIS saying the same would be, and none of
+them runs in CI.
 
 It is early. No edges drawn; no fillets; and the browser build has no real geometry behind it
 until OCCT is built for Emscripten.
@@ -42,7 +49,14 @@ make app-test   # open the modeller in a real window under Xvfb, and check it dr
 make step-samples  # fetch STEP files other programs wrote, pinned by checksum
 make step-check    # ours read by a parser that is not OCCT, and theirs by ours
 make app-test-step # a STEP file out of one process and drawn by another
+make freecad-check # FreeCAD opens ours and weighs it against arithmetic
 ```
+
+[CI](.github/workflows/ci.yml) runs all of those on every push, because each one needs something
+installed and a green run that skipped them would be worth nothing. The browser check is
+[nightly](.github/workflows/nightly.yml) and on demand: it is the slowest by a distance and checks
+a thing that changes rarely. **There is still no GPU in CI** — the window job runs on a software
+rasteriser, which proves the pipeline and nothing about a driver.
 
 The desktop shell needs a display and, on X11, `libxkbcommon-x11-0` — without it the process
 panics inside `xkbcommon-dl` before a window exists. To run it headless:

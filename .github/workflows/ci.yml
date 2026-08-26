@@ -11,6 +11,10 @@
 # licence and a supply chain, and this repository has a rule about those; the
 # caching one everybody uses would be a fine choice and it is still a choice
 # nobody has argued for in a record file.
+#
+# The versions are the ones that run on Node 24. The older majors still work
+# and print a deprecation warning on every step, which is how a warning becomes
+# a thing nobody reads.
 
 name: CI
 
@@ -31,24 +35,31 @@ jobs:
     name: make test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Rust
+        id: rust
         # The runner image's Rust is usually current and this workspace needs
         # 1.95 or later for egui 0.36. Pinning a version here would be a third
         # place to keep in step with the tree; updating is cheap and honest.
+        #
+        # The version goes into the cache key below. A `target/` built by an
+        # older compiler, restored under a key that only knows about
+        # Cargo.lock, is a rebuild that looks like a cache hit and a failure
+        # that looks like nothing.
         run: |
           rustup update stable
           rustup default stable
           rustup component add clippy rustfmt
           rustc --version
-      - uses: actions/cache@v4
+          echo "version=$(rustc --version | tr ' ()/' '____')" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: cargo-test-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: cargo-test-
+          key: cargo-test-${{ steps.rust.outputs.version }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: cargo-test-${{ steps.rust.outputs.version }}-
       - run: make test
       - name: The wasm target still builds, and still has WebGL2 in it
         run: make wasm
@@ -61,12 +72,14 @@ jobs:
     name: make test-occt + step-check
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Rust
+        id: rust
         run: |
           rustup update stable
           rustup default stable
           rustup component add clippy
+          echo "version=$(rustc --version | tr ' ()/' '____')" >> "$GITHUB_OUTPUT"
       - name: OpenCASCADE
         run: |
           sudo apt-get update
@@ -83,14 +96,14 @@ jobs:
           else
             echo "the distribution shipped it"
           fi
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: cargo-occt-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: cargo-occt-
+          key: cargo-occt-${{ steps.rust.outputs.version }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: cargo-occt-${{ steps.rust.outputs.version }}-
       - run: make test-occt
       - name: A parser that is not OpenCASCADE
         run: pip install steputils
@@ -98,7 +111,7 @@ jobs:
         run: make step-samples
       - run: make step-check
       - name: Keep the file, so another program can be asked about it
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ours.step
           path: .tmp/ours.step
@@ -111,11 +124,13 @@ jobs:
     name: make app-test + app-test-step
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Rust
+        id: rust
         run: |
           rustup update stable
           rustup default stable
+          echo "version=$(rustc --version | tr ' ()/' '____')" >> "$GITHUB_OUTPUT"
       - name: A display, a rasteriser, and OpenCASCADE
         run: |
           sudo apt-get update
@@ -128,14 +143,14 @@ jobs:
           if [ ! -f /usr/include/opencascade/NCollection_AliasedArray.hxx ]; then
             make occt-headers
           fi
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: cargo-window-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: cargo-window-
+          key: cargo-window-${{ steps.rust.outputs.version }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: cargo-window-${{ steps.rust.outputs.version }}-
       - run: make app-test
       - run: make app-test-step
 
@@ -152,12 +167,12 @@ jobs:
     needs: occt
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: FreeCAD
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends freecad
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           name: ours.step
       - name: Weigh it
