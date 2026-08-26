@@ -1,0 +1,179 @@
+# What CI is for here, and what it is not.
+#
+# `make test` needs no setup and is the gate. Everything else in this file
+# exists because the interesting checks in this repository are precisely the
+# ones that need something installed — OpenCASCADE, a rasteriser, a browser, a
+# parser that is not OCCT — and a green run that skipped all of them is the
+# failure mode `AGENTS.md` keeps arguing against: *a skipped test looks like a
+# passed test*.
+#
+# Only `actions/*` are used. A third-party action is a dependency with a
+# licence and a supply chain, and this repository has a rule about those; the
+# caching one everybody uses would be a fine choice and it is still a choice
+# nobody has argued for in a record file.
+#
+# The versions are the ones that run on Node 24. The older majors still work
+# and print a deprecation warning on every step, which is how a warning becomes
+# a thing nobody reads.
+
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # The no-setup gate: check, clippy -D warnings, fmt, licences, and the tests.
+  test:
+    name: make test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Rust
+        id: rust
+        # The runner image's Rust is usually current and this workspace needs
+        # 1.95 or later for egui 0.36. Pinning a version here would be a third
+        # place to keep in step with the tree; updating is cheap and honest.
+        #
+        # The version goes into the cache key below. A `target/` built by an
+        # older compiler, restored under a key that only knows about
+        # Cargo.lock, is a rebuild that looks like a cache hit and a failure
+        # that looks like nothing.
+        run: |
+          rustup update stable
+          rustup default stable
+          rustup component add clippy rustfmt
+          rustc --version
+          echo "version=$(rustc --version | tr ' ()/' '____')" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-test-${{ steps.rust.outputs.version }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: cargo-test-${{ steps.rust.outputs.version }}-
+      - run: make test
+      - name: The wasm target still builds, and still has WebGL2 in it
+        run: make wasm
+
+  # OpenCASCADE, and STEP against something that is not us. One job rather than
+  # two because each job is a fresh machine and the second would rebuild two
+  # hundred crates to run one command; the steps are named, so a failure still
+  # says which check failed.
+  occt:
+    name: make test-occt + step-check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Rust
+        id: rust
+        run: |
+          rustup update stable
+          rustup default stable
+          rustup component add clippy
+          echo "version=$(rustc --version | tr ' ()/' '____')" >> "$GITHUB_OUTPUT"
+      - name: OpenCASCADE
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libocct-foundation-dev libocct-modeling-data-dev \
+            libocct-modeling-algorithms-dev libocct-data-exchange-dev
+      - name: The header Ubuntu Noble forgot to ship, if this image forgot it too
+        # Conditional rather than unconditional: the packaging bug is real and
+        # is also fixed in some images, and fetching a header nobody needs is a
+        # network call nobody asked for. See README.md.
+        run: |
+          if [ ! -f /usr/include/opencascade/NCollection_AliasedArray.hxx ]; then
+            make occt-headers
+          else
+            echo "the distribution shipped it"
+          fi
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-occt-${{ steps.rust.outputs.version }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: cargo-occt-${{ steps.rust.outputs.version }}-
+      - run: make test-occt
+      - name: A parser that is not OpenCASCADE
+        run: pip install steputils
+      - name: Files three other programs wrote
+        run: make step-samples
+      - run: make step-check
+      - name: Keep the file, so another program can be asked about it
+        uses: actions/upload-artifact@v7
+        with:
+          name: ours.step
+          path: .tmp/ours.step
+          retention-days: 7
+
+  # The modeller in a real window, and a STEP file out of one process and drawn
+  # by another. Software rasteriser, so it proves the pipeline runs and nothing
+  # about a real GPU — which the register has said since the viewport landed.
+  window:
+    name: make app-test + app-test-step
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Rust
+        id: rust
+        run: |
+          rustup update stable
+          rustup default stable
+          echo "version=$(rustc --version | tr ' ()/' '____')" >> "$GITHUB_OUTPUT"
+      - name: A display, a rasteriser, and OpenCASCADE
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            xvfb mesa-vulkan-drivers libxkbcommon-x11-0 \
+            libocct-foundation-dev libocct-modeling-data-dev \
+            libocct-modeling-algorithms-dev libocct-data-exchange-dev
+      - name: The header Ubuntu Noble forgot to ship, if this image forgot it too
+        run: |
+          if [ ! -f /usr/include/opencascade/NCollection_AliasedArray.hxx ]; then
+            make occt-headers
+          fi
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-window-${{ steps.rust.outputs.version }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: cargo-window-${{ steps.rust.outputs.version }}-
+      - run: make app-test
+      - run: make app-test-step
+
+  # Another program opens a file this one wrote, and weighs it against
+  # arithmetic. FreeCAD's kernel is OpenCASCADE, so this is another
+  # application's import path rather than a second opinion on the geometry —
+  # the difference is written down in tools/freecad_volume.py and in the
+  # register, and neither should be quietly forgotten.
+  #
+  # 22.04 because FreeCAD is not in Ubuntu 24.04 at all: it is in jammy at
+  # 0.19.2 and returns in questing at 1.0. Nothing here needs the new one.
+  freecad:
+    name: FreeCAD reads ours
+    needs: occt
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v7
+      - name: FreeCAD
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends freecad
+      - uses: actions/download-artifact@v7
+        with:
+          name: ours.step
+      - name: Weigh it
+        run: make freecad-check FREECAD_STEP=ours.step

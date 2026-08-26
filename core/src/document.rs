@@ -311,6 +311,61 @@ impl<K: GeometryKernel> Document<K> {
         Ok(())
     }
 
+    // ---- interchange --------------------------------------------------
+
+    /// Writes these nodes as a STEP file, for another program to read.
+    ///
+    /// Nothing but geometry crosses: names, visibility, the tolerance, the
+    /// document's structure and its history are all this document's and none
+    /// of them are in a STEP file. What comes back from a round-trip is
+    /// solids, in order, and that is the trade the format is for.
+    pub fn export_step(&self, ids: &[NodeId]) -> Result<Vec<u8>> {
+        let bodies = ids
+            .iter()
+            .map(|id| self.body_of(*id))
+            .collect::<Result<Vec<Body>>>()?;
+        Ok(self.kernel.export_step(&bodies)?)
+    }
+
+    /// Adds one node per solid in a STEP file, named after `name`.
+    ///
+    /// **One transaction**, so an import of forty solids is one undo and not
+    /// forty. That is not a general fix for grouping — every other edit here
+    /// is still its own step — it is that an import has an obvious boundary
+    /// and undoing it halfway is not a state anybody asked for.
+    ///
+    /// The nodes are appended: importing adds to the document rather than
+    /// replacing it, which is the opposite of opening a `.w3d` and is the
+    /// difference between the two operations. A `.w3d` carries a whole
+    /// document, kernel and all; a STEP file carries solids.
+    pub fn import_step(&mut self, bytes: &[u8], name: &str) -> Result<Vec<NodeId>> {
+        let bodies = self.kernel.import_step(bytes)?;
+        let one = bodies.len() == 1;
+
+        self.history.begin("Import STEP");
+        let mut ids = Vec::with_capacity(bodies.len());
+        for (n, body) in bodies.into_iter().enumerate() {
+            self.created.push(body);
+            let node = Node {
+                // A file of one solid keeps the file's name; several are
+                // numbered, because "bracket 1" alone reads like there is a
+                // "bracket 2" somewhere that failed to arrive.
+                name: if one {
+                    name.to_string()
+                } else {
+                    format!("{name} {}", n + 1)
+                },
+                body,
+                visible: true,
+            };
+            let id = self.nodes.insert(node.clone());
+            self.history.record(Edit::Insert { id, node });
+            ids.push(id);
+        }
+        self.history.commit();
+        Ok(ids)
+    }
+
     // ---- history ------------------------------------------------------
 
     pub fn undo(&mut self) -> Option<&'static str> {

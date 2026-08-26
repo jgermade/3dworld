@@ -94,7 +94,10 @@ document with the geometry missing. This is the rule the whole design turns on:
 
 Moving geometry *between* kernels is what **STEP** is for. That is a different
 operation with a different name in the user interface, and it is lossy in ways
-a user should be asked to accept rather than have happen to them.
+a user should be asked to accept rather than have happen to them. It exists:
+the modeller writes AP214 in millimetres and reads a body per solid back, so
+the refusal above now names a door that is there. What crosses it is geometry
+and nothing else — no names, no visibility, no tolerance, no document.
 
 The blob path is an opaque name. `geometry/0.bin` is what this writer produces;
 a reader must follow `nodes[].geometry` and must not assume the numbering.

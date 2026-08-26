@@ -19,6 +19,8 @@ fn main() -> std::process::ExitCode {
             "--screenshot" => options.screenshot = args.next(),
             "--open" => options.open = args.next().map(Into::into),
             "--save-as" => options.save_as = args.next().map(Into::into),
+            "--import-step" => options.import_step = args.next().map(Into::into),
+            "--export-step" => options.export_step = args.next().map(Into::into),
             // A scene to start with, so that a screenshot has something in it
             // and so that `cargo run -- --demo` is a one-command look at the
             // thing.
@@ -37,9 +39,14 @@ fn main() -> std::process::ExitCode {
                      \n\
                      b/s/c add a box, sphere or cylinder · u/d/i union, difference, intersect\n\
                      f frames · ctrl-a selects all · Delete removes · Esc clears · ctrl-z undo\n\
-                     ctrl-s saves · drag orbits · middle-drag pans · wheel zooms\n\
+                     ctrl-s saves · ctrl-e exports STEP · drag orbits · middle-drag pans\n\
+                     wheel zooms\n\
                      \n\
-                     --open FILE reads a .w3d · --save-as FILE writes one"
+                     --open FILE reads a .w3d · --save-as FILE writes one\n\
+                     --import-step FILE adds the solids in a STEP file\n\
+                     --export-step FILE writes the document as STEP\n\
+                     \n\
+                     STEP needs a kernel that does it: build with --features occt."
                 );
                 return std::process::ExitCode::SUCCESS;
             }

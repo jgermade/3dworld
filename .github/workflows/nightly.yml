@@ -1,0 +1,61 @@
+# The viewport in a real browser, on a schedule rather than on every push.
+#
+# It is the slowest check by a distance — a wasm build, `wasm-bindgen-cli`
+# compiled from source at a version that must match the dependency exactly, and
+# a browser downloaded by Playwright — and it is checking a thing that changes
+# rarely. Nightly, and on demand.
+#
+# A schedule only fires on the default branch. On a branch, run it by hand from
+# the Actions tab; that is not a limitation worth working around.
+
+name: Nightly
+
+on:
+  schedule:
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  browser:
+    name: make web-test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Rust, and the wasm target
+        id: rust
+        run: |
+          rustup update stable
+          rustup default stable
+          rustup target add wasm32-unknown-unknown
+          echo "version=$(rustc --version | tr ' ()/' '____')" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin/wasm-bindgen
+            target
+          key: cargo-web-${{ steps.rust.outputs.version }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: cargo-web-${{ steps.rust.outputs.version }}-
+      - name: wasm-bindgen-cli, at the version the dependency pins
+        # A mismatch here is a runtime error in the browser about an unknown
+        # import, not a build failure — which is why the version is read out of
+        # the lockfile rather than written down a second time.
+        run: |
+          version=$(grep -A1 '^name = "wasm-bindgen"$' Cargo.lock | grep '^version' | head -1 | cut -d'"' -f2)
+          echo "wasm-bindgen $version"
+          if [ "$(wasm-bindgen --version 2>/dev/null | awk '{print $2}')" != "$version" ]; then
+            cargo install wasm-bindgen-cli --version "$version" --force
+          fi
+      - name: Playwright, and a browser
+        run: |
+          cd web/test
+          npm install
+          npx playwright install --with-deps chromium
+      - run: make web-test

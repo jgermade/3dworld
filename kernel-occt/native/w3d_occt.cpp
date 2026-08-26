@@ -11,6 +11,7 @@
 
 #include <cmath>
 #include <cstring>
+#include <mutex>
 #include <sstream>
 #include <string>
 #include <unordered_map>
@@ -32,6 +33,23 @@
 #include <BRepTools.hxx>
 #include <BRep_Builder.hxx>
 #include <Standard_Failure.hxx>
+
+// STEP, and the machinery for keeping it quiet. See the block above
+// w3d_occt_export_step.
+#include <APIHeaderSection_MakeHeader.hxx>
+#include <Interface_Static.hxx>
+#include <Message.hxx>
+#include <Message_Messenger.hxx>
+#include <Message_Printer.hxx>
+#include <STEPControl_Reader.hxx>
+#include <STEPControl_Writer.hxx>
+#include <StepAP214.hxx>
+#include <StepAP214_Protocol.hxx>
+#include <StepData_StepModel.hxx>
+#include <StepData_StepWriter.hxx>
+#include <TCollection_AsciiString.hxx>
+#include <TCollection_HAsciiString.hxx>
+
 #include <TopAbs_Orientation.hxx>
 #include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
@@ -462,6 +480,212 @@ void w3d_occt_bytes_free(W3dOcctBytes *bytes) {
   if (bytes && bytes->owner) {
     delete static_cast<std::string *>(bytes->owner);
     std::memset(bytes, 0, sizeof(*bytes));
+  }
+}
+
+namespace {
+
+// Everything STEP needs that is not per-context, and all of it is global to
+// the *process*: `Interface_Static` is one settings table for the whole
+// program, and OCCT's diagnostics go to one default messenger. So both
+// directions take this lock. It is the only lock in the shim, and the header
+// says so where somebody parallelising tessellation will read it.
+std::mutex g_step_lock;
+
+/// Catches OCCT's own diagnostics instead of letting them reach stdout.
+///
+/// The STEP reader reports a syntax error by *printing* it — "Line 2:
+/// Incorrect syntax: unexpected TYPE" — and returning a status code with no
+/// detail in it. So the choice is between a library writing to somebody's
+/// terminal and catching what it writes. Caught, it becomes the message behind
+/// W3D_OCCT_ERR_FAILED, which is where a user can actually read it; and the
+/// transfer statistics OCCT prints on every export stop existing, which they
+/// should, because a browser console is not a log file.
+class Collector : public Message_Printer {
+public:
+  mutable std::string text;
+
+protected:
+  void send(const TCollection_AsciiString &message,
+            const Message_Gravity gravity) const override {
+    if (gravity < Message_Warning) {
+      return; // statistics and progress: noise, and not ours to print
+    }
+    if (!text.empty()) {
+      text += "; ";
+    }
+    text += message.ToCString();
+  }
+};
+
+// Installs a Collector for the duration of a scope and puts the real printers
+// back afterwards, including when an OCCT exception unwinds through it.
+struct Diagnostics {
+  Handle(Collector) collector;
+  Message_SequenceOfPrinters saved;
+
+  Diagnostics() : collector(new Collector) {
+    Message_SequenceOfPrinters &printers =
+        Message::DefaultMessenger()->ChangePrinters();
+    saved = printers;
+    printers.Clear();
+    printers.Append(collector);
+  }
+
+  ~Diagnostics() {
+    Message::DefaultMessenger()->ChangePrinters() = saved;
+  }
+
+  // What OCCT said, or `fallback` when it said nothing. An error with no
+  // sentence in it is the failure mode this whole class exists to avoid.
+  std::string say(const char *fallback) const {
+    return collector->text.empty() ? std::string(fallback) : collector->text;
+  }
+};
+
+} // namespace
+
+int32_t w3d_occt_export_step(W3dOcctContext *ctx, const uint32_t *bodies,
+                             uint32_t count, W3dOcctBytes *out) {
+  if (!bodies || count == 0) {
+    return W3D_OCCT_ERR_DEGENERATE;
+  }
+  // Every handle resolved before a byte is written, so a stale one is a
+  // refusal rather than a file with half a document in it.
+  std::vector<TopoDS_Shape> shapes;
+  shapes.reserve(count);
+  for (uint32_t i = 0; i < count; ++i) {
+    const TopoDS_Shape *shape = ctx->find(bodies[i]);
+    if (!shape) {
+      return W3D_OCCT_ERR_UNKNOWN_BODY;
+    }
+    shapes.push_back(*shape);
+  }
+
+  return guarded([&] {
+    const std::lock_guard<std::mutex> lock(g_step_lock);
+    const Diagnostics diagnostics;
+
+    // Millimetres. The document above has no units at all — a number in it is
+    // just a number — so exporting is the moment somebody has to decide what
+    // those numbers meant, and this is that decision, stated in the file where
+    // the receiving program will read it. The import side states the same one.
+    Interface_Static::SetCVal("write.step.unit", "MM");
+    // AP214 IS. AP242 is the newer schema and the one to move to when there is
+    // anything in a document worth carrying that AP214 cannot hold — colours,
+    // assemblies, tolerances. Today there is not, and AP214 is what every
+    // program in the list this format exists to reach has read for twenty
+    // years.
+    Interface_Static::SetIVal("write.step.schema", 4);
+
+    STEPControl_Writer writer;
+    for (const TopoDS_Shape &shape : shapes) {
+      if (writer.Transfer(shape, STEPControl_AsIs) != IFSelect_RetDone) {
+        return fail(diagnostics.say("OpenCASCADE would not transfer the shape "
+                                    "to STEP").c_str());
+      }
+    }
+
+    Handle(StepData_StepModel) model = writer.Model();
+    // Who wrote it. Not decoration: the first question asked about a STEP file
+    // that opens badly somewhere else is which program produced it, and the
+    // default answer here is "Open CASCADE Shape Model", which is a true
+    // statement about the library and a useless one about the program.
+    APIHeaderSection_MakeHeader header(model);
+    header.SetName(new TCollection_HAsciiString("3dworld"));
+    header.SetOriginatingSystem(new TCollection_HAsciiString("3dworld"));
+    header.Apply(model);
+
+    // Written to a stream rather than through STEPControl_Writer::Write, which
+    // only takes a filename. The trait returns bytes because the browser needs
+    // bytes — there is no filesystem to write to there — and a temporary file
+    // on the way out would be a filesystem dependency inside the kernel.
+    StepData_StepWriter step(model);
+    step.SendModel(StepAP214::Protocol());
+    std::ostringstream stream;
+    if (!step.Print(stream)) {
+      return fail(diagnostics.say("the STEP writer produced nothing").c_str());
+    }
+    auto *owned = new std::string(stream.str());
+    if (owned->empty()) {
+      delete owned;
+      return fail("the STEP writer produced nothing");
+    }
+    out->data = reinterpret_cast<const uint8_t *>(owned->data());
+    out->len = static_cast<uint32_t>(owned->size());
+    out->owner = owned;
+    return W3D_OCCT_OK;
+  });
+}
+
+int32_t w3d_occt_import_step(W3dOcctContext *ctx, const uint8_t *data,
+                             uint32_t len, W3dOcctBodies *out) {
+  if (!data || len == 0) {
+    return fail("no bytes: not a STEP file");
+  }
+  return guarded([&] {
+    const std::lock_guard<std::mutex> lock(g_step_lock);
+    const Diagnostics diagnostics;
+
+    // The unit STEP is converted *to*, and the same one export states. A file
+    // in inches arrives scaled, which is the whole point of a file carrying
+    // its unit.
+    Interface_Static::SetCVal("xstep.cascade.unit", "MM");
+
+    STEPControl_Reader reader;
+    std::istringstream stream(
+        std::string(reinterpret_cast<const char *>(data), len));
+    if (reader.ReadStream("w3d", stream) != IFSelect_RetDone) {
+      // Not UNSUPPORTED. This build reads STEP; these bytes are not STEP, and
+      // the two sentences send a user to two different places.
+      return fail(diagnostics.say("not a STEP file").c_str());
+    }
+    reader.TransferRoots();
+
+    // Solids only, and every solid: a file may hold one shape that is a
+    // compound of twenty, and a user who imports a bracket and a bolt wants
+    // two things they can click on rather than one they cannot take apart.
+    std::vector<TopoDS_Shape> solids;
+    uint32_t faces = 0;
+    for (int i = 1; i <= reader.NbShapes(); ++i) {
+      const TopoDS_Shape shape = reader.Shape(i);
+      for (TopExp_Explorer e(shape, TopAbs_SOLID); e.More(); e.Next()) {
+        solids.push_back(e.Current());
+      }
+      TopTools_IndexedMapOfShape map;
+      TopExp::MapShapes(shape, TopAbs_FACE, map);
+      faces += static_cast<uint32_t>(map.Extent());
+    }
+
+    if (solids.empty()) {
+      // A file that imports into nothing at all is a bug report about the
+      // modeller, filed against the wrong program. Say what was in it.
+      std::ostringstream why;
+      why << "the STEP file has no solids in it: " << reader.NbShapes()
+          << (reader.NbShapes() == 1 ? " shape, " : " shapes, ") << faces
+          << (faces == 1 ? " face, and no closed volume"
+                         : " faces, and no closed volume");
+      return fail(why.str().c_str());
+    }
+
+    // Stored last, so that a failure above leaves no bodies behind that the
+    // caller never hears about and can never delete.
+    auto *ids = new std::vector<uint32_t>();
+    ids->reserve(solids.size());
+    for (const TopoDS_Shape &solid : solids) {
+      ids->push_back(ctx->store(solid));
+    }
+    out->ids = ids->data();
+    out->len = static_cast<uint32_t>(ids->size());
+    out->owner = ids;
+    return W3D_OCCT_OK;
+  });
+}
+
+void w3d_occt_bodies_free(W3dOcctBodies *bodies) {
+  if (bodies && bodies->owner) {
+    delete static_cast<std::vector<uint32_t> *>(bodies->owner);
+    std::memset(bodies, 0, sizeof(*bodies));
   }
 }
 

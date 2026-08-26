@@ -194,11 +194,21 @@ capability, it is declared there first**, then implemented behind whichever back
 | `w3d_kernel::conformance` | One suite, against *every* backend, `FakeKernel` included. A backend is only a backend if it passes, and this is what keeps the kernel decision reversible. |
 | `w3d_format` round-trip | A saved document keeps its nodes, names, visibility, tolerance, quality and shared bodies, and refuses a file written by another kernel — both directions. The container is asserted to be a zip a standard tool can open. |
 | `make wasm` | The default members build for `wasm32-unknown-unknown`, **and the WebGL2 backend is really in the tree** — the second half because asking wgpu for `gles` instead of `webgl` compiles cleanly and ships no fallback at all. |
-| `make test-occt` | The conformance suite against **real geometry**, the document driven by OpenCASCADE, and the only end-to-end test there is: real geometry through the real viewport, and a click that names a face. Outside `make test` because it needs OCCT installed — `w3d-kernel-occt` is outside `default-members` so `make test` stays a no-setup command. |
+| `make test-occt` | The conformance suite against **real geometry**, the document driven by OpenCASCADE, real geometry through the real viewport with a click that names a face, and STEP: bytes asserted to be a part-21 file *by inspection*, read back by a kernel that never saw the geometry. It also runs clippy over this crate, which `make clippy` cannot reach — being outside `default-members` is what keeps `make test` free of setup, and it is also what kept the FFI crate unlinted until somebody looked. Outside `make test` because it needs OCCT installed. |
 | `make app-test` | The modeller **in a real window**: `xvfb-run`, thirty frames, and a screenshot in which chrome and viewport are checked *separately* — a run where egui drew and the scene did not looks identical in a colour count. Carries its own negative controls. Needs `xvfb`, a rasteriser, `libxkbcommon-x11-0`. |
+| `make step-check` | STEP against something that is not us, in both directions: a file this program wrote, read by a pure-Python part-21 parser that shares no code with OCCT — every reference resolved, faces counted by surface type, so *the hole in the plate is asserted to be in the file* — and files from Pro/ENGINEER, Siemens NX and STEP Tools imported through the real reader, one of which must be refused because it is a surface model. Needs `make step-samples` first, which fetches them pinned by SHA-256 and commits nothing. **What it does not do is prove another program can open ours**; nothing that could is installable, and the register says so. |
+| `make freecad-check` | Another *program* opens a file this one wrote and weighs each solid against **arithmetic** — 16000 − π·6²·10 mm³ for the plate, because that is what a cylinder is. It is what separates "it imported" from "it imported the right thing, at the right size, in the right unit". It is **not** a second geometry kernel: FreeCAD's is OpenCASCADE, so what this covers is another application's import path — XDE, units, its document model. Needs FreeCAD, which is in Ubuntu 22.04 and absent from 24.04. |
+| `make app-test-step` | A STEP file written by one process and drawn by another, both of them the modeller. The kernel tests prove a kernel can read what a kernel wrote; this is the only place the claim is about the *program*. Needs OCCT **and** a display, so it is neither `make test` nor `make app-test`. |
 | `make web-test` | The viewport **in a real browser**: WebGPU offered, WebGL2 forced, and a run with no COOP/COEP that must degrade visibly. The only check here that is not native. Needs `npm install` in `web/test/`, so it is outside `make test`. |
 | `make web` | Not a check. Builds `web/dist/` — needs `wasm-bindgen-cli` at the `wasm-bindgen` dependency's version; a mismatch is a runtime error about an unknown import, not a build failure. |
 | `make occt-headers` | Not a check. Fetches headers a distribution failed to ship, at the revision in `kernel-occt/native/UPSTREAM` — needed on Ubuntu Noble. Deliberately not run from `build.rs`: a build that reaches the network on its own is not reproducible. |
+
+**Where these run.** [`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs every row above
+except the browser on each push — the whole point of CI here is the checks that need something
+installed, since `make test` is the one anybody can run anyway. The browser is
+[nightly](.github/workflows/nightly.yml) and on demand. Only `actions/*` are used: a third-party
+action is a dependency with a licence and a supply chain, and widening that list is a decision that
+gets an argument in a record file rather than an edit.
 
 **What is not covered is not listed here.** A green run is not evidence the viewport works, and the
 gaps — no GPU and no browser in CI, WebGPU never having rendered a pixel, no degenerate fixtures,
@@ -234,7 +244,22 @@ not open the document with the geometry missing.
 > will not open is a problem you can see.
 
 Moving geometry *between* kernels is what STEP is for: a different operation, with a different name
-in the interface, lossy in ways a user should be asked to accept.
+in the interface, lossy in ways a user should be asked to accept. It is
+`GeometryKernel::export_step` and `import_step` — **named for STEP, not for "an exchange format"**,
+because what a caller has to know is what *this* format costs, and an abstraction over a single
+case hides the paragraph that says so. Three rules came with them and are held by the conformance
+suite:
+
+- **Both directions, or neither.** A backend may honestly not do STEP and answers `Unsupported`
+  from both. One direction only is a door that opens outwards, or a user's work going in and not
+  coming out.
+- **`Unsupported` means the build cannot do STEP.** Bytes that are not a STEP file are `Failed`.
+  Two different sentences, and they send a user to two different places.
+- **The file states its unit, because the document has none.** A number in a document is just a
+  number; exporting is where somebody decides what it meant. Millimetres, both ways.
+
+The checks for all three are conditional and **none of them skips** — every branch asserts
+something, because a skipped check reads as a passed one on the backend it was written for.
 
 - **`GeometryKernel::geometry_format` is a promise about bytes on somebody's disk.** Changing what
   `save_body` produces means changing that string, and a backend that does not is breaking every

@@ -1,0 +1,25 @@
+# STEP files this program did not write.
+#
+# The reader had only ever been given files the writer next to it produced,
+# which is one library agreeing with itself. These are from three other
+# implementations, and `make step-samples` fetches them.
+#
+# **Pinned by checksum, not by revision.** `native/UPSTREAM` names a version
+# and does not enforce one, which the register has held against it since it was
+# written; a hash does enforce it. If a fetch fails the check, the file
+# upstream changed and somebody has to look at what — not edit the hash.
+#
+# Nothing here is committed and nothing here is distributed. They are inputs to
+# a check, they live in a gitignored directory, and `tools/licences.py` names
+# them.
+#
+# Columns: sha256 · verdict · filename · url
+#
+# verdict `import` — must produce solids that can be measured and meshed.
+# verdict `refuse` — must be refused, by name, with what was in the file
+#   instead. A negative control found in the wild rather than invented: a
+#   modeller for solids meeting a file that legitimately has none.
+
+e14f7a52b3f0c53e36730c0f56654b01a17822f1b864dc6c42657223c54cafb6 import as1_pe_203.stp https://raw.githubusercontent.com/tpaviot/pythonocc-demos/master/assets/models/as1_pe_203.stp
+de7b8a513ae923cd11de2323e798ac084cc94f9aa7d7a2a8adab65fc592f8d0b import face_recognition_sample_part.stp https://raw.githubusercontent.com/tpaviot/pythonocc-demos/master/assets/models/face_recognition_sample_part.stp
+e6d3c25c4a3777de1cb71c4988fc1a5cbb9fb5587e4085273d1844a479ddfe33 refuse splinecage.stp https://raw.githubusercontent.com/tpaviot/pythonocc-demos/master/assets/models/splinecage.stp

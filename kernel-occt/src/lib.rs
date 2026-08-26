@@ -2,8 +2,10 @@
 //!
 //! The only crate in this workspace that contains `unsafe`, and it contains it
 //! for one reason: everything here is a call across `native/w3d_occt.h`. That
-//! header is the specification of what an OCCT build must keep exported, and it
-//! is the same thirteen entry points as [`GeometryKernel`] — see its comments.
+//! header is the specification of what an OCCT build must keep exported, one
+//! entry point per [`GeometryKernel`] method plus what C needs and Rust does
+//! not — see its comments. Neither file says how many there are any more; both
+//! said, and both were wrong.
 //!
 //! Nothing OCCT-shaped reaches Rust. Error codes become [`KernelError`],
 //! meshes are copied out and freed on the C++ side, and `TopoDS_Shape` never
@@ -32,6 +34,26 @@ impl RawBytes {
     const fn empty() -> Self {
         Self {
             data: core::ptr::null(),
+            len: 0,
+            owner: core::ptr::null_mut(),
+        }
+    }
+}
+
+/// Several body ids owned by the C++ side until `w3d_occt_bodies_free`. A STEP
+/// file holds any number of solids and nobody knows how many until it has been
+/// read, so this is the one call that answers with a list.
+#[repr(C)]
+struct RawBodies {
+    ids: *const u32,
+    len: u32,
+    owner: *mut core::ffi::c_void,
+}
+
+impl RawBodies {
+    const fn empty() -> Self {
+        Self {
+            ids: core::ptr::null(),
             len: 0,
             owner: core::ptr::null_mut(),
         }
@@ -95,6 +117,19 @@ unsafe extern "C" {
     fn w3d_occt_save_body(ctx: *mut Context, body: u32, out: *mut RawBytes) -> i32;
     fn w3d_occt_load_body(ctx: *mut Context, data: *const u8, len: u32, out: *mut u32) -> i32;
     fn w3d_occt_bytes_free(bytes: *mut RawBytes);
+    fn w3d_occt_export_step(
+        ctx: *mut Context,
+        bodies: *const u32,
+        count: u32,
+        out: *mut RawBytes,
+    ) -> i32;
+    fn w3d_occt_import_step(
+        ctx: *mut Context,
+        data: *const u8,
+        len: u32,
+        out: *mut RawBodies,
+    ) -> i32;
+    fn w3d_occt_bodies_free(bodies: *mut RawBodies);
     fn w3d_occt_last_error() -> *const c_char;
     fn w3d_occt_live_bodies(ctx: *const Context) -> u32;
 }
@@ -330,6 +365,56 @@ impl GeometryKernel for OcctKernel {
             }
         }
     }
+
+    fn export_step(&self, bodies: &[Body]) -> Result<Vec<u8>> {
+        // `Body` is a `#[repr(transparent)]`-shaped newtype only by
+        // convention, so the ids are collected rather than the slice
+        // transmuted. It is a handful of `u32`s next to writing a STEP file.
+        let ids: Vec<u32> = bodies.iter().map(|b| b.raw()).collect();
+        let mut raw = RawBytes::empty();
+        // SAFETY: `ids` outlives the call and the shim writes `raw` only on
+        // OK, pointing at memory that lives until `w3d_occt_bytes_free`.
+        let code = unsafe {
+            w3d_occt_export_step(
+                self.ctx,
+                ids.as_ptr(),
+                u32::try_from(ids.len()).unwrap_or(u32::MAX),
+                &mut raw,
+            )
+        };
+        // `UnknownBody` needs a handle to name and the shim does not say which
+        // one, so the first is named. There is one in the common case, and the
+        // alternative is a widened entry point for a message.
+        check(
+            code,
+            bodies.first().copied().unwrap_or(Body::from_raw(u32::MAX)),
+        )?;
+        let bytes = unsafe { core::slice::from_raw_parts(raw.data, raw.len as usize) }.to_vec();
+        unsafe { w3d_occt_bytes_free(&mut raw) };
+        Ok(bytes)
+    }
+
+    fn import_step(&mut self, bytes: &[u8]) -> Result<Vec<Body>> {
+        let mut raw = RawBodies::empty();
+        // SAFETY: the pointer and length describe `bytes`, which outlives the
+        // call; the ids are copied out before they are freed.
+        let code = unsafe {
+            w3d_occt_import_step(
+                self.ctx,
+                bytes.as_ptr(),
+                u32::try_from(bytes.len()).unwrap_or(u32::MAX),
+                &mut raw,
+            )
+        };
+        // Never `Unsupported`: this build reads STEP. Bytes that are not STEP
+        // are `Failed`, with OCCT's own parse error in the message — which is
+        // the distinction the contract asks for, and the reason the shim
+        // collects OCCT's diagnostics instead of letting them print.
+        check_new(code)?;
+        let ids = unsafe { core::slice::from_raw_parts(raw.ids, raw.len as usize) }.to_vec();
+        unsafe { w3d_occt_bodies_free(&mut raw) };
+        Ok(ids.into_iter().map(Body::from_raw).collect())
+    }
 }
 
 /// SAFETY: `ptr` must be valid for `count * 3` floats.
@@ -338,5 +423,8 @@ unsafe fn chunks3(ptr: *const f32, count: usize) -> Vec<[f32; 3]> {
         return Vec::new();
     }
     let flat = unsafe { core::slice::from_raw_parts(ptr, count * 3) };
-    flat.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect()
+    // `as_chunks`, not `chunks_exact`: the length is a multiple of three by
+    // construction and this says so in the type. The remainder is empty and
+    // dropped.
+    flat.as_chunks::<3>().0.to_vec()
 }

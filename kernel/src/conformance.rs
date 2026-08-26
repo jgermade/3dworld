@@ -413,8 +413,165 @@ pub fn run<K: GeometryKernel>(k: &mut K, tol: Tolerance, quality: Quality) -> Re
         }
     );
 
+    // ---- interchange ---------------------------------------------------
+    //
+    // A backend may honestly not do STEP, so these four read as conditionals.
+    // None of them *skips*: every branch asserts something, because a check
+    // that quietly does nothing on one backend is a check that reads as a pass
+    // on the backend it was written for — and this repository has already
+    // written down once that a skipped test looks like a passed test.
+
+    check!(
+        checks,
+        "STEP is offered in both directions, or in neither",
+        {
+            let a = k.create_box(Vec3::splat(2.0)).map_err(|e| e.to_string())?;
+            let writes = !matches!(k.export_step(&[a]), Err(KernelError::Unsupported(_)));
+            let reads = !matches!(k.import_step(NOT_STEP), Err(KernelError::Unsupported(_)));
+            require(
+                writes == reads,
+                if writes {
+                    "this kernel writes STEP and refuses to read it: a door that \
+                 only opens outwards"
+                } else {
+                    "this kernel reads STEP and refuses to write it, so a user's \
+                 work goes in and does not come out"
+                },
+            )
+        }
+    );
+
+    check!(checks, "a solid survives a STEP export and import", {
+        let plate = k
+            .create_box(Vec3::new(4.0, 4.0, 4.0))
+            .map_err(|e| e.to_string())?;
+        let drill = k.create_cylinder(1.0, 8.0).map_err(|e| e.to_string())?;
+        // A curved face and a seam, so a backend that only survives planes
+        // does not pass — the same shape the save/load check uses.
+        let a = k
+            .boolean(BooleanOp::Difference, plate, drill, tol)
+            .map_err(|e| e.to_string())?;
+        let bounds = k.bounds(a).map_err(|e| e.to_string())?;
+        let solids = k.topology(a).map_err(|e| e.to_string())?.solids;
+
+        let bytes = match k.export_step(&[a]) {
+            Ok(bytes) => bytes,
+            // Refusing is conforming. The check above has already held this
+            // kernel to refusing in the other direction too, so nothing is
+            // being let through here.
+            Err(KernelError::Unsupported(_)) => return Ok(()),
+            Err(e) => return Err(format!("export failed: {e}")),
+        };
+        require(
+            bytes.starts_with(b"ISO-10303-21"),
+            "the bytes do not begin `ISO-10303-21`, which is the first thing \
+             every STEP file says about itself",
+        )?;
+
+        let imported = k
+            .import_step(&bytes)
+            .map_err(|e| format!("this kernel could not read back what it just wrote: {e}"))?;
+        require(
+            imported.len() == 1,
+            format!("one solid went out and {} came back", imported.len()),
+        )?;
+        let b = imported[0];
+
+        // Bounds and the solid count, and deliberately **not** the face, edge
+        // and vertex counts. STEP is a boundary description, and nothing in it
+        // obliges a reader to split the faces the way the writer did: a
+        // cylindrical face may arrive as two half-cylinders, a seam may move.
+        // Asserting the topology here would be asserting that two
+        // implementations of a 700-page standard agree on something the
+        // standard does not require, and the first failure would be a correct
+        // kernel failing a wrong check. What a caller may rely on is that a
+        // solid comes back a solid, in the same place, at the same size.
+        require(
+            k.topology(b).map_err(|e| e.to_string())?.solids == solids,
+            "the solid count changed across a STEP round-trip",
+        )?;
+        require(
+            boxes_close(&k.bounds(b).map_err(|e| e.to_string())?, &bounds, slack),
+            format!(
+                "the bounds moved across a STEP round-trip: {bounds:?} became {:?}",
+                k.bounds(b)
+            ),
+        )?;
+        require(
+            k.bounds(a).is_ok(),
+            "exporting consumed the body it was given",
+        )
+    });
+
+    check!(
+        checks,
+        "bytes that are not STEP are refused by the right name",
+        {
+            // Two different sentences to a user — "this build cannot read STEP"
+            // and "this file is not STEP" — and they send them to two different
+            // places. A backend that answers `Unsupported` for a corrupt file
+            // sends somebody looking for a different build of the program.
+            let a = k.create_box(Vec3::splat(2.0)).map_err(|e| e.to_string())?;
+            let does_step = !matches!(k.export_step(&[a]), Err(KernelError::Unsupported(_)));
+            match (does_step, k.import_step(NOT_STEP)) {
+                (_, Ok(bodies)) => Err(format!(
+                    "{} bodies came out of {} bytes of prose",
+                    bodies.len(),
+                    NOT_STEP.len()
+                )),
+                (true, Err(KernelError::Failed(_))) => Ok(()),
+                (true, Err(e)) => Err(format!(
+                    "a kernel that does STEP refused a non-STEP file as `{e}`, \
+                     which says the build cannot read STEP at all"
+                )),
+                (false, Err(KernelError::Unsupported(_))) => Ok(()),
+                (false, Err(e)) => Err(format!(
+                    "a kernel that does not do STEP refused as `{e}`, which \
+                     says the file was at fault"
+                )),
+            }
+        }
+    );
+
+    check!(
+        checks,
+        "exporting nothing, or a body that is gone, is refused before anything is written",
+        {
+            match k.export_step(&[]) {
+                Ok(bytes) => {
+                    return Err(format!(
+                        "{} bytes of STEP for no bodies at all",
+                        bytes.len()
+                    ));
+                }
+                Err(KernelError::Degenerate(_) | KernelError::Unsupported(_)) => {}
+                Err(e) => return Err(format!("no bodies was refused, but as `{e}`")),
+            }
+            let gone = k.create_box(Vec3::splat(1.0)).map_err(|e| e.to_string())?;
+            let alive = k.create_box(Vec3::splat(1.0)).map_err(|e| e.to_string())?;
+            k.delete(gone).map_err(|e| e.to_string())?;
+            // The live body first, so that a backend which writes as it walks
+            // has already written something by the time it meets the stale
+            // handle. A file with half a document in it is worse than no file.
+            match k.export_step(&[alive, gone]) {
+                Ok(bytes) => Err(format!(
+                    "{} bytes of STEP written for a document containing a \
+                     deleted body",
+                    bytes.len()
+                )),
+                Err(KernelError::UnknownBody(_) | KernelError::Unsupported(_)) => Ok(()),
+                Err(e) => Err(format!("a deleted body was refused, but as `{e}`")),
+            }
+        }
+    );
+
     Report {
         kernel: k.name(),
         checks,
     }
 }
+
+/// Prose, and not a STEP file by any reading. Used in both directions of the
+/// STEP checks so that "not supported" and "not a STEP file" can be told
+/// apart.
+const NOT_STEP: &[u8] = b"this is not a STEP file, and never was one";

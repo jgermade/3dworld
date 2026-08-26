@@ -31,6 +31,15 @@ pub enum Command {
     /// Without one, the shell has to ask — which it does by treating this as
     /// `SaveAs` with a default name.
     Save,
+    /// Writes the selection — or everything, when nothing is selected — as a
+    /// STEP file beside the document.
+    ///
+    /// There is deliberately no `ImportStep` here. Exporting can invent a
+    /// name from the document's own; importing needs a file that already
+    /// exists and there is no file dialogue to name one with, so import is a
+    /// command-line option until there is. A menu item that cannot be
+    /// clicked is worse than one that is not there.
+    ExportStep,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -272,6 +281,7 @@ impl<K: GeometryKernel> Editor<K> {
                 Ok(format!("selected {}", ids.len()))
             }
             Command::Save => self.save(None),
+            Command::ExportStep => self.export_step(None),
             Command::ZoomToFit => {
                 let bounds = self.doc.visible_bounds();
                 if bounds.is_empty() {
@@ -333,6 +343,82 @@ impl<K: GeometryKernel> Editor<K> {
             if bodies == 1 { "body" } else { "bodies" }
         );
         self.path = Some(path);
+        self.status = message.clone();
+        Ok(message)
+    }
+
+    /// Writes STEP to `path`, or beside the document, or to `untitled.step`.
+    ///
+    /// The selection, or the whole document when nothing is selected — the
+    /// same rule every other program in the list this is meant to reach uses,
+    /// and the one a user has already learned.
+    ///
+    /// **The path is not remembered.** A `.w3d` is where this document lives
+    /// and a `.step` is a copy that left; making `Save` follow an export
+    /// would silently move the document into a format that cannot hold it.
+    pub fn export_step(&mut self, path: Option<PathBuf>) -> Result<String, String> {
+        let selected = self.selection();
+        let ids = if selected.is_empty() {
+            self.doc.nodes().map(|(id, _)| id).collect()
+        } else {
+            selected
+        };
+        if ids.is_empty() {
+            return Err(String::from("nothing to export"));
+        }
+        let target = path.unwrap_or_else(|| match &self.path {
+            Some(path) => path.with_extension("step"),
+            None => PathBuf::from("untitled.step"),
+        });
+        let bytes = self
+            .doc
+            .export_step(&ids)
+            .map_err(|e| format!("could not export STEP: {e}"))?;
+        std::fs::write(&target, bytes)
+            .map_err(|e| format!("could not write {}: {e}", target.display()))?;
+        let message = format!(
+            "exported {} {} to {}",
+            ids.len(),
+            if ids.len() == 1 { "body" } else { "bodies" },
+            target.display()
+        );
+        self.status = message.clone();
+        Ok(message)
+    }
+
+    /// Adds the solids in a STEP file to this document.
+    ///
+    /// Unlike [`Editor::open`], which replaces the document around a kernel,
+    /// this appends — a STEP file carries solids, not a document, so there is
+    /// nothing in it to replace a document with.
+    pub fn import_step(&mut self, path: PathBuf) -> Result<String, String> {
+        let bytes =
+            std::fs::read(&path).map_err(|e| format!("could not read {}: {e}", path.display()))?;
+        let name = path.file_stem().map_or_else(
+            || String::from("Imported"),
+            |s| s.to_string_lossy().into_owned(),
+        );
+        let was_empty = self.doc.is_empty();
+        let ids = self
+            .doc
+            .import_step(&bytes, &name)
+            .map_err(|e| format!("could not import {}: {e}", path.display()))?;
+        self.doc.clear_selection();
+        for id in &ids {
+            let _ = self.doc.select(*id);
+        }
+        // Same reason adding the first primitive frames it: geometry that
+        // arrives outside the camera's view is indistinguishable from an
+        // import that did nothing.
+        if was_empty {
+            self.camera.fit(&self.doc.visible_bounds());
+        }
+        let message = format!(
+            "imported {} {} from {}",
+            ids.len(),
+            if ids.len() == 1 { "body" } else { "bodies" },
+            path.display()
+        );
         self.status = message.clone();
         Ok(message)
     }
@@ -686,6 +772,62 @@ mod tests {
         assert!(
             (e.camera().distance - start).abs() < 1.0e-9,
             "not reversible"
+        );
+    }
+
+    // The fake kernel does not do STEP, and a build of the modeller against it
+    // is a build in which these two commands cannot work. What is asserted
+    // here is the *refusal*: that it reaches the status line in words, and
+    // that nothing is written. A backend that does STEP is exercised where
+    // there is one — `kernel-occt/tests/step.rs`.
+
+    #[test]
+    fn exporting_step_without_a_kernel_that_does_it_says_so_and_writes_no_file() {
+        let dir = std::env::temp_dir().join(format!("w3d-step-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("refused.step");
+        let _ = std::fs::remove_file(&path);
+
+        let mut e = editor();
+        e.run(Command::AddBox);
+        let err = e.export_step(Some(path.clone())).unwrap_err();
+        assert!(
+            err.contains("unsupported"),
+            "an export that cannot happen must say why: {err}"
+        );
+        assert!(
+            !path.exists(),
+            "a refused export left a file behind, which is the one outcome \
+             worse than refusing"
+        );
+        // And through the command, which is how the button reaches it: the
+        // status line is the only place a modeller can say no.
+        e.run(Command::ExportStep);
+        assert!(
+            e.status().contains("unsupported"),
+            "the refusal never reached the status line: {}",
+            e.status()
+        );
+    }
+
+    #[test]
+    fn exporting_an_empty_document_says_so_before_asking_the_kernel() {
+        let mut e = editor();
+        assert_eq!(e.export_step(None).unwrap_err(), "nothing to export");
+    }
+
+    #[test]
+    fn importing_a_file_that_is_not_there_leaves_the_document_alone() {
+        let mut e = editor();
+        e.run(Command::AddBox);
+        let err = e
+            .import_step(std::env::temp_dir().join("w3d-no-such-file.step"))
+            .unwrap_err();
+        assert!(err.starts_with("could not read"), "{err}");
+        assert_eq!(
+            e.document().len(),
+            1,
+            "a failed import changed the document"
         );
     }
 }

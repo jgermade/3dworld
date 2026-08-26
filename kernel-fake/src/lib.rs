@@ -282,6 +282,27 @@ impl GeometryKernel for FakeKernel {
         }
         Ok(self.insert(shape))
     }
+
+    // A STEP file is a boundary representation: faces, with surfaces under
+    // them. This kernel has none — it is a CSG tree that is never evaluated,
+    // so there is nothing to write down and nowhere to put what is read. The
+    // refusal is the honest answer and not a stub waiting to be filled in: it
+    // could only be filled in by evaluating the tree, which is the whole of
+    // what a real kernel does.
+    //
+    // Both directions, and the conformance suite holds it to both.
+
+    fn export_step(&self, _bodies: &[Body]) -> Result<Vec<u8>> {
+        Err(KernelError::Unsupported(
+            "the fake kernel has no surfaces to write to STEP",
+        ))
+    }
+
+    fn import_step(&mut self, _bytes: &[u8]) -> Result<Vec<Body>> {
+        Err(KernelError::Unsupported(
+            "the fake kernel cannot represent what is in a STEP file",
+        ))
+    }
 }
 
 /// Named in `geometry_format`, and versioned because changing what `encode`
