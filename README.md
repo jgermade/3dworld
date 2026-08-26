@@ -14,10 +14,18 @@ names a face.
 Ctrl-S writes a `.w3d` — a zip you can open with `unzip`, specified in
 [FORMAT.md](FORMAT.md) — and `--open` reads one back.
 
-**Work leaves.** Ctrl-E writes a STEP file — AP214, millimetres — that Fusion, FreeCAD,
-SolidWorks and Onshape read, and `--import-step FILE` brings one back in, a body per solid.
-It needs a kernel that does STEP: OpenCASCADE does, the fake kernel says so and refuses. There is
-no file dialogue yet, so export writes beside the document and import is a command-line option.
+**Work leaves.** Ctrl-E writes a STEP file — AP214, millimetres — and `--import-step FILE` brings
+one back in, a body per solid. It needs a kernel that does STEP: OpenCASCADE does, the fake kernel
+says so and refuses. There is no file dialogue yet, so export writes beside the document and import
+is a command-line option.
+
+`make step-check` is what stops that from being OpenCASCADE agreeing with OpenCASCADE. A parser
+with no OCCT in it (`pip install steputils`) resolves every reference in a file we wrote and counts
+its faces by surface type — so the hole in the plate is asserted to be *in the file* — and real
+files from **Pro/ENGINEER**, **Siemens NX** and **STEP Tools** go through the real reader,
+including one that must be **refused**, because it is a surface model and this is a modeller for
+solids. What has still never happened is another program opening one of ours; nothing that could is
+installable here.
 
 It is early. No edges drawn; no fillets; and the browser build has no real geometry behind it
 until OCCT is built for Emscripten.
@@ -30,6 +38,10 @@ make web        # the browser bundle, into web/dist/ (needs wasm-bindgen-cli)
 make web-serve  # serve it with COOP/COEP; --no-isolation to watch it degrade
 make web-test   # drive it in headless Chromium (needs npm install in web/test/)
 make app-test   # open the modeller in a real window under Xvfb, and check it drew
+
+make step-samples  # fetch STEP files other programs wrote, pinned by checksum
+make step-check    # ours read by a parser that is not OCCT, and theirs by ours
+make app-test-step # a STEP file out of one process and drawn by another
 ```
 
 The desktop shell needs a display and, on X11, `libxkbcommon-x11-0` — without it the process

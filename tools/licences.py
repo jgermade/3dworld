@@ -108,6 +108,22 @@ NON_CARGO = [
         "OCCT's, and native/vendor-include/ is gitignored.",
     ),
     (
+        "steputils 0.1",
+        "MIT",
+        "dev-time only, used by `make step-check`; not in the crate graph",
+        "A pure-Python ISO 10303-21 parser, and the point of it is that it "
+        "shares no code with OpenCASCADE. Nothing it touches is distributed "
+        "and nothing links to it.",
+    ),
+    (
+        "STEP sample files (as1_pe_203, face_recognition_sample_part, splinecage)",
+        "GPL-3.0-or-later, as distributed in tpaviot/pythonocc-demos",
+        "fetched by `make step-samples`, never committed, never distributed",
+        "Input to a check, not part of the program: files written by "
+        "Pro/ENGINEER, Siemens NX and ST-Developer, which is the whole reason "
+        "they are worth having. Pinned by SHA-256 in tools/step-samples.txt.",
+    ),
+    (
         "Playwright",
         "Apache-2.0",
         "devDependency of web/test/, not in the crate graph",

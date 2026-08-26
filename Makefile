@@ -124,6 +124,41 @@ app-test-step:
 	$(CARGO) build -p w3d-app --features occt
 	python3 tools/app_smoke.py --step
 
+## STEP, against something that is not us. Everything else about STEP in this
+## repository is OpenCASCADE agreeing with OpenCASCADE.
+##
+## Two directions, and neither of them is a round trip:
+##   - a file we wrote, read by a parser that shares no code with OCCT
+##     (`pip install steputils`), which resolves every reference and counts the
+##     faces by surface type — so the hole in the plate is asserted to be in
+##     the *file*;
+##   - files we did not write, from Pro/ENGINEER, Siemens NX and STEP Tools,
+##     imported through the real reader. One of them must be refused: it is a
+##     surface model, which is a legitimate STEP file and not a thing a
+##     modeller for solids can hold.
+##
+## Needs OCCT, steputils, and `make step-samples` having been run.
+STEP_OUT := .tmp/ours.step
+
+.PHONY: step-check step-samples
+step-check:
+	@mkdir -p $(dir $(STEP_OUT))
+	$(CARGO) run -q -p w3d-kernel-occt --example export_step -- $(STEP_OUT)
+	python3 tools/step_check.py $(STEP_OUT) --solids 2 \
+	    --surfaces PLANE=6,CYLINDRICAL_SURFACE=1,SPHERICAL_SURFACE=1
+	python3 tools/step_check.py --describe `python3 tools/step_samples.py --list import` \
+	    `python3 tools/step_samples.py --list refuse`
+	$(CARGO) run -q -p w3d-kernel-occt --example import_step -- \
+	    `python3 tools/step_samples.py --list import`
+	$(CARGO) run -q -p w3d-kernel-occt --example import_step -- --must-refuse \
+	    `python3 tools/step_samples.py --list refuse`
+
+## Fetches those files into a gitignored samples/, pinned by SHA-256. Not run
+## from any build: a build that reaches the network is not one anybody can
+## reproduce. Same rule as `make occt-headers`.
+step-samples:
+	python3 tools/step_samples.py --fetch
+
 ## Drives the built page in headless Chromium and asserts it drew and picked.
 ## This is the only check in the repository that runs the viewport in a real
 ## browser; everything else is native.

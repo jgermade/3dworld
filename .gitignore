@@ -7,3 +7,4 @@ node_modules
 kernel-occt/native/vendor-include/
 web/dist/
 web/test/node_modules/
+/samples
