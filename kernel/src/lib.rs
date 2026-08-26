@@ -308,5 +308,12 @@ pub trait GeometryKernel {
     ///   [`KernelError::Failed`], because a caller has to be able to tell "this
     ///   build cannot read STEP" from "this file is not STEP" and the two
     ///   sentences send a user to different places.
-    fn import_step(&mut self, bytes: &[u8]) -> Result<Vec<Body>>;
+    fn import_step(&mut self, bytes: &[u8]) -> Result<Vec<ImportedBody>>;
+}
+
+/// A body imported from an exchange file (e.g. STEP), carrying an optional product name.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ImportedBody {
+    pub body: Body,
+    pub name: Option<String>,
 }

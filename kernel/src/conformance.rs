@@ -492,7 +492,7 @@ pub fn run<K: GeometryKernel>(k: &mut K, tol: Tolerance, quality: Quality) -> Re
             imported.len() == 1,
             format!("one solid went out and {} came back", imported.len()),
         )?;
-        let b = imported[0];
+        let b = imported[0].body;
 
         // Bounds and the solid count, and deliberately **not** the face, edge
         // and vertex counts. STEP is a boundary description, and nothing in it

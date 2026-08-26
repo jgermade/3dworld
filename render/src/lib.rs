@@ -20,10 +20,12 @@
 
 pub mod camera;
 pub mod gpu;
+pub mod grid;
 pub mod scene;
 
 pub use camera::Camera;
 pub use gpu::{Capabilities, Gpu, GpuError};
+pub use grid::Grid;
 pub use scene::{GpuMesh, MeshError};
 
 use std::sync::Arc;
@@ -162,6 +164,8 @@ pub struct Renderer {
     shade: wgpu::RenderPipeline,
     pick: wgpu::RenderPipeline,
     lines: wgpu::RenderPipeline,
+    grid: Grid,
+    pub show_grid: bool,
     globals: wgpu::Buffer,
     globals_group: wgpu::BindGroup,
     object_layout: wgpu::BindGroupLayout,
@@ -227,11 +231,14 @@ impl Renderer {
         let shade = pipeline(device, &layout, &shader, "fs_shade", color_format);
         let pick = pipeline(device, &layout, &shader, "fs_pick", ID_FORMAT);
         let lines = line_pipeline(device, &layout, &shader, color_format);
+        let grid = Grid::new(device, &globals_layout, color_format);
 
         Self {
             shade,
             pick,
             lines,
+            grid,
+            show_grid: true,
             globals,
             globals_group,
             object_layout,
@@ -302,6 +309,9 @@ impl Renderer {
     /// The caller is responsible for the colour and depth attachments, and for
     /// having called [`Renderer::prepare`] with the same objects.
     pub fn draw_into(&self, pass: &mut wgpu::RenderPass<'_>, objects: &[Object<'_>]) {
+        if self.show_grid {
+            self.grid.draw(pass, &self.globals_group);
+        }
         pass.set_pipeline(&self.shade);
         self.record(pass, objects);
         pass.set_pipeline(&self.lines);

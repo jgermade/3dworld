@@ -223,3 +223,32 @@ fn the_document_never_names_a_backend() {
     }
     assert_eq!(build(FakeKernel::new()).len(), 1);
 }
+
+#[test]
+fn user_grouped_transactions_merge_multi_step_edits_into_one_undo_step() {
+    let mut d = doc();
+    let box_id = d.add_box("Box", Vec3::splat(2.0)).unwrap();
+    let initial_bounds = d.bounds(box_id).unwrap();
+
+    // Group multiple drag transform steps into a single transaction
+    d.begin_transaction("Drag Move");
+    d.transform(box_id, &Mat4::from_translation(Vec3::new(1.0, 0.0, 0.0)))
+        .unwrap();
+    d.transform(box_id, &Mat4::from_translation(Vec3::new(2.0, 0.0, 0.0)))
+        .unwrap();
+    d.transform(box_id, &Mat4::from_translation(Vec3::new(3.0, 0.0, 0.0)))
+        .unwrap();
+    d.commit_transaction();
+
+    let moved_bounds = d.bounds(box_id).unwrap();
+    assert_ne!(initial_bounds, moved_bounds);
+
+    // One undo step reverses all three drag move steps back to initial bounds
+    assert_eq!(d.undo(), Some("Drag Move"));
+    let restored_bounds = d.bounds(box_id).unwrap();
+    assert_eq!(initial_bounds, restored_bounds);
+
+    // Redo restores all three drag move steps
+    assert_eq!(d.redo(), Some("Drag Move"));
+    assert_eq!(d.bounds(box_id).unwrap(), moved_bounds);
+}

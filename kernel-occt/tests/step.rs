@@ -47,7 +47,7 @@ fn a_kernel_that_never_saw_the_geometry_reads_what_another_wrote() {
     let bodies = reader.import_step(&bytes).unwrap();
     assert_eq!(bodies.len(), 1, "one solid was written");
 
-    let after = reader.bounds(bodies[0]).unwrap();
+    let after = reader.bounds(bodies[0].body).unwrap();
     let slack = 1.0e-6;
     for (a, b, what) in [
         (before.min.x, after.min.x, "min.x"),
@@ -65,7 +65,7 @@ fn a_kernel_that_never_saw_the_geometry_reads_what_another_wrote() {
 
     // And it is geometry, not a bounding box that happens to agree: the hole
     // is still a hole.
-    let topology = reader.topology(bodies[0]).unwrap();
+    let topology = reader.topology(bodies[0].body).unwrap();
     assert_eq!(topology.solids, 1);
     assert!(
         topology.faces >= 6,
@@ -137,9 +137,9 @@ fn every_solid_in_a_file_becomes_a_body() {
     let bodies = reader.import_step(&bytes).unwrap();
     assert_eq!(bodies.len(), 3, "three solids went in");
     // Distinct handles into the reading kernel, all of them live.
-    for body in &bodies {
+    for item in &bodies {
         reader
-            .bounds(*body)
+            .bounds(item.body)
             .expect("a body that cannot be measured");
     }
     assert_eq!(reader.live_bodies(), 3, "the import leaked or lost bodies");

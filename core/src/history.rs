@@ -74,6 +74,7 @@ impl Edit {
 pub(crate) struct Transaction {
     pub label: &'static str,
     pub edits: Vec<Edit>,
+    pub depth: u32,
 }
 
 pub struct History {
@@ -121,11 +122,15 @@ impl History {
     /// transaction that has begun cannot fail partway. Adding an abort path
     /// would be adding the possibility it exists to handle.
     pub(crate) fn begin(&mut self, label: &'static str) {
-        debug_assert!(self.open.is_none(), "a transaction is already open");
-        self.open = Some(Transaction {
-            label,
-            edits: Vec::new(),
-        });
+        if let Some(open) = self.open.as_mut() {
+            open.depth += 1;
+        } else {
+            self.open = Some(Transaction {
+                label,
+                edits: Vec::new(),
+                depth: 1,
+            });
+        }
     }
 
     pub(crate) fn record(&mut self, edit: Edit) {
@@ -135,7 +140,14 @@ impl History {
     }
 
     pub(crate) fn commit(&mut self) {
-        let Some(open) = self.open.take() else { return };
+        let Some(open) = self.open.as_mut() else {
+            return;
+        };
+        if open.depth > 1 {
+            open.depth -= 1;
+            return;
+        }
+        let open = self.open.take().unwrap();
         if open.edits.is_empty() {
             return;
         }

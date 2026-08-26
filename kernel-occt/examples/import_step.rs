@@ -80,7 +80,10 @@ fn main() -> std::process::ExitCode {
                 let mut triangles = 0;
                 let mut ok = true;
                 for body in &bodies {
-                    match k.topology(*body) {
+                    if let Some(name) = &body.name {
+                        println!("        part: {name}");
+                    }
+                    match k.topology(body.body) {
                         Ok(t) => faces += t.faces,
                         Err(e) => {
                             println!(
@@ -94,7 +97,7 @@ fn main() -> std::process::ExitCode {
                     // shape that cannot be meshed cannot be drawn, and a
                     // modeller that imports something invisible has not
                     // imported it.
-                    match k.tessellate(*body, Quality::display_default()) {
+                    match k.tessellate(body.body, Quality::display_default()) {
                         Ok(mesh) => triangles += mesh.triangle_count(),
                         Err(e) => {
                             println!(

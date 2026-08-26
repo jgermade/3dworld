@@ -46,6 +46,7 @@ impl RawBytes {
 #[repr(C)]
 struct RawBodies {
     ids: *const u32,
+    names: *const *const c_char,
     len: u32,
     owner: *mut core::ffi::c_void,
 }
@@ -54,6 +55,7 @@ impl RawBodies {
     const fn empty() -> Self {
         Self {
             ids: core::ptr::null(),
+            names: core::ptr::null(),
             len: 0,
             owner: core::ptr::null_mut(),
         }
@@ -410,10 +412,10 @@ impl GeometryKernel for OcctKernel {
         Ok(bytes)
     }
 
-    fn import_step(&mut self, bytes: &[u8]) -> Result<Vec<Body>> {
+    fn import_step(&mut self, bytes: &[u8]) -> Result<Vec<w3d_kernel::ImportedBody>> {
         let mut raw = RawBodies::empty();
         // SAFETY: the pointer and length describe `bytes`, which outlives the
-        // call; the ids are copied out before they are freed.
+        // call; the ids and names are copied out before they are freed.
         let code = unsafe {
             w3d_occt_import_step(
                 self.ctx,
@@ -427,9 +429,28 @@ impl GeometryKernel for OcctKernel {
         // the distinction the contract asks for, and the reason the shim
         // collects OCCT's diagnostics instead of letting them print.
         check_new(code)?;
-        let ids = unsafe { core::slice::from_raw_parts(raw.ids, raw.len as usize) }.to_vec();
+        let ids = unsafe { core::slice::from_raw_parts(raw.ids, raw.len as usize) };
+        let names_ptrs = if !raw.names.is_null() {
+            unsafe { core::slice::from_raw_parts(raw.names, raw.len as usize) }
+        } else {
+            &[]
+        };
+
+        let mut out = Vec::with_capacity(raw.len as usize);
+        for i in 0..raw.len as usize {
+            let body = Body::from_raw(ids[i]);
+            let name = if i < names_ptrs.len() && !names_ptrs[i].is_null() {
+                let cstr = unsafe { std::ffi::CStr::from_ptr(names_ptrs[i]) };
+                let s = cstr.to_string_lossy().trim().to_string();
+                if s.is_empty() { None } else { Some(s) }
+            } else {
+                None
+            };
+            out.push(w3d_kernel::ImportedBody { body, name });
+        }
+
         unsafe { w3d_occt_bodies_free(&mut raw) };
-        Ok(ids.into_iter().map(Body::from_raw).collect())
+        Ok(out)
     }
 }
 

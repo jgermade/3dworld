@@ -436,7 +436,9 @@ impl<K: GeometryKernel> Live<K> {
 
         let raw = self.egui.take_egui_input(&self.window);
         let context = self.egui.egui_ctx().clone();
-        let output = context.run_ui(raw, |ui| chrome(ui, &mut self.editor, &self.scene));
+        let output = context.run_ui(raw, |ui| {
+            chrome(ui, &mut self.editor, &self.scene, &mut self.renderer)
+        });
         self.egui
             .handle_platform_output(&self.window, output.platform_output);
         let jobs = context.tessellate(output.shapes, output.pixels_per_point);
@@ -613,7 +615,12 @@ impl<K: GeometryKernel> Live<K> {
 
 /// The chrome. Deliberately plain — it is a list, some buttons and a status
 /// line, and the viewport is the product.
-fn chrome<K: GeometryKernel>(root: &mut egui::Ui, editor: &mut Editor<K>, scene: &Scene) {
+fn chrome<K: GeometryKernel>(
+    root: &mut egui::Ui,
+    editor: &mut Editor<K>,
+    scene: &Scene,
+    renderer: &mut Renderer,
+) {
     egui::Panel::left("tree")
         .default_size(240.0)
         .show(root, |ui| {
@@ -665,6 +672,7 @@ fn chrome<K: GeometryKernel>(root: &mut egui::Ui, editor: &mut Editor<K>, scene:
                 if ui.button("Fit").clicked() {
                     editor.run(Command::ZoomToFit);
                 }
+                ui.checkbox(&mut renderer.show_grid, "Grid");
             });
 
             ui.separator();

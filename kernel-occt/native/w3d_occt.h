@@ -131,6 +131,7 @@ void w3d_occt_bytes_free(W3dOcctBytes *bytes);
  * reading it, so this is the one place a call answers with a list. */
 typedef struct {
   const uint32_t *ids;
+  const char *const *names; /* Nullable array of null-terminated strings for product names */
   uint32_t len;
   void *owner; /* opaque; pass the struct back to bodies_free */
 } W3dOcctBodies;

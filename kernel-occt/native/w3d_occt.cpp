@@ -43,12 +43,19 @@
 #include <Message_Printer.hxx>
 #include <STEPControl_Reader.hxx>
 #include <STEPControl_Writer.hxx>
+#include <STEPCAFControl_Reader.hxx>
 #include <StepAP214.hxx>
 #include <StepAP214_Protocol.hxx>
 #include <StepData_StepModel.hxx>
 #include <StepData_StepWriter.hxx>
 #include <TCollection_AsciiString.hxx>
 #include <TCollection_HAsciiString.hxx>
+#include <TDF_Label.hxx>
+#include <TDF_LabelSequence.hxx>
+#include <TDataStd_Name.hxx>
+#include <TDocStd_Document.hxx>
+#include <XCAFDoc_DocumentTool.hxx>
+#include <XCAFDoc_ShapeTool.hxx>
 
 #include <TopAbs_Orientation.hxx>
 #include <TopExp.hxx>
@@ -668,6 +675,16 @@ int32_t w3d_occt_export_step(W3dOcctContext *ctx, const uint32_t *bodies,
   });
 }
 
+namespace {
+
+struct OcctBodiesOwner {
+  std::vector<uint32_t> ids;
+  std::vector<std::string> names_str;
+  std::vector<const char *> names_ptr;
+};
+
+} // namespace
+
 int32_t w3d_occt_import_step(W3dOcctContext *ctx, const uint8_t *data,
                              uint32_t len, W3dOcctBodies *out) {
   if (!data || len == 0) {
@@ -682,59 +699,106 @@ int32_t w3d_occt_import_step(W3dOcctContext *ctx, const uint8_t *data,
     // its unit.
     Interface_Static::SetCVal("xstep.cascade.unit", "MM");
 
-    STEPControl_Reader reader;
+    std::vector<std::pair<TopoDS_Shape, std::string>> solids;
+    uint32_t faces = 0;
+
+    // Try XDE / CAF reader first to extract product names and assembly hierarchy
+    Handle(TDocStd_Document) doc = new TDocStd_Document("XmlXCAF");
+    STEPCAFControl_Reader caf_reader;
+    caf_reader.SetColorMode(Standard_True);
+    caf_reader.SetNameMode(Standard_True);
+    caf_reader.SetLayerMode(Standard_True);
+
     std::istringstream stream(
         std::string(reinterpret_cast<const char *>(data), len));
-    if (reader.ReadStream("w3d", stream) != IFSelect_RetDone) {
-      // Not UNSUPPORTED. This build reads STEP; these bytes are not STEP, and
-      // the two sentences send a user to two different places.
-      return fail(diagnostics.say("not a STEP file").c_str());
-    }
-    reader.TransferRoots();
 
-    // Solids only, and every solid: a file may hold one shape that is a
-    // compound of twenty, and a user who imports a bracket and a bolt wants
-    // two things they can click on rather than one they cannot take apart.
-    std::vector<TopoDS_Shape> solids;
-    uint32_t faces = 0;
-    for (int i = 1; i <= reader.NbShapes(); ++i) {
-      const TopoDS_Shape shape = reader.Shape(i);
-      for (TopExp_Explorer e(shape, TopAbs_SOLID); e.More(); e.Next()) {
-        solids.push_back(e.Current());
+    if (caf_reader.ReadStream("w3d", stream) == IFSelect_RetDone &&
+        caf_reader.Transfer(doc)) {
+      Handle(XCAFDoc_ShapeTool) shape_tool =
+          XCAFDoc_DocumentTool::ShapeTool(doc->Main());
+      TDF_LabelSequence free_shapes;
+      shape_tool->GetFreeShapes(free_shapes);
+
+      auto extract_label = [&](auto self, const TDF_Label &label) -> void {
+        Handle(TDataStd_Name) attr;
+        std::string label_name;
+        if (label.FindAttribute(TDataStd_Name::GetID(), attr)) {
+          label_name = TCollection_AsciiString(attr->Get()).ToCString();
+        }
+        TopoDS_Shape shape = shape_tool->GetShape(label);
+        if (!shape.IsNull()) {
+          for (TopExp_Explorer e(shape, TopAbs_SOLID); e.More(); e.Next()) {
+            solids.push_back({e.Current(), label_name});
+          }
+          TopTools_IndexedMapOfShape map;
+          TopExp::MapShapes(shape, TopAbs_FACE, map);
+          faces += static_cast<uint32_t>(map.Extent());
+        }
+        TDF_LabelSequence components;
+        if (XCAFDoc_ShapeTool::GetComponents(label, components)) {
+          for (int c = 1; c <= components.Length(); ++c) {
+            self(self, components.Value(c));
+          }
+        }
+      };
+
+      for (int i = 1; i <= free_shapes.Length(); ++i) {
+        extract_label(extract_label, free_shapes.Value(i));
       }
-      TopTools_IndexedMapOfShape map;
-      TopExp::MapShapes(shape, TopAbs_FACE, map);
-      faces += static_cast<uint32_t>(map.Extent());
+    }
+
+    // Fallback to standard STEPControl_Reader if XDE yielded no solids
+    if (solids.empty()) {
+      STEPControl_Reader reader;
+      std::istringstream stream_fallback(
+          std::string(reinterpret_cast<const char *>(data), len));
+      if (reader.ReadStream("w3d", stream_fallback) != IFSelect_RetDone) {
+        return fail(diagnostics.say("not a STEP file").c_str());
+      }
+      reader.TransferRoots();
+      for (int i = 1; i <= reader.NbShapes(); ++i) {
+        const TopoDS_Shape shape = reader.Shape(i);
+        for (TopExp_Explorer e(shape, TopAbs_SOLID); e.More(); e.Next()) {
+          solids.push_back({e.Current(), ""});
+        }
+        TopTools_IndexedMapOfShape map;
+        TopExp::MapShapes(shape, TopAbs_FACE, map);
+        faces += static_cast<uint32_t>(map.Extent());
+      }
     }
 
     if (solids.empty()) {
-      // A file that imports into nothing at all is a bug report about the
-      // modeller, filed against the wrong program. Say what was in it.
       std::ostringstream why;
-      why << "the STEP file has no solids in it: " << reader.NbShapes()
-          << (reader.NbShapes() == 1 ? " shape, " : " shapes, ") << faces
+      why << "the STEP file has no solids in it: " << faces
           << (faces == 1 ? " face, and no closed volume"
                          : " faces, and no closed volume");
       return fail(why.str().c_str());
     }
 
-    // Stored last, so that a failure above leaves no bodies behind that the
-    // caller never hears about and can never delete.
-    auto *ids = new std::vector<uint32_t>();
-    ids->reserve(solids.size());
-    for (const TopoDS_Shape &solid : solids) {
-      ids->push_back(ctx->store(solid));
+    auto *owner = new OcctBodiesOwner();
+    owner->ids.reserve(solids.size());
+    owner->names_str.reserve(solids.size());
+    owner->names_ptr.reserve(solids.size());
+
+    for (const auto &item : solids) {
+      owner->ids.push_back(ctx->store(item.first));
+      owner->names_str.push_back(item.second);
     }
-    out->ids = ids->data();
-    out->len = static_cast<uint32_t>(ids->size());
-    out->owner = ids;
+    for (const auto &s : owner->names_str) {
+      owner->names_ptr.push_back(s.empty() ? nullptr : s.c_str());
+    }
+
+    out->ids = owner->ids.data();
+    out->names = owner->names_ptr.data();
+    out->len = static_cast<uint32_t>(owner->ids.size());
+    out->owner = owner;
     return W3D_OCCT_OK;
   });
 }
 
 void w3d_occt_bodies_free(W3dOcctBodies *bodies) {
   if (bodies && bodies->owner) {
-    delete static_cast<std::vector<uint32_t> *>(bodies->owner);
+    delete static_cast<OcctBodiesOwner *>(bodies->owner);
     std::memset(bodies, 0, sizeof(*bodies));
   }
 }

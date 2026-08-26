@@ -17,7 +17,7 @@ const VENDOR_INCLUDE: &str = "vendor-include";
 /// The OCCT toolkits this shim actually reaches into. Kept explicit and short
 /// for the same reason the header is: every one is a thing that has to be
 /// present, and in a wasm build, a thing that has to be compiled.
-const TOOLKITS: &[&str] = &[
+const BASE_TOOLKITS: &[&str] = &[
     "TKernel",
     "TKMath",
     "TKG2d",
@@ -31,16 +31,10 @@ const TOOLKITS: &[&str] = &[
     "TKBool",
     "TKMesh",
     "TKShHealing",
-    // STEP, and it is five toolkits rather than one: the exchange framework,
-    // the schema, the two AP-specific pieces the schema pulls in, and the
-    // AP209 one, which nothing here wants and TKSTEP will not link without.
-    // Worth knowing before the Emscripten build, where every one of these is
-    // a thing that has to be compiled rather than a thing that is installed.
-    "TKXSBase",
-    "TKSTEPBase",
-    "TKSTEPAttr",
-    "TKSTEP209",
-    "TKSTEP",
+    "TKCDF",
+    "TKLCAF",
+    "TKCAF",
+    "TKXCAF",
 ];
 
 fn main() {
@@ -121,13 +115,41 @@ fn main() {
 
     println!("cargo:rustc-link-search=native={}", out_dir.display());
     println!("cargo:rustc-link-lib=static=w3d_occt");
-    if let Ok(lib_dir) = env::var("OCCT_LIB_DIR") {
-        println!("cargo:rustc-link-search=native={lib_dir}");
-    }
-    for tk in TOOLKITS {
+    let lib_dir = env::var("OCCT_LIB_DIR").unwrap_or_else(|_| "/usr/lib".into());
+    println!("cargo:rustc-link-search=native={lib_dir}");
+
+    for tk in BASE_TOOLKITS {
         println!("cargo:rustc-link-lib=dylib={tk}");
     }
-    println!("cargo:rustc-link-lib=dylib=stdc++");
+
+    // OCCT 7.8+ consolidated STEP toolkits into TKDE / TKDESTEP.
+    // OCCT 7.6 uses TKXSBase, TKSTEPBase, TKSTEPAttr, TKSTEP209, TKSTEP.
+    let lib_path = PathBuf::from(&lib_dir);
+    let is_modern = lib_path.join("libTKDESTEP.dylib").exists()
+        || lib_path.join("libTKDESTEP.so").exists()
+        || PathBuf::from("/opt/homebrew/lib/libTKDESTEP.dylib").exists()
+        || PathBuf::from("/usr/local/lib/libTKDESTEP.dylib").exists();
+
+    if is_modern {
+        println!("cargo:rustc-link-lib=dylib=TKXSBase");
+        println!("cargo:rustc-link-lib=dylib=TKDE");
+        println!("cargo:rustc-link-lib=dylib=TKDESTEP");
+    } else {
+        for tk in &[
+            "TKXSBase",
+            "TKSTEPBase",
+            "TKSTEPAttr",
+            "TKSTEP209",
+            "TKSTEP",
+        ] {
+            println!("cargo:rustc-link-lib=dylib={tk}");
+        }
+    }
+    if cfg!(target_os = "macos") {
+        println!("cargo:rustc-link-lib=dylib=c++");
+    } else {
+        println!("cargo:rustc-link-lib=dylib=stdc++");
+    }
 }
 
 fn run(cmd: &mut Command, what: &str) {

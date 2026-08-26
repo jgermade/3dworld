@@ -165,6 +165,19 @@ impl<K: GeometryKernel> Document<K> {
         body
     }
 
+    /// Begins a user-grouped transaction.
+    ///
+    /// Multi-step operations (e.g. mouse drag transforms) grouped between
+    /// `begin_transaction` and `commit_transaction` form a single undo step.
+    pub fn begin_transaction(&mut self, label: &'static str) {
+        self.history.begin(label);
+    }
+
+    /// Commits a user-grouped transaction.
+    pub fn commit_transaction(&mut self) {
+        self.history.commit();
+    }
+
     fn insert(&mut self, label: &'static str, node: Node) -> NodeId {
         self.history.begin(label);
         let id = self.nodes.insert(node.clone());
@@ -339,23 +352,31 @@ impl<K: GeometryKernel> Document<K> {
     /// difference between the two operations. A `.w3d` carries a whole
     /// document, kernel and all; a STEP file carries solids.
     pub fn import_step(&mut self, bytes: &[u8], name: &str) -> Result<Vec<NodeId>> {
-        let bodies = self.kernel.import_step(bytes)?;
-        let one = bodies.len() == 1;
+        let imported = self.kernel.import_step(bytes)?;
+        let one = imported.len() == 1;
+
+        let is_generic = |s: &str| {
+            let t = s.trim();
+            t.is_empty() || t.starts_with("Open CASCADE STEP translator")
+        };
 
         self.history.begin("Import STEP");
-        let mut ids = Vec::with_capacity(bodies.len());
-        for (n, body) in bodies.into_iter().enumerate() {
-            self.created.push(body);
+        let mut ids = Vec::with_capacity(imported.len());
+        for (n, imp) in imported.into_iter().enumerate() {
+            self.created.push(imp.body);
+            let node_name = match imp.name {
+                Some(pname) if !is_generic(&pname) => pname,
+                _ => {
+                    if one {
+                        name.to_string()
+                    } else {
+                        format!("{name} {}", n + 1)
+                    }
+                }
+            };
             let node = Node {
-                // A file of one solid keeps the file's name; several are
-                // numbered, because "bracket 1" alone reads like there is a
-                // "bracket 2" somewhere that failed to arrive.
-                name: if one {
-                    name.to_string()
-                } else {
-                    format!("{name} {}", n + 1)
-                },
-                body,
+                name: node_name,
+                body: imp.body,
                 visible: true,
             };
             let id = self.nodes.insert(node.clone());

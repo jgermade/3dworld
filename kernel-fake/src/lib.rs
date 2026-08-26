@@ -314,7 +314,7 @@ impl GeometryKernel for FakeKernel {
         ))
     }
 
-    fn import_step(&mut self, _bytes: &[u8]) -> Result<Vec<Body>> {
+    fn import_step(&mut self, _bytes: &[u8]) -> Result<Vec<w3d_kernel::ImportedBody>> {
         Err(KernelError::Unsupported(
             "the fake kernel cannot represent what is in a STEP file",
         ))
