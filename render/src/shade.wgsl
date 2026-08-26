@@ -74,3 +74,19 @@ fn fs_shade(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<
 fn fs_pick(in: VsOut) -> @location(0) vec2<u32> {
     return vec2<u32>(object.id, in.face);
 }
+
+@vertex
+fn vs_line(
+    @location(0) position: vec3<f32>,
+) -> @builtin(position) vec4<f32> {
+    return globals.view_proj * vec4<f32>(position, 1.0);
+}
+
+@fragment
+fn fs_line() -> @location(0) vec4<f32> {
+    var line_color = vec3<f32>(0.12, 0.14, 0.18);
+    if (object.selected != 0u) {
+        line_color = vec3<f32>(1.0, 0.5, 0.0);
+    }
+    return vec4<f32>(line_color, 1.0);
+}

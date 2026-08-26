@@ -161,6 +161,7 @@ const OBJECT_SIZE: u64 = 32;
 pub struct Renderer {
     shade: wgpu::RenderPipeline,
     pick: wgpu::RenderPipeline,
+    lines: wgpu::RenderPipeline,
     globals: wgpu::Buffer,
     globals_group: wgpu::BindGroup,
     object_layout: wgpu::BindGroupLayout,
@@ -225,10 +226,12 @@ impl Renderer {
 
         let shade = pipeline(device, &layout, &shader, "fs_shade", color_format);
         let pick = pipeline(device, &layout, &shader, "fs_pick", ID_FORMAT);
+        let lines = line_pipeline(device, &layout, &shader, color_format);
 
         Self {
             shade,
             pick,
+            lines,
             globals,
             globals_group,
             object_layout,
@@ -301,6 +304,8 @@ impl Renderer {
     pub fn draw_into(&self, pass: &mut wgpu::RenderPass<'_>, objects: &[Object<'_>]) {
         pass.set_pipeline(&self.shade);
         self.record(pass, objects);
+        pass.set_pipeline(&self.lines);
+        self.record_lines(pass, objects);
     }
 
     /// What is under one pixel, by rendering ids into it.
@@ -448,6 +453,15 @@ impl Renderer {
             let offset = (i as u64 * self.object_stride) as u32;
             pass.set_bind_group(1, &self.objects_group, &[offset]);
             object.mesh.draw(pass);
+        }
+    }
+
+    fn record_lines(&self, pass: &mut wgpu::RenderPass<'_>, objects: &[Object<'_>]) {
+        pass.set_bind_group(0, &self.globals_group, &[]);
+        for (i, object) in objects.iter().enumerate() {
+            let offset = (i as u64 * self.object_stride) as u32;
+            pass.set_bind_group(1, &self.objects_group, &[offset]);
+            object.mesh.draw_lines(pass);
         }
     }
 
@@ -646,6 +660,49 @@ fn pipeline(
             format: DEPTH_FORMAT,
             depth_write_enabled: Some(true),
             depth_compare: Some(wgpu::CompareFunction::Less),
+            stencil: Default::default(),
+            bias: Default::default(),
+        }),
+        multisample: Default::default(),
+        multiview_mask: None,
+        cache: None,
+    })
+}
+
+fn line_pipeline(
+    device: &wgpu::Device,
+    layout: &wgpu::PipelineLayout,
+    shader: &wgpu::ShaderModule,
+    format: wgpu::TextureFormat,
+) -> wgpu::RenderPipeline {
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("w3d lines"),
+        layout: Some(layout),
+        vertex: wgpu::VertexState {
+            module: shader,
+            entry_point: Some("vs_line"),
+            compilation_options: Default::default(),
+            buffers: &[Some(scene::LINE_VERTEX_LAYOUT)],
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: shader,
+            entry_point: Some("fs_line"),
+            compilation_options: Default::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::LineList,
+            cull_mode: None,
+            ..Default::default()
+        },
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: DEPTH_FORMAT,
+            depth_write_enabled: Some(true),
+            depth_compare: Some(wgpu::CompareFunction::LessEqual),
             stencil: Default::default(),
             bias: Default::default(),
         }),

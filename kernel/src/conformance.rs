@@ -102,6 +102,23 @@ fn check_mesh(mesh: &Mesh, bounds: &Aabb, slack: f64) -> core::result::Result<()
             mesh.positions.len()
         ));
     }
+    require(
+        mesh.line_indices.len().is_multiple_of(2),
+        format!(
+            "line index count {} is not a multiple of 2",
+            mesh.line_indices.len()
+        ),
+    )?;
+    if let Some(&bad) = mesh
+        .line_indices
+        .iter()
+        .find(|&&i| i as usize >= mesh.line_positions.len())
+    {
+        return Err(format!(
+            "line index {bad} out of range for {} line positions",
+            mesh.line_positions.len()
+        ));
+    }
     for (i, p) in mesh.positions.iter().enumerate() {
         let v = Vec3::new(p[0] as f64, p[1] as f64, p[2] as f64);
         if !v.x.is_finite() || !v.y.is_finite() || !v.z.is_finite() {

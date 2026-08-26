@@ -123,11 +123,17 @@ pub struct Mesh {
     pub normals: Vec<[f32; 3]>,
     pub indices: Vec<u32>,
     pub face_of_triangle: Vec<u32>,
+    pub line_positions: Vec<[f32; 3]>,
+    pub line_indices: Vec<u32>,
 }
 
 impl Mesh {
     pub fn triangle_count(&self) -> usize {
         self.indices.len() / 3
+    }
+
+    pub fn line_count(&self) -> usize {
+        self.line_indices.len() / 2
     }
 }
 

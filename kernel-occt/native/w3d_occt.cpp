@@ -310,6 +310,8 @@ struct MeshBuffers {
   std::vector<float> normals;
   std::vector<uint32_t> indices;
   std::vector<uint32_t> face_of_triangle;
+  std::vector<float> line_positions;
+  std::vector<uint32_t> line_indices;
 };
 
 } // namespace
@@ -402,12 +404,60 @@ int32_t w3d_occt_tessellate(W3dOcctContext *ctx, uint32_t body, double sag,
       }
     }
 
+    TopTools_IndexedMapOfShape edge_map;
+    TopExp::MapShapes(shape, TopAbs_EDGE, edge_map);
+    for (int e = 1; e <= edge_map.Extent(); ++e) {
+      const TopoDS_Edge edge = TopoDS::Edge(edge_map(e));
+      TopLoc_Location loc;
+      const Handle(Poly_Polygon3D) poly = BRep_Tool::Polygon3D(edge, loc);
+      if (!poly.IsNull()) {
+        const gp_Trsf placement = loc.Transformation();
+        const TColgp_Array1OfPnt &nodes = poly->Nodes();
+        const uint32_t base = static_cast<uint32_t>(buf->line_positions.size() / 3);
+        for (int i = nodes.Lower(); i <= nodes.Upper(); ++i) {
+          gp_Pnt p = nodes.Value(i);
+          p.Transform(placement);
+          buf->line_positions.push_back(static_cast<float>(p.X()));
+          buf->line_positions.push_back(static_cast<float>(p.Y()));
+          buf->line_positions.push_back(static_cast<float>(p.Z()));
+        }
+        for (int i = 0; i < nodes.Length() - 1; ++i) {
+          buf->line_indices.push_back(base + i);
+          buf->line_indices.push_back(base + i + 1);
+        }
+      } else {
+        Handle(Poly_Triangulation) tri;
+        Handle(Poly_PolygonOnTriangulation) poly_tri;
+        BRep_Tool::PolygonOnTriangulation(edge, poly_tri, tri, loc);
+        if (!poly_tri.IsNull() && !tri.IsNull()) {
+          const gp_Trsf placement = loc.Transformation();
+          const TColStd_Array1OfInteger &nodes = poly_tri->Nodes();
+          const uint32_t base = static_cast<uint32_t>(buf->line_positions.size() / 3);
+          for (int i = nodes.Lower(); i <= nodes.Upper(); ++i) {
+            gp_Pnt p = tri->Node(nodes.Value(i));
+            p.Transform(placement);
+            buf->line_positions.push_back(static_cast<float>(p.X()));
+            buf->line_positions.push_back(static_cast<float>(p.Y()));
+            buf->line_positions.push_back(static_cast<float>(p.Z()));
+          }
+          for (int i = 0; i < nodes.Length() - 1; ++i) {
+            buf->line_indices.push_back(base + i);
+            buf->line_indices.push_back(base + i + 1);
+          }
+        }
+      }
+    }
+
     out->positions = buf->positions.data();
     out->normals = buf->normals.data();
     out->indices = buf->indices.data();
     out->face_of_triangle = buf->face_of_triangle.data();
+    out->line_positions = buf->line_positions.data();
+    out->line_indices = buf->line_indices.data();
     out->vertex_count = static_cast<uint32_t>(buf->positions.size() / 3);
     out->triangle_count = static_cast<uint32_t>(buf->face_of_triangle.size());
+    out->line_vertex_count = static_cast<uint32_t>(buf->line_positions.size() / 3);
+    out->line_segment_count = static_cast<uint32_t>(buf->line_indices.size() / 2);
     out->owner = buf;
     return W3D_OCCT_OK;
   });

@@ -41,6 +41,18 @@ pub const VERTEX_LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferL
     ],
 };
 
+pub const LINE_VERTEX_SIZE: u64 = 12;
+
+pub const LINE_VERTEX_LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
+    array_stride: LINE_VERTEX_SIZE,
+    step_mode: wgpu::VertexStepMode::Vertex,
+    attributes: &[wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Float32x3,
+        offset: 0,
+        shader_location: 0,
+    }],
+};
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MeshError {
     /// The backend produced something the contract forbids. The conformance
@@ -67,16 +79,20 @@ impl core::fmt::Display for MeshError {
 
 impl core::error::Error for MeshError {}
 
-/// One body's triangles, ready to draw.
+/// One body's triangles and edges, ready to draw.
 pub struct GpuMesh {
     vertices: wgpu::Buffer,
     indices: Option<wgpu::Buffer>,
     /// Indices when indexed, vertices when not. What the draw call wants.
     count: u32,
+    line_vertices: Option<wgpu::Buffer>,
+    line_indices: Option<wgpu::Buffer>,
+    line_count: u32,
     /// True when a vertex was shared between faces and the mesh had to be
     /// expanded to one vertex per triangle corner. Observable on purpose.
     pub deindexed: bool,
     pub triangles: u32,
+    pub lines: u32,
 }
 
 impl GpuMesh {
@@ -123,12 +139,34 @@ impl GpuMesh {
             })
         });
 
+        let (line_vertices, line_indices, line_count) = if !mesh.line_indices.is_empty() {
+            let line_v_bytes = pack_line_positions(&mesh.line_positions);
+            let line_i_bytes = pack_indices(&mesh.line_indices);
+            let v_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some(&format!("{label} lines v")),
+                contents: &line_v_bytes,
+                usage: wgpu::BufferUsages::VERTEX,
+            });
+            let i_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some(&format!("{label} lines i")),
+                contents: &line_i_bytes,
+                usage: wgpu::BufferUsages::INDEX,
+            });
+            (Some(v_buf), Some(i_buf), mesh.line_indices.len() as u32)
+        } else {
+            (None, None, 0)
+        };
+
         Ok(Self {
             vertices,
             indices,
             count,
+            line_vertices,
+            line_indices,
+            line_count,
             deindexed,
             triangles: mesh.triangle_count() as u32,
+            lines: mesh.line_count() as u32,
         })
     }
 
@@ -140,6 +178,17 @@ impl GpuMesh {
                 pass.draw_indexed(0..self.count, 0, 0..1);
             }
             None => pass.draw(0..self.count, 0..1),
+        }
+    }
+
+    pub(crate) fn draw_lines(&self, pass: &mut wgpu::RenderPass<'_>) {
+        let (Some(vertices), Some(indices)) = (&self.line_vertices, &self.line_indices) else {
+            return;
+        };
+        if self.line_count > 0 {
+            pass.set_vertex_buffer(0, vertices.slice(..));
+            pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
+            pass.draw_indexed(0..self.line_count, 0, 0..1);
         }
     }
 }
@@ -157,6 +206,13 @@ fn validate(mesh: &Mesh) -> Result<(), MeshError> {
     let n = mesh.positions.len() as u32;
     if mesh.indices.iter().any(|&i| i >= n) {
         return Err(MeshError::Malformed("an index is out of range"));
+    }
+    if !mesh.line_indices.len().is_multiple_of(2) {
+        return Err(MeshError::Malformed("line indices are line segments"));
+    }
+    let line_n = mesh.line_positions.len() as u32;
+    if mesh.line_indices.iter().any(|&i| i >= line_n) {
+        return Err(MeshError::Malformed("a line index is out of range"));
     }
     Ok(())
 }
@@ -232,6 +288,16 @@ fn pack_indices(indices: &[u32]) -> Vec<u8> {
     out
 }
 
+fn pack_line_positions(positions: &[[f32; 3]]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(positions.len() * 12);
+    for p in positions {
+        for c in p {
+            out.extend_from_slice(&c.to_le_bytes());
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -242,6 +308,8 @@ mod tests {
             normals: vec![[0.0, 0.0, 1.0]; vertices],
             indices: indices.to_vec(),
             face_of_triangle: faces.to_vec(),
+            line_positions: Vec::new(),
+            line_indices: Vec::new(),
         }
     }
 
@@ -271,6 +339,16 @@ mod tests {
         assert!(matches!(validate(&mesh), Err(MeshError::Malformed(_))));
 
         let mesh = tri(&[0], &[0, 1, 9], 3);
+        assert!(matches!(validate(&mesh), Err(MeshError::Malformed(_))));
+
+        let mut mesh = tri(&[0], &[0, 1, 2], 3);
+        mesh.line_positions = vec![[0.0, 0.0, 0.0], [1.0, 1.0, 1.0]];
+        mesh.line_indices = vec![0, 1, 0]; // odd count
+        assert!(matches!(validate(&mesh), Err(MeshError::Malformed(_))));
+
+        let mut mesh = tri(&[0], &[0, 1, 2], 3);
+        mesh.line_positions = vec![[0.0, 0.0, 0.0]];
+        mesh.line_indices = vec![0, 5]; // out of bounds
         assert!(matches!(validate(&mesh), Err(MeshError::Malformed(_))));
     }
 }

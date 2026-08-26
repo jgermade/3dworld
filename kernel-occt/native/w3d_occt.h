@@ -68,8 +68,12 @@ typedef struct {
   const float *normals;          /* 3 * vertex_count */
   const uint32_t *indices;       /* 3 * triangle_count */
   const uint32_t *face_of_triangle; /* triangle_count */
+  const float *line_positions;   /* 3 * line_vertex_count */
+  const uint32_t *line_indices;  /* 2 * line_segment_count */
   uint32_t vertex_count;
   uint32_t triangle_count;
+  uint32_t line_vertex_count;
+  uint32_t line_segment_count;
   void *owner; /* opaque; pass the struct back to mesh_free */
 } W3dOcctMesh;
 

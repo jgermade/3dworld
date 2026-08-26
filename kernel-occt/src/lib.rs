@@ -66,8 +66,12 @@ struct RawMesh {
     normals: *const f32,
     indices: *const u32,
     face_of_triangle: *const u32,
+    line_positions: *const f32,
+    line_indices: *const u32,
     vertex_count: u32,
     triangle_count: u32,
+    line_vertex_count: u32,
+    line_segment_count: u32,
     owner: *mut core::ffi::c_void,
 }
 
@@ -78,8 +82,12 @@ impl RawMesh {
             normals: core::ptr::null(),
             indices: core::ptr::null(),
             face_of_triangle: core::ptr::null(),
+            line_positions: core::ptr::null(),
+            line_indices: core::ptr::null(),
             vertex_count: 0,
             triangle_count: 0,
+            line_vertex_count: 0,
+            line_segment_count: 0,
             owner: core::ptr::null_mut(),
         }
     }
@@ -313,11 +321,19 @@ impl GeometryKernel for OcctKernel {
         let mesh = unsafe {
             let verts = raw.vertex_count as usize;
             let tris = raw.triangle_count as usize;
+            let line_verts = raw.line_vertex_count as usize;
+            let line_segs = raw.line_segment_count as usize;
             Mesh {
                 positions: chunks3(raw.positions, verts),
                 normals: chunks3(raw.normals, verts),
                 indices: core::slice::from_raw_parts(raw.indices, tris * 3).to_vec(),
                 face_of_triangle: core::slice::from_raw_parts(raw.face_of_triangle, tris).to_vec(),
+                line_positions: chunks3(raw.line_positions, line_verts),
+                line_indices: if line_segs > 0 && !raw.line_indices.is_null() {
+                    core::slice::from_raw_parts(raw.line_indices, line_segs * 2).to_vec()
+                } else {
+                    Vec::new()
+                },
             }
         };
         unsafe { w3d_occt_mesh_free(&mut raw) };

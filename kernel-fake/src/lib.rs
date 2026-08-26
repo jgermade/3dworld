@@ -154,6 +154,22 @@ fn tessellate_box(bounds: &Aabb, n: u32) -> Mesh {
             }
         }
     }
+
+    let corners = [
+        Vec3::new(min.x, min.y, min.z).to_f32(),
+        Vec3::new(max.x, min.y, min.z).to_f32(),
+        Vec3::new(max.x, max.y, min.z).to_f32(),
+        Vec3::new(min.x, max.y, min.z).to_f32(),
+        Vec3::new(min.x, min.y, max.z).to_f32(),
+        Vec3::new(max.x, min.y, max.z).to_f32(),
+        Vec3::new(max.x, max.y, max.z).to_f32(),
+        Vec3::new(min.x, max.y, max.z).to_f32(),
+    ];
+    mesh.line_positions = corners.to_vec();
+    mesh.line_indices = vec![
+        0, 1, 1, 2, 2, 3, 3, 0, 4, 5, 5, 6, 6, 7, 7, 4, 0, 4, 1, 5, 2, 6, 3, 7,
+    ];
+
     mesh
 }
 
