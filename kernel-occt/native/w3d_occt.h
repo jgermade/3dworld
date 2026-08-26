@@ -1,12 +1,15 @@
 /* The seam, in C.
  *
  * This header is the specification of what an OpenCASCADE build must keep
- * exported, and it is deliberately the same shape as `GeometryKernel`:
- * sixteen entry points, one per trait method, plus two for moving a mesh
- * across, one for moving serialised geometry across, and one for the error
- * text. It is not bindings for OCCT — nothing
- * here exposes a TopoDS_Shape, a Handle or a Standard_Real, so nothing above
- * it can start depending on OCCT's vocabulary.
+ * exported, and it is deliberately the same shape as `GeometryKernel`: one
+ * entry point per trait method, plus the ones C requires and Rust does not —
+ * a context, and a free for every buffer that crosses. It is not bindings for
+ * OCCT — nothing here exposes a TopoDS_Shape, a Handle or a Standard_Real, so
+ * nothing above it can start depending on OCCT's vocabulary.
+ *
+ * The count is deliberately not written down here any more. It was, twice,
+ * and both numbers were wrong within a session of being right; what matters is
+ * the rule, which is that this file is the list.
  *
  * When the modeller needs a new geometric capability it is declared HERE
  * first, then implemented in w3d_occt.cpp, then used from Rust. Every symbol
@@ -118,6 +121,49 @@ int32_t w3d_occt_save_body(W3dOcctContext *ctx, uint32_t body, W3dOcctBytes *out
 int32_t w3d_occt_load_body(W3dOcctContext *ctx, const uint8_t *data, uint32_t len, uint32_t *out);
 
 void w3d_occt_bytes_free(W3dOcctBytes *bytes);
+
+/* Several body ids, owned by the C++ side until w3d_occt_bodies_free. A STEP
+ * file holds any number of solids and the caller cannot know how many before
+ * reading it, so this is the one place a call answers with a list. */
+typedef struct {
+  const uint32_t *ids;
+  uint32_t len;
+  void *owner; /* opaque; pass the struct back to bodies_free */
+} W3dOcctBodies;
+
+/* ---- STEP -----------------------------------------------------------------
+ *
+ * The only way geometry crosses *between* kernels, and the only entry points
+ * here that touch process-global state: STEP's unit, schema and reader
+ * settings live in OCCT's `Interface_Static`, which is one table for the whole
+ * program, and its diagnostics go to one global messenger. Both are therefore
+ * taken under a **process-wide lock** — not a per-context one. It is the only
+ * place in this shim where two contexts on two threads can wait on each other,
+ * and it is worth knowing before somebody meshes in parallel and wonders why
+ * an import serialises everything.
+ *
+ * Units: the document above has none, so a file has to state one and this one
+ * states millimetres, in both directions. A STEP file in inches is converted
+ * on the way in.
+ */
+
+/* Writes `count` bodies into one STEP file. Refuses `count == 0` as
+ * degenerate, and a stale id as unknown, before writing anything: a file with
+ * half a document in it is worse than no file. */
+int32_t w3d_occt_export_step(W3dOcctContext *ctx, const uint32_t *bodies, uint32_t count,
+                             W3dOcctBytes *out);
+
+/* Reads a STEP file, one body per solid in it.
+ *
+ * Never answers with an empty list: a file that imports into nothing is
+ * W3D_OCCT_ERR_FAILED with a message saying what was in it instead. Bytes that
+ * are not STEP are W3D_OCCT_ERR_FAILED too — *not* UNSUPPORTED, which this
+ * build reserves for "this program cannot read STEP at all" and never says,
+ * because it can. */
+int32_t w3d_occt_import_step(W3dOcctContext *ctx, const uint8_t *data, uint32_t len,
+                             W3dOcctBodies *out);
+
+void w3d_occt_bodies_free(W3dOcctBodies *bodies);
 
 /* The message behind the last W3D_OCCT_ERR_FAILED, for a log. Never for a
  * caller to match on. Valid until the next call on this thread. */

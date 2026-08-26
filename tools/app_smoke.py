@@ -10,6 +10,14 @@ Three assertions, and the second is the one worth having: a screenshot with
 many colours only says *something* rendered. The chrome and the viewport are
 checked separately, because a run where egui drew and the scene did not looks
 identical in a colour count.
+
+`--step` runs a different scenario through the same assertions: one process
+exports a STEP file, a **second process** imports it, and the second one's
+frame is what gets checked. That is the only place the STEP path is exercised
+by the program rather than by a test harness — the kernel tests prove a kernel
+can read what a kernel wrote, and this proves the modeller can open what the
+modeller saved. It needs a build with `--features occt`, because the fake
+kernel refuses STEP and says so.
 """
 
 import subprocess
@@ -65,35 +73,51 @@ def self_test():
     return wrong
 
 
+def run(binary, args, timeout=180):
+    """One run of the modeller, in a window that closes itself."""
+    result = subprocess.run(
+        ["xvfb-run", "-a", "--server-args=-screen 0 1200x800x24", str(binary), *args],
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+    print(result.stdout.strip() or "(no adapter line)")
+    if result.returncode != 0:
+        print(result.stderr.strip()[:2000])
+        raise SystemExit(f"the modeller exited {result.returncode}")
+    return result
+
+
 def main():
     if self_test():
         return 2
     binary = ROOT / "target" / "debug" / "w3d"
     if not binary.exists():
         raise SystemExit(f"{binary} does not exist — `cargo build -p w3d-app` first")
+    step = "--step" in sys.argv[1:]
 
     with tempfile.TemporaryDirectory() as tmp:
         shot = Path(tmp) / "frame.ppm"
-        result = subprocess.run(
-            [
-                "xvfb-run",
-                "-a",
-                "--server-args=-screen 0 1200x800x24",
-                str(binary),
-                "--demo",
-                "--frames",
-                "30",
-                "--screenshot",
-                str(shot),
-            ],
-            capture_output=True,
-            text=True,
-            timeout=180,
-        )
-        print(result.stdout.strip() or "(no adapter line)")
-        if result.returncode != 0:
-            print(result.stderr.strip()[:2000])
-            raise SystemExit(f"the modeller exited {result.returncode}")
+        if step:
+            exported = Path(tmp) / "roundtrip.step"
+            # One process writes it. No screenshot: what this run has to prove
+            # is that a file appeared, and the frame that matters is the other
+            # one's.
+            run(binary, ["--demo", "--export-step", str(exported), "--frames", "3"])
+            if not exported.exists():
+                raise SystemExit("no STEP file was written")
+            head = exported.read_bytes()[:13]
+            if head != b"ISO-10303-21;":
+                raise SystemExit(f"what was written does not begin as STEP: {head!r}")
+            print(f"wrote {exported.stat().st_size} bytes of STEP")
+            # And another reads it, in a process that shares nothing with the
+            # first but the file.
+            run(
+                binary,
+                ["--import-step", str(exported), "--frames", "30", "--screenshot", str(shot)],
+            )
+        else:
+            run(binary, ["--demo", "--frames", "30", "--screenshot", str(shot)])
         if not shot.exists():
             raise SystemExit("no screenshot was written")
 
@@ -118,7 +142,10 @@ def main():
             print(f"FAIL  {message}")
         if failures:
             return 1
-        print("ok    a window opened, egui drew, and the scene drew")
+        if step:
+            print("ok    a STEP file left one process and was drawn by another")
+        else:
+            print("ok    a window opened, egui drew, and the scene drew")
         return 0
 
 

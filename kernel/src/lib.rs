@@ -231,4 +231,76 @@ pub trait GeometryKernel {
     /// damaged — a caller can tell "wrong kernel" from "broken file", and a
     /// user deserves to know which.
     fn load_body(&mut self, bytes: &[u8]) -> Result<Body>;
+
+    // ---- interchange --------------------------------------------------
+    //
+    // The pair above moves geometry *through time* — a backend's own bytes,
+    // which every other backend must refuse. This pair moves it *between
+    // kernels*, and it is the only thing in the contract that does. The two
+    // are deliberately not one mechanism with a flag: `save_body` is lossless
+    // and unreadable elsewhere, `export_step` is readable everywhere and
+    // lossy, and a caller choosing between them is choosing between those two
+    // sentences.
+    //
+    // It is also what makes the file format's refusal message honest. A `.w3d`
+    // written by another kernel is refused with "export it to STEP from a
+    // build that can open it", and that instruction is only true if the
+    // build the user reaches for can read what the other one wrote.
+    //
+    // **Named for STEP, not for "an exchange format".** There is one case, and
+    // an abstraction over one case hides which one it is: what a caller has to
+    // know here — that units are stated in the file and nowhere else, that
+    // names, history and node structure do not survive, that a solid comes
+    // back with its faces renumbered — is knowledge about STEP, not about a
+    // genre. A second format, if one is ever owed, gets its own pair and its
+    // own paragraph of what it costs.
+    //
+    // **A backend may honestly not do STEP.** [`KernelError::Unsupported`]
+    // from *both* of these is a conforming answer, and `conformance` requires
+    // that it be both: a kernel that reads STEP but cannot write it leaves a
+    // user's work stuck inside it, and one that writes but cannot read is a
+    // door that only opens outwards. Half a bridge is not a bridge.
+
+    /// Writes `bodies` into one ISO 10303-21 file — a STEP file.
+    ///
+    /// The unit is the backend's to state and the file's to carry: a
+    /// [`Body`] is a bare number in a document that has no units, so a
+    /// backend that writes STEP is deciding what those numbers meant and
+    /// **must say so in the file**. Whatever it decides has to be the same
+    /// decision [`GeometryKernel::import_step`] reads back, or a
+    /// round-trip scales the model.
+    ///
+    /// Errors:
+    ///
+    /// - [`KernelError::Unsupported`] if this backend does not do STEP.
+    /// - [`KernelError::Degenerate`] for an empty `bodies`. A STEP file with
+    ///   no product in it is a file that opens with nothing in it, three
+    ///   programs later, and blames the wrong one.
+    /// - [`KernelError::UnknownBody`] if any handle is stale, and *before*
+    ///   anything is written: a partial export is worse than a refused one.
+    ///
+    /// The bodies survive, like every other operation's operands.
+    fn export_step(&self, bodies: &[Body]) -> Result<Vec<u8>>;
+
+    /// Reads a STEP file, producing one body per solid in it.
+    ///
+    /// One per *solid*, not one per file and not one per assembly node: the
+    /// document above this crate has a node per body, and a user who imports
+    /// a bracket and a bolt expects two things they can select. Curves,
+    /// surfaces and free-standing shells are not solids and are dropped —
+    /// this contract is about the solids.
+    ///
+    /// **Never `Ok(vec![])`.** A file that imports into nothing at all is a
+    /// bug report about the modeller; if there is no solid to be had, say so
+    /// with [`KernelError::Failed`] and a message naming what was in the file
+    /// instead.
+    ///
+    /// Errors:
+    ///
+    /// - [`KernelError::Unsupported`] if this backend does not do STEP — and
+    ///   for no other reason. Bytes that are not a STEP file at all are
+    ///   [`KernelError::Failed`], because a caller has to be able to tell "this
+    ///   build cannot read STEP" from "this file is not STEP" and the two
+    ///   sentences send a user to different places.
+    fn import_step(&mut self, bytes: &[u8]) -> Result<Vec<Body>>;
 }

@@ -14,8 +14,13 @@ names a face.
 Ctrl-S writes a `.w3d` — a zip you can open with `unzip`, specified in
 [FORMAT.md](FORMAT.md) — and `--open` reads one back.
 
-It is early. No STEP yet, so nothing leaves for another tool; no edges drawn; no fillets; and the
-browser build has no real geometry behind it until OCCT is built for Emscripten.
+**Work leaves.** Ctrl-E writes a STEP file — AP214, millimetres — that Fusion, FreeCAD,
+SolidWorks and Onshape read, and `--import-step FILE` brings one back in, a body per solid.
+It needs a kernel that does STEP: OpenCASCADE does, the fake kernel says so and refuses. There is
+no file dialogue yet, so export writes beside the document and import is a command-line option.
+
+It is early. No edges drawn; no fillets; and the browser build has no real geometry behind it
+until OCCT is built for Emscripten.
 
 ```
 make test       # check, clippy -D warnings, licences, and the tests
@@ -45,8 +50,11 @@ falls back to WebGL2 when it is blank. Everything the fast path claims is still 
 Only needed for `make test-occt`; everything else builds with a bare Rust toolchain.
 
 ```sh
-apt install libocct-foundation-dev libocct-modeling-data-dev libocct-modeling-algorithms-dev
+apt install libocct-foundation-dev libocct-modeling-data-dev libocct-modeling-algorithms-dev \
+            libocct-data-exchange-dev
 ```
+
+The last of those is STEP. Without it the build fails at the link, naming the toolkits.
 
 `OCCT_INCLUDE_DIR` and `OCCT_LIB_DIR` override discovery if your headers are elsewhere.
 

@@ -16,11 +16,17 @@ check:
 ## The OpenCASCADE backend, and the conformance suite run against real
 ## geometry. Needs OCCT headers and libraries:
 ##   apt install libocct-foundation-dev libocct-modeling-data-dev \
-##               libocct-modeling-algorithms-dev
+##               libocct-modeling-algorithms-dev libocct-data-exchange-dev
 ## Override discovery with OCCT_INCLUDE_DIR / OCCT_LIB_DIR.
 .PHONY: test-occt
 test-occt:
 	$(CARGO) test -p w3d-kernel-occt
+	@# `make clippy` cannot reach this crate: it is outside default-members,
+	@# which is what keeps `make test` free of setup. So it is linted here, by
+	@# the one command that already needs OCCT installed — a crate nothing
+	@# lints is a crate whose lints are all still there, and the first run of
+	@# this found one.
+	$(CARGO) clippy -p w3d-kernel-occt --all-targets -- -D warnings
 
 ## Fetches the headers a distribution failed to ship, at the revision in
 ## kernel-occt/native/UPSTREAM. Needed on Ubuntu Noble, whose
@@ -108,6 +114,15 @@ app:
 
 app-test: app
 	python3 tools/app_smoke.py
+
+## The STEP path end to end, through the program rather than through a test
+## harness: one process exports, a second imports, and the second one's frame
+## is asserted to contain a scene. Needs OCCT *and* a display, which is why it
+## is neither `make test` nor `make app-test`.
+.PHONY: app-test-step
+app-test-step:
+	$(CARGO) build -p w3d-app --features occt
+	python3 tools/app_smoke.py --step
 
 ## Drives the built page in headless Chromium and asserts it drew and picked.
 ## This is the only check in the repository that runs the viewport in a real

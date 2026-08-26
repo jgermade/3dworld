@@ -36,6 +36,14 @@ pub struct Options {
     pub startup: Vec<Command>,
     /// A document to open before anything else.
     pub open: Option<std::path::PathBuf>,
+    /// A STEP file to import into the document once it is open. An option
+    /// rather than a command because importing needs a file that exists and
+    /// there is no file dialogue to name one with — see [`Command::ExportStep`].
+    pub import_step: Option<std::path::PathBuf>,
+    /// Write the document as STEP once the startup commands have run. The
+    /// headless half of the export button, and what makes a STEP file
+    /// something a test can produce and read back.
+    pub export_step: Option<std::path::PathBuf>,
     /// Save here once the startup commands have run, then carry on. Exists so
     /// that a headless run can produce a file to check.
     pub save_as: Option<std::path::PathBuf>,
@@ -191,6 +199,17 @@ impl<K: GeometryKernel + Default> ApplicationHandler for Shell<K> {
                 }
             }
         }
+        if let Some(path) = self.options.import_step.clone() {
+            match editor.import_step(path) {
+                Ok(message) => println!("{message}"),
+                Err(e) => {
+                    eprintln!("{e}");
+                    self.exit_code = 1;
+                    event_loop.exit();
+                    return;
+                }
+            }
+        }
         for command in &self.options.startup {
             editor.run(*command);
         }
@@ -198,6 +217,20 @@ impl<K: GeometryKernel + Default> ApplicationHandler for Shell<K> {
             match editor.save(Some(path)) {
                 Ok(message) => println!("{message}"),
                 Err(e) => {
+                    eprintln!("{e}");
+                    self.exit_code = 1;
+                    event_loop.exit();
+                    return;
+                }
+            }
+        }
+        if let Some(path) = self.options.export_step.clone() {
+            match editor.export_step(Some(path)) {
+                Ok(message) => println!("{message}"),
+                Err(e) => {
+                    // A failed export is an exit code, not a status line: a
+                    // build with the fake kernel cannot write STEP, and a
+                    // script that asked for a file has to hear about it.
                     eprintln!("{e}");
                     self.exit_code = 1;
                     event_loop.exit();
@@ -325,6 +358,7 @@ fn map_key(key: &Key, modifiers: ModifiersState) -> Option<Command> {
             ("f", false, _) => Some(Command::ZoomToFit),
             ("a", true, _) => Some(Command::SelectAll),
             ("s", true, _) => Some(Command::Save),
+            ("e", true, _) => Some(Command::ExportStep),
             ("u", false, _) => Some(Command::Boolean(BooleanOp::Union)),
             ("d", false, _) => Some(Command::Boolean(BooleanOp::Difference)),
             ("i", false, _) => Some(Command::Boolean(BooleanOp::Intersection)),
@@ -618,6 +652,9 @@ fn chrome<K: GeometryKernel>(root: &mut egui::Ui, editor: &mut Editor<K>, scene:
             ui.horizontal_wrapped(|ui| {
                 if ui.button("Save").clicked() {
                     editor.run(Command::Save);
+                }
+                if ui.button("Export STEP").clicked() {
+                    editor.run(Command::ExportStep);
                 }
                 if ui.button("Undo").clicked() {
                     editor.run(Command::Undo);

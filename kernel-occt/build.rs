@@ -31,6 +31,16 @@ const TOOLKITS: &[&str] = &[
     "TKBool",
     "TKMesh",
     "TKShHealing",
+    // STEP, and it is five toolkits rather than one: the exchange framework,
+    // the schema, the two AP-specific pieces the schema pulls in, and the
+    // AP209 one, which nothing here wants and TKSTEP will not link without.
+    // Worth knowing before the Emscripten build, where every one of these is
+    // a thing that has to be compiled rather than a thing that is installed.
+    "TKXSBase",
+    "TKSTEPBase",
+    "TKSTEPAttr",
+    "TKSTEP209",
+    "TKSTEP",
 ];
 
 fn main() {
@@ -51,8 +61,8 @@ fn main() {
         panic!(
             "OpenCASCADE headers not found in {include}.\n\
              Install them (Debian/Ubuntu: libocct-foundation-dev \
-             libocct-modeling-data-dev libocct-modeling-algorithms-dev) or set \
-             OCCT_INCLUDE_DIR.\n\
+             libocct-modeling-data-dev libocct-modeling-algorithms-dev \
+             libocct-data-exchange-dev) or set OCCT_INCLUDE_DIR.\n\
              This crate is excluded from the workspace's default members, so \
              `cargo test` does not need it; `cargo test -p w3d-kernel-occt` does."
         );
