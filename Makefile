@@ -159,6 +159,26 @@ step-check:
 step-samples:
 	python3 tools/step_samples.py --fetch
 
+## Another *program* opens a file this one wrote, and weighs what comes out
+## against arithmetic — a plate of 40x40x10 with a 12 mm hole is
+## 16000 - pi*6^2*10 mm3 because that is what a cylinder is, and no CAD kernel
+## has a vote on it. That is the check that turns "it imported" into "it
+## imported the right thing, at the right size, in the right unit".
+##
+## FreeCAD's kernel is OpenCASCADE, so this is another application's *import
+## path* — its XDE layer, its units, its document — and not a second opinion on
+## the geometry. The difference matters and is written down in the script.
+##
+## Needs FreeCAD (Ubuntu 22.04: apt install freecad; it is absent from 24.04).
+## `FREECAD_STEP=path` weighs a file that already exists instead of writing one,
+## which is how CI does it, on a machine with no OCCT and no Rust.
+FREECAD_STEP ?= $(STEP_OUT)
+
+.PHONY: freecad-check
+freecad-check:
+	@if [ ! -f "$(FREECAD_STEP)" ]; then 	    mkdir -p $(dir $(STEP_OUT)); 	    $(CARGO) run -q -p w3d-kernel-occt --example export_step -- $(STEP_OUT); 	fi
+	python3 tools/freecad_volume.py $(FREECAD_STEP)
+
 ## Drives the built page in headless Chromium and asserts it drew and picked.
 ## This is the only check in the repository that runs the viewport in a real
 ## browser; everything else is native.
