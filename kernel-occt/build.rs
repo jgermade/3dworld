@@ -31,6 +31,7 @@ const BASE_TOOLKITS: &[&str] = &[
     "TKBool",
     "TKMesh",
     "TKShHealing",
+    "TKFillet",
     "TKCDF",
     "TKLCAF",
     "TKCAF",

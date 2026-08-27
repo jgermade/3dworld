@@ -283,6 +283,18 @@ impl<K: GeometryKernel> Document<K> {
         Ok(())
     }
 
+    pub fn fillet(&mut self, id: NodeId, radius: f64) -> Result<()> {
+        let before = self.node(id)?.clone();
+        let body = self.kernel.fillet(before.body, radius)?;
+        let body = self.track(body);
+        let after = Node {
+            body,
+            ..before.clone()
+        };
+        self.replace(id, "Fillet", before, after);
+        Ok(())
+    }
+
     pub fn rename(&mut self, id: NodeId, name: impl Into<String>) -> Result<()> {
         let before = self.node(id)?.clone();
         let after = Node {

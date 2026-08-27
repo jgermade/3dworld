@@ -23,6 +23,7 @@
 #include <BRepBndLib.hxx>
 #include <BRepBuilderAPI_GTransform.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
+#include <BRepFilletAPI_MakeFillet.hxx>
 #include <BRepMesh_IncrementalMesh.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <BRepPrimAPI_MakeCylinder.hxx>
@@ -259,6 +260,33 @@ int32_t w3d_occt_copy(W3dOcctContext *ctx, uint32_t body, uint32_t *out) {
 
 int32_t w3d_occt_delete(W3dOcctContext *ctx, uint32_t body) {
   return ctx->bodies.erase(body) == 1 ? W3D_OCCT_OK : W3D_OCCT_ERR_UNKNOWN_BODY;
+}
+
+int32_t w3d_occt_fillet(W3dOcctContext *ctx, uint32_t body, double radius, uint32_t *out) {
+  if (radius <= 0.0) {
+    return W3D_OCCT_ERR_DEGENERATE;
+  }
+  const TopoDS_Shape *s = ctx->find(body);
+  if (!s) {
+    return W3D_OCCT_ERR_UNKNOWN_BODY;
+  }
+  return guarded([&] {
+    BRepFilletAPI_MakeFillet maker(*s);
+    uint32_t edge_count = 0;
+    for (TopExp_Explorer e(*s, TopAbs_EDGE); e.More(); e.Next()) {
+      maker.Add(radius, TopoDS::Edge(e.Current()));
+      edge_count++;
+    }
+    if (edge_count == 0) {
+      return fail("the body has no edges to fillet");
+    }
+    maker.Build();
+    if (!maker.IsDone()) {
+      return fail("fillet operation failed: OpenCASCADE could not construct blend surfaces");
+    }
+    *out = ctx->store(maker.Shape());
+    return W3D_OCCT_OK;
+  });
 }
 
 int32_t w3d_occt_topology(W3dOcctContext *ctx, uint32_t body, uint32_t *out4) {

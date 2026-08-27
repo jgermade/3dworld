@@ -114,6 +114,7 @@ unsafe extern "C" {
     fn w3d_occt_transform(ctx: *mut Context, body: u32, m34: *const f64, out: *mut u32) -> i32;
     fn w3d_occt_copy(ctx: *mut Context, body: u32, out: *mut u32) -> i32;
     fn w3d_occt_delete(ctx: *mut Context, body: u32) -> i32;
+    fn w3d_occt_fillet(ctx: *mut Context, body: u32, radius: f64, out: *mut u32) -> i32;
     fn w3d_occt_topology(ctx: *mut Context, body: u32, out4: *mut u32) -> i32;
     fn w3d_occt_bounds(ctx: *mut Context, body: u32, out6: *mut f64) -> i32;
     fn w3d_occt_tessellate(
@@ -274,6 +275,15 @@ impl GeometryKernel for OcctKernel {
 
     fn delete(&mut self, body: Body) -> Result<()> {
         check(unsafe { w3d_occt_delete(self.ctx, body.raw()) }, body)
+    }
+
+    fn fillet(&mut self, body: Body, radius: f64) -> Result<Body> {
+        let mut id = 0u32;
+        check(
+            unsafe { w3d_occt_fillet(self.ctx, body.raw(), radius, &mut id) },
+            body,
+        )?;
+        Ok(Body::from_raw(id))
     }
 
     fn topology(&self, body: Body) -> Result<Topology> {

@@ -196,6 +196,13 @@ pub trait GeometryKernel {
     /// history entry still refers to.
     fn delete(&mut self, body: Body) -> Result<()>;
 
+    /// Fillets / rounds all sharp edges of a solid with the specified radius.
+    ///
+    /// The input `body` is unmodified; a new handle is returned for the
+    /// resulting solid. If `radius <= 0.0` or exceeds the solid's bounds,
+    /// returns `KernelError::Degenerate`.
+    fn fillet(&mut self, body: Body, radius: f64) -> Result<Body>;
+
     fn topology(&self, body: Body) -> Result<Topology>;
 
     fn bounds(&self, body: Body) -> Result<Aabb>;

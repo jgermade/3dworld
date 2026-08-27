@@ -20,6 +20,7 @@ pub enum Command {
     AddBox,
     AddSphere,
     AddCylinder,
+    Fillet,
     Boolean(BooleanOp),
     DeleteSelected,
     Undo,
@@ -259,6 +260,7 @@ impl<K: GeometryKernel> Editor<K> {
             Command::AddCylinder => {
                 self.add("Cylinder", |doc, name| doc.add_cylinder(name, 8.0, 24.0))
             }
+            Command::Fillet => self.fillet(1.0),
             Command::Boolean(op) => self.boolean(op),
             Command::DeleteSelected => self.delete_selected(),
             Command::Undo => Ok(match self.doc.undo() {
@@ -345,6 +347,26 @@ impl<K: GeometryKernel> Editor<K> {
         self.path = Some(path);
         self.status = message.clone();
         Ok(message)
+    }
+
+    fn fillet(&mut self, radius: f64) -> Result<String, String> {
+        let selected = self.selection();
+        if selected.is_empty() {
+            return Err(String::from("fillet needs a selected object"));
+        }
+        self.doc.begin_transaction("Fillet");
+        let mut count = 0;
+        for id in selected {
+            if self.doc.fillet(id, radius).is_ok() {
+                count += 1;
+            }
+        }
+        self.doc.commit_transaction();
+        if count == 0 {
+            Err(String::from("fillet failed on selected objects"))
+        } else {
+            Ok(format!("filleted {count} object(s)"))
+        }
     }
 
     /// Writes STEP to `path`, or beside the document, or to `untitled.step`.

@@ -259,6 +259,14 @@ impl GeometryKernel for FakeKernel {
             .ok_or(KernelError::UnknownBody(body))
     }
 
+    fn fillet(&mut self, body: Body, radius: f64) -> Result<Body> {
+        if radius <= 0.0 {
+            return Err(KernelError::Degenerate("fillet radius must be positive"));
+        }
+        let shape = self.get(body)?.clone();
+        Ok(self.insert(shape))
+    }
+
     fn topology(&self, body: Body) -> Result<Topology> {
         Ok(self.get(body)?.topology())
     }

@@ -263,6 +263,37 @@ pub fn run<K: GeometryKernel>(k: &mut K, tol: Tolerance, quality: Quality) -> Re
             .map_err(|e| format!("second operand invalidated by the boolean: {e}"))
     });
 
+    check!(
+        checks,
+        "fillet creates a new body and leaves original untouched",
+        {
+            let a = k.create_box(Vec3::splat(4.0)).map_err(|e| e.to_string())?;
+            let before = k.bounds(a).map_err(|e| e.to_string())?;
+            let filleted = k.fillet(a, 0.5).map_err(|e| e.to_string())?;
+            require(
+                filleted != a,
+                "fillet returned the same body handle".to_string(),
+            )?;
+            let after = k.bounds(a).map_err(|e| e.to_string())?;
+            require(
+                boxes_close(&before, &after, tol.linear),
+                format!("original body mutated by fillet: {before:?} became {after:?}"),
+            )
+        }
+    );
+
+    check!(
+        checks,
+        "fillet with non-positive radius returns Degenerate",
+        {
+            let a = k.create_box(Vec3::splat(2.0)).map_err(|e| e.to_string())?;
+            match k.fillet(a, 0.0) {
+                Err(KernelError::Degenerate(_)) => Ok(()),
+                other => Err(format!("fillet with zero radius returned {other:?}")),
+            }
+        }
+    );
+
     check!(checks, "a translation moves the bounds by exactly that", {
         let a = k.create_box(Vec3::splat(2.0)).map_err(|e| e.to_string())?;
         let before = k.bounds(a).map_err(|e| e.to_string())?;

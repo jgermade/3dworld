@@ -30,6 +30,7 @@ fn main() -> std::process::ExitCode {
                     Command::AddCylinder,
                     Command::SelectAll,
                     Command::Boolean(BooleanOp::Difference),
+                    Command::Fillet,
                     Command::ZoomToFit,
                 ];
             }

@@ -362,6 +362,7 @@ fn map_key(key: &Key, modifiers: ModifiersState) -> Option<Command> {
             ("u", false, _) => Some(Command::Boolean(BooleanOp::Union)),
             ("d", false, _) => Some(Command::Boolean(BooleanOp::Difference)),
             ("i", false, _) => Some(Command::Boolean(BooleanOp::Intersection)),
+            ("r", false, _) => Some(Command::Fillet),
             _ => None,
         },
         Key::Named(NamedKey::Delete) | Key::Named(NamedKey::Backspace) => {
@@ -654,6 +655,13 @@ fn chrome<K: GeometryKernel>(
                     .clicked()
                 {
                     editor.run(Command::Boolean(BooleanOp::Intersection));
+                }
+                let one_or_more = !editor.selection().is_empty();
+                if ui
+                    .add_enabled(one_or_more, egui::Button::new("Fillet"))
+                    .clicked()
+                {
+                    editor.run(Command::Fillet);
                 }
             });
             ui.horizontal_wrapped(|ui| {
