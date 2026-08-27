@@ -116,7 +116,15 @@ fn main() {
 
     println!("cargo:rustc-link-search=native={}", out_dir.display());
     println!("cargo:rustc-link-lib=static=w3d_occt");
-    let lib_dir = env::var("OCCT_LIB_DIR").unwrap_or_else(|_| "/usr/lib".into());
+    let lib_dir = env::var("OCCT_LIB_DIR").unwrap_or_else(|_| {
+        if PathBuf::from("/usr/lib/x86_64-linux-gnu").exists() {
+            "/usr/lib/x86_64-linux-gnu".into()
+        } else if PathBuf::from("/usr/lib/aarch64-linux-gnu").exists() {
+            "/usr/lib/aarch64-linux-gnu".into()
+        } else {
+            "/usr/lib".into()
+        }
+    });
     println!("cargo:rustc-link-search=native={lib_dir}");
 
     for tk in BASE_TOOLKITS {

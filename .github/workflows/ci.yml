@@ -60,6 +60,11 @@ jobs:
             target
           key: cargo-test-${{ steps.rust.outputs.version }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: cargo-test-${{ steps.rust.outputs.version }}-
+      - name: System dependencies for Linux app targets
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libgtk-3-dev libxkbcommon-dev libwayland-dev libx11-dev
       - run: make test
       - name: The wasm target still builds, and still has WebGL2 in it
         run: make wasm
