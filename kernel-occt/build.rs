@@ -73,7 +73,8 @@ fn main() {
     // Caught here instead, and named. The repair is one command and it is
     // deliberately not run from this script: a build that reaches the network
     // on its own is not a build anybody can reproduce or audit.
-    let vendored = PathBuf::from("native").join(VENDOR_INCLUDE);
+    let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
+    let vendored = manifest_dir.join("native").join(VENDOR_INCLUDE);
     let broken = PathBuf::from(&include)
         .join("Poly_ArrayOfNodes.hxx")
         .exists()
@@ -97,7 +98,7 @@ fn main() {
     run(
         Command::new(&cxx)
             .args(["-std=c++17", "-O2", "-fPIC", "-c"])
-            .arg("native/w3d_occt.cpp")
+            .arg(manifest_dir.join("native/w3d_occt.cpp"))
             .arg("-I")
             .arg(&include)
             // After the system path, never before: a vendored header stands in
@@ -158,6 +159,8 @@ fn main() {
         println!("cargo:rustc-link-lib=dylib=c++");
     } else {
         println!("cargo:rustc-link-lib=dylib=stdc++");
+        println!("cargo:rustc-link-lib=dylib=pthread");
+        println!("cargo:rustc-link-lib=dylib=dl");
     }
 }
 
