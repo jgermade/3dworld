@@ -232,11 +232,19 @@ fn step_file_in_inches_is_converted_to_millimetres_on_import() {
     let step_bytes = k.export_step(&[box_body]).unwrap();
     let step_str = String::from_utf8(step_bytes).unwrap();
 
-    // Replace #346 with a CONVERSION_BASED_UNIT defining INCH (25.4 mm)
-    let inch_step_str = step_str.replace(
-        "#346 = ( LENGTH_UNIT() NAMED_UNIT(*) SI_UNIT(.MILLI.,.METRE.) );",
-        "#346 = ( CONVERSION_BASED_UNIT('INCH',#3470) LENGTH_UNIT() NAMED_UNIT(*) );\n#3470 = LENGTH_MEASURE_WITH_UNIT(LENGTH_MEASURE(25.4),#3461);\n#3461 = ( LENGTH_UNIT() NAMED_UNIT(*) SI_UNIT(.MILLI.,.METRE.) );",
+    // Find the entity line for LENGTH_UNIT() NAMED_UNIT(*) SI_UNIT(.MILLI.,.METRE.)
+    let target_pattern = "( LENGTH_UNIT() NAMED_UNIT(*) SI_UNIT(.MILLI.,.METRE.) );";
+    let entity_line = step_str
+        .lines()
+        .find(|line| line.contains(target_pattern))
+        .expect("STEP file must contain LENGTH_UNIT SI_UNIT(.MILLI.,.METRE.)");
+    let entity_id = entity_line.split('=').next().unwrap().trim();
+
+    let replacement = format!(
+        "{entity_id} = ( CONVERSION_BASED_UNIT('INCH',#3470) LENGTH_UNIT() NAMED_UNIT(*) );\n#3470 = LENGTH_MEASURE_WITH_UNIT(LENGTH_MEASURE(25.4),#3461);\n#3461 = ( LENGTH_UNIT() NAMED_UNIT(*) SI_UNIT(.MILLI.,.METRE.) );"
     );
+
+    let inch_step_str = step_str.replace(entity_line, &replacement);
 
     let mut reader = OcctKernel::new();
     let imported = reader.import_step(inch_step_str.as_bytes()).unwrap();
