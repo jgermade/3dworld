@@ -15,7 +15,7 @@ use w3d_render::{Camera, Pick};
 
 /// A semantic action. The shell decides which key or button produces one; this
 /// crate decides what it means.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Command {
     AddBox,
     AddSphere,
@@ -28,6 +28,9 @@ pub enum Command {
     ClearSelection,
     SelectAll,
     ZoomToFit,
+    SetView(ViewDirection),
+    SetSelectionMode(SelectionMode),
+    TranslateSelection(Vec3),
     Save,
     SaveAs,
     Open,
@@ -37,6 +40,22 @@ pub enum Command {
     SaveAsPath(PathBuf),
     ImportStepPath(PathBuf),
     ExportStepPath(PathBuf),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ViewDirection {
+    Top,
+    Front,
+    Right,
+    Iso,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum SelectionMode {
+    #[default]
+    Body,
+    Face,
+    Edge,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -108,6 +127,7 @@ pub struct Editor<K: GeometryKernel> {
     /// The last thing that happened, for the status line. A modeller that
     /// refuses an operation silently is a modeller people think is broken.
     status: String,
+    selection_mode: SelectionMode,
 }
 
 impl<K: GeometryKernel> Editor<K> {
@@ -119,6 +139,41 @@ impl<K: GeometryKernel> Editor<K> {
             drag: None,
             viewport: (1, 1),
             status: String::from("ready"),
+            selection_mode: SelectionMode::Body,
+        }
+    }
+
+    pub fn selection_mode(&self) -> SelectionMode {
+        self.selection_mode
+    }
+
+    pub fn set_selection_mode(&mut self, mode: SelectionMode) {
+        self.selection_mode = mode;
+        self.status = format!("selection mode: {mode:?}");
+    }
+
+    pub fn align_camera(&mut self, dir: ViewDirection) {
+        match dir {
+            ViewDirection::Top => {
+                self.camera.yaw = 0.0;
+                self.camera.pitch = -std::f64::consts::FRAC_PI_2 + 1e-4;
+                self.status = String::from("view: top");
+            }
+            ViewDirection::Front => {
+                self.camera.yaw = 0.0;
+                self.camera.pitch = 0.0;
+                self.status = String::from("view: front");
+            }
+            ViewDirection::Right => {
+                self.camera.yaw = std::f64::consts::FRAC_PI_2;
+                self.camera.pitch = 0.0;
+                self.status = String::from("view: right");
+            }
+            ViewDirection::Iso => {
+                self.camera.yaw = std::f64::consts::FRAC_PI_4;
+                self.camera.pitch = -std::f64::consts::FRAC_PI_6;
+                self.status = String::from("view: isometric");
+            }
         }
     }
 
@@ -310,6 +365,28 @@ impl<K: GeometryKernel> Editor<K> {
                 } else {
                     self.camera.fit(&bounds);
                     Ok(String::from("framed"))
+                }
+            }
+            Command::SetView(dir) => {
+                self.align_camera(dir);
+                Ok(self.status.clone())
+            }
+            Command::SetSelectionMode(mode) => {
+                self.set_selection_mode(mode);
+                Ok(self.status.clone())
+            }
+            Command::TranslateSelection(t) => {
+                let selected = self.selection();
+                if selected.is_empty() {
+                    Err(String::from("nothing selected to translate"))
+                } else {
+                    self.doc.begin_transaction("Translate");
+                    let m = w3d_core::kernel::Mat4::from_translation(t);
+                    for id in &selected {
+                        let _ = self.doc.transform(*id, &m);
+                    }
+                    self.doc.commit_transaction();
+                    Ok(format!("translated {} object(s)", selected.len()))
                 }
             }
         };
@@ -721,6 +798,44 @@ mod tests {
         e.run(Command::AddBox);
         e.picked(hit(NOTHING - 1), false);
         assert!(e.status().contains("no longer there"), "{}", e.status());
+    }
+
+    #[test]
+    fn camera_alignment_commands_update_view_orientation() {
+        let mut e = editor();
+        e.run(Command::SetView(ViewDirection::Top));
+        assert!(e.status().contains("top"));
+
+        e.run(Command::SetView(ViewDirection::Front));
+        assert!(e.status().contains("front"));
+
+        e.run(Command::SetView(ViewDirection::Iso));
+        assert!(e.status().contains("isometric"));
+    }
+
+    #[test]
+    fn selection_mode_commands_switch_active_mode() {
+        let mut e = editor();
+        assert_eq!(e.selection_mode(), SelectionMode::Body);
+
+        e.run(Command::SetSelectionMode(SelectionMode::Face));
+        assert_eq!(e.selection_mode(), SelectionMode::Face);
+
+        e.run(Command::SetSelectionMode(SelectionMode::Edge));
+        assert_eq!(e.selection_mode(), SelectionMode::Edge);
+    }
+
+    #[test]
+    fn gizmo_translate_selection_moves_selected_body_bounds() {
+        let mut e = editor();
+        e.run(Command::AddBox);
+        let id = e.selection()[0];
+        let bounds_before = e.document().bounds(id).unwrap();
+
+        e.run(Command::TranslateSelection(Vec3::new(10.0, 0.0, -5.0)));
+        let bounds_after = e.document().bounds(id).unwrap();
+        assert_eq!(bounds_after.min.x, bounds_before.min.x + 10.0);
+        assert_eq!(bounds_after.min.z, bounds_before.min.z - 5.0);
     }
 
     #[test]

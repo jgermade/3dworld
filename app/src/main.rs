@@ -69,9 +69,11 @@ fn main() -> std::process::ExitCode {
     };
     event_loop.set_control_flow(ControlFlow::Poll);
 
-    #[cfg(feature = "occt")]
+    #[cfg(feature = "truck")]
+    let kernel = w3d_kernel_truck::TruckKernel::default();
+    #[cfg(all(feature = "occt", not(feature = "truck")))]
     let kernel = w3d_kernel_occt::OcctKernel::new();
-    #[cfg(not(feature = "occt"))]
+    #[cfg(not(any(feature = "occt", feature = "truck")))]
     let kernel = w3d_kernel_fake::FakeKernel::default();
 
     let mut shell = Shell::new(kernel, options);

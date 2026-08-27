@@ -20,7 +20,7 @@
 use js_sys::{Object, Reflect};
 use w3d_core::Document;
 use w3d_core::kernel::{BooleanOp, Mat4, Vec3};
-use w3d_kernel_fake::FakeKernel;
+use w3d_kernel_truck::TruckKernel;
 use w3d_render::{Camera, Gpu, GpuMesh, Material, Object as DrawObject, PickPending, Renderer};
 use wasm_bindgen::prelude::*;
 use web_sys::HtmlCanvasElement;
@@ -299,14 +299,13 @@ fn depth_texture(device: &wgpu::Device, width: u32, height: u32) -> wgpu::Textur
 /// A plate with a hole, on the fake kernel — the same document the headless
 /// tests draw, so that a difference between here and there is a difference in
 /// the browser rather than in the scene.
-fn scene() -> Document<FakeKernel> {
-    let mut doc = Document::new(FakeKernel::default());
+/// Pure Rust B-rep geometry scene rendered via TruckKernel in WebAssembly.
+fn scene() -> Document<TruckKernel> {
+    let mut doc = Document::new(TruckKernel::default());
     let plate = doc
         .add_box("plate", Vec3::new(40.0, 40.0, 10.0))
-        .expect("the fake kernel refuses nothing valid");
-    let drill = doc
-        .add_cylinder("drill", 6.0, 20.0)
-        .expect("the fake kernel refuses nothing valid");
+        .expect("box");
+    let drill = doc.add_cylinder("drill", 6.0, 20.0).expect("cylinder");
     let _ = doc.transform(drill, &Mat4::from_translation(Vec3::new(8.0, 0.0, 0.0)));
     let _ = doc.boolean(BooleanOp::Difference, plate, drill);
     doc

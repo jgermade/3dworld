@@ -1,0 +1,17 @@
+[package]
+name = "w3d-kernel-truck"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+w3d-kernel = { path = "../kernel", features = ["conformance"] }
+truck-modeling = "0.6.0"
+truck-topology = "0.6.0"
+truck-geometry = "0.5.0"
+truck-polymesh = "0.6.0"
+truck-stepio = "0.3.0"
+truck-base = "0.5.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"

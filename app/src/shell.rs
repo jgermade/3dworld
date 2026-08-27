@@ -789,6 +789,68 @@ fn chrome<K: GeometryKernel + Default>(
             }
             RibbonTab::View => {
                 ui.group(|ui| {
+                    ui.label("Selection Mode");
+                    ui.horizontal(|ui| {
+                        let mode = editor.selection_mode();
+                        if ui
+                            .selectable_label(mode == crate::editor::SelectionMode::Body, "Body")
+                            .clicked()
+                        {
+                            execute_command(
+                                editor,
+                                Command::SetSelectionMode(crate::editor::SelectionMode::Body),
+                            );
+                        }
+                        if ui
+                            .selectable_label(mode == crate::editor::SelectionMode::Face, "Face")
+                            .clicked()
+                        {
+                            execute_command(
+                                editor,
+                                Command::SetSelectionMode(crate::editor::SelectionMode::Face),
+                            );
+                        }
+                        if ui
+                            .selectable_label(mode == crate::editor::SelectionMode::Edge, "Edge")
+                            .clicked()
+                        {
+                            execute_command(
+                                editor,
+                                Command::SetSelectionMode(crate::editor::SelectionMode::Edge),
+                            );
+                        }
+                    });
+                });
+                ui.group(|ui| {
+                    ui.label("Camera Alignment");
+                    ui.horizontal(|ui| {
+                        if ui.button("Top").clicked() {
+                            execute_command(
+                                editor,
+                                Command::SetView(crate::editor::ViewDirection::Top),
+                            );
+                        }
+                        if ui.button("Front").clicked() {
+                            execute_command(
+                                editor,
+                                Command::SetView(crate::editor::ViewDirection::Front),
+                            );
+                        }
+                        if ui.button("Right").clicked() {
+                            execute_command(
+                                editor,
+                                Command::SetView(crate::editor::ViewDirection::Right),
+                            );
+                        }
+                        if ui.button("Isometric").clicked() {
+                            execute_command(
+                                editor,
+                                Command::SetView(crate::editor::ViewDirection::Iso),
+                            );
+                        }
+                    });
+                });
+                ui.group(|ui| {
                     ui.label("Viewport Options");
                     ui.horizontal(|ui| {
                         ui.checkbox(&mut renderer.show_grid, "Ground Grid");
@@ -905,6 +967,95 @@ fn chrome<K: GeometryKernel + Default>(
             });
         });
     });
+
+    // 4. Floating View Cube Overlay (Top Right Viewport)
+    egui::Window::new("View Cube")
+        .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-16.0, 100.0))
+        .resizable(false)
+        .collapsible(false)
+        .title_bar(false)
+        .show(root, |ui| {
+            ui.horizontal(|ui| {
+                ui.label("CUBE:");
+                if ui.button("TOP").clicked() {
+                    execute_command(editor, Command::SetView(crate::editor::ViewDirection::Top));
+                }
+                if ui.button("FRONT").clicked() {
+                    execute_command(
+                        editor,
+                        Command::SetView(crate::editor::ViewDirection::Front),
+                    );
+                }
+                if ui.button("RIGHT").clicked() {
+                    execute_command(
+                        editor,
+                        Command::SetView(crate::editor::ViewDirection::Right),
+                    );
+                }
+                if ui.button("ISO").clicked() {
+                    execute_command(editor, Command::SetView(crate::editor::ViewDirection::Iso));
+                }
+            });
+        });
+
+    // 5. Floating 3D Translate Gizmo Overlay (Bottom Right Viewport)
+    if !editor.selection().is_empty() {
+        egui::Window::new("3D Gizmo Translate")
+            .anchor(egui::Align2::RIGHT_BOTTOM, egui::vec2(-16.0, -40.0))
+            .resizable(false)
+            .collapsible(false)
+            .show(root, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("X:");
+                    if ui.button("-5").clicked() {
+                        execute_command(
+                            editor,
+                            Command::TranslateSelection(w3d_core::kernel::Vec3::new(
+                                -5.0, 0.0, 0.0,
+                            )),
+                        );
+                    }
+                    if ui.button("+5").clicked() {
+                        execute_command(
+                            editor,
+                            Command::TranslateSelection(w3d_core::kernel::Vec3::new(5.0, 0.0, 0.0)),
+                        );
+                    }
+
+                    ui.label("Y:");
+                    if ui.button("-5").clicked() {
+                        execute_command(
+                            editor,
+                            Command::TranslateSelection(w3d_core::kernel::Vec3::new(
+                                0.0, -5.0, 0.0,
+                            )),
+                        );
+                    }
+                    if ui.button("+5").clicked() {
+                        execute_command(
+                            editor,
+                            Command::TranslateSelection(w3d_core::kernel::Vec3::new(0.0, 5.0, 0.0)),
+                        );
+                    }
+
+                    ui.label("Z:");
+                    if ui.button("-5").clicked() {
+                        execute_command(
+                            editor,
+                            Command::TranslateSelection(w3d_core::kernel::Vec3::new(
+                                0.0, 0.0, -5.0,
+                            )),
+                        );
+                    }
+                    if ui.button("+5").clicked() {
+                        execute_command(
+                            editor,
+                            Command::TranslateSelection(w3d_core::kernel::Vec3::new(0.0, 0.0, 5.0)),
+                        );
+                    }
+                });
+            });
+    }
 }
 
 /// A free function rather than a method: borrowing the fields separately is

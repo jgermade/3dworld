@@ -45,9 +45,14 @@ wgpu = { version = "30", default-features = false, features = [
 path = "../kernel-occt"
 optional = true
 
+[dependencies.w3d-kernel-truck]
+path = "../kernel-truck"
+optional = true
+
 [features]
 default = []
 occt = ["dep:w3d-kernel-occt"]
+truck = ["dep:w3d-kernel-truck"]
 
 [lints]
 workspace = true
