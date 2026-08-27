@@ -47,6 +47,8 @@ pub struct Options {
     /// Save here once the startup commands have run, then carry on. Exists so
     /// that a headless run can produce a file to check.
     pub save_as: Option<std::path::PathBuf>,
+    pub test_pick_face: bool,
+    pub test_pick_edge: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -56,6 +58,12 @@ pub enum RibbonTab {
     Modify,
     View,
     File,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PendingKind {
+    Select { additive: bool },
+    Hover,
 }
 
 struct Live<K: GeometryKernel + Default> {
@@ -69,7 +77,7 @@ struct Live<K: GeometryKernel + Default> {
     egui: egui_winit::State,
     egui_renderer: egui_wgpu::Renderer,
     editor: Editor<K>,
-    pending: Option<(PickPending, bool)>,
+    pending: Option<(PickPending, PendingKind)>,
     modifiers: ModifiersState,
     cursor: (f64, f64),
     ribbon_tab: RibbonTab,
@@ -78,6 +86,7 @@ struct Live<K: GeometryKernel + Default> {
     /// is a validation error — the copy has to happen in the same encoder that
     /// drew it, which also makes it exactly what was shown.
     capture: Option<wgpu::Texture>,
+    options: Options,
     frames: u32,
 }
 
@@ -223,6 +232,17 @@ impl<K: GeometryKernel + Default> ApplicationHandler for Shell<K> {
         for command in &self.options.startup {
             execute_command(&mut editor, command.clone());
         }
+        if self.options.test_pick_face
+            && let Some(id) = editor.selection().first().copied()
+        {
+            editor.picked(
+                w3d_render::Pick {
+                    object: id.index(),
+                    face: 1,
+                },
+                false,
+            );
+        }
         if let Some(path) = self.options.save_as.clone() {
             match editor.save(Some(path)) {
                 Ok(message) => println!("{message}"),
@@ -265,6 +285,7 @@ impl<K: GeometryKernel + Default> ApplicationHandler for Shell<K> {
             cursor: (0.0, 0.0),
             ribbon_tab: RibbonTab::default(),
             capture,
+            options: self.options.clone(),
             frames: 0,
         });
         self.live.as_ref().unwrap().window.request_redraw();
@@ -304,7 +325,14 @@ impl<K: GeometryKernel + Default> ApplicationHandler for Shell<K> {
                     _ => live.window.request_redraw(),
                 }
             }
-            _ if consumed => {}
+            WindowEvent::CursorMoved { position, .. } => {
+                live.cursor = (position.x, position.y);
+                let reaction = live.editor.input(Input::Move {
+                    x: position.x,
+                    y: position.y,
+                });
+                live.react(reaction);
+            }
             WindowEvent::MouseInput { state, button, .. } => {
                 let Some(button) = map_button(button) else {
                     return;
@@ -318,20 +346,14 @@ impl<K: GeometryKernel + Default> ApplicationHandler for Shell<K> {
                             button,
                             additive: live.modifiers.shift_key(),
                             ctrl: live.modifiers.control_key() || live.modifiers.super_key(),
+                            alt: live.modifiers.alt_key(),
                         })
                     }
                     ElementState::Released => live.editor.input(Input::Up { button }),
                 };
                 live.react(reaction);
             }
-            WindowEvent::CursorMoved { position, .. } => {
-                live.cursor = (position.x, position.y);
-                let reaction = live.editor.input(Input::Move {
-                    x: position.x,
-                    y: position.y,
-                });
-                live.react(reaction);
-            }
+            _ if consumed => {}
             WindowEvent::MouseWheel { delta, .. } => {
                 let amount = match delta {
                     MouseScrollDelta::LineDelta(_, y) => f64::from(y),
@@ -430,6 +452,15 @@ fn map_key(key: &Key, modifiers: ModifiersState) -> Option<Command> {
             ("r", false, _) => Some(Command::Fillet),
             ("p", false, _) => Some(Command::PushPullFace(5.0)),
             ("h", false, _) => Some(Command::Shell(1.5)),
+            ("1", false, _) => Some(Command::SetSelectionMode(
+                crate::editor::SelectionMode::Body,
+            )),
+            ("2", false, _) => Some(Command::SetSelectionMode(
+                crate::editor::SelectionMode::Face,
+            )),
+            ("3", false, _) => Some(Command::SetSelectionMode(
+                crate::editor::SelectionMode::Edge,
+            )),
             _ => None,
         },
         Key::Named(NamedKey::Delete) | Key::Named(NamedKey::Backspace) => {
@@ -468,28 +499,69 @@ impl<K: GeometryKernel + Default> Live<K> {
             Reaction::Pick { x, y, additive } => {
                 let selected = self.editor.selection();
                 let selected_face = self.editor.selected_face();
-                let objects = self
-                    .scene
-                    .objects(self.editor.document(), &selected, selected_face);
+                let hovered_face = self.editor.hovered_face();
+                let selected_edge = self.editor.selected_edge().map(|(id, f, _, _)| (id, f));
+                let hovered_edge = self.editor.hovered_edge().map(|(id, f, _, _)| (id, f));
+                let objects = self.scene.objects(
+                    self.editor.document(),
+                    &selected,
+                    selected_face,
+                    hovered_face,
+                    selected_edge,
+                    hovered_edge,
+                );
                 let vp = viewport(&self.gpu, &self.config);
                 let pending = self
                     .renderer
                     .pick_begin(&vp, self.editor.camera(), x, y, &objects);
                 drop(objects);
-                self.pending = Some((pending, additive));
+                self.pending = Some((pending, PendingKind::Select { additive }));
+                self.window.request_redraw();
+            }
+            Reaction::PickHover { x, y } => {
+                let selected = self.editor.selection();
+                let selected_face = self.editor.selected_face();
+                let hovered_face = self.editor.hovered_face();
+                let selected_edge = self.editor.selected_edge().map(|(id, f, _, _)| (id, f));
+                let hovered_edge = self.editor.hovered_edge().map(|(id, f, _, _)| (id, f));
+                let objects = self.scene.objects(
+                    self.editor.document(),
+                    &selected,
+                    selected_face,
+                    hovered_face,
+                    selected_edge,
+                    hovered_edge,
+                );
+                let vp = viewport(&self.gpu, &self.config);
+                let pending = self
+                    .renderer
+                    .pick_begin(&vp, self.editor.camera(), x, y, &objects);
+                drop(objects);
+                self.pending = Some((pending, PendingKind::Hover));
                 self.window.request_redraw();
             }
         }
     }
 
     fn collect_pick(&mut self) {
-        let Some((pending, additive)) = &self.pending else {
+        let Some((pending, kind)) = &self.pending else {
             return;
         };
         if let Some(pick) = pending.collect(&self.gpu.device) {
-            let additive = *additive;
+            let kind = *kind;
             self.pending = None;
-            self.editor.picked(pick, additive);
+            match kind {
+                PendingKind::Select { additive } => {
+                    self.editor.picked(pick, additive);
+                }
+                PendingKind::Hover => {
+                    let old_hover = self.editor.hovered_face();
+                    self.editor.hover_picked(pick);
+                    if self.editor.hovered_face() != old_hover {
+                        self.window.request_redraw();
+                    }
+                }
+            }
         }
     }
 
@@ -504,6 +576,22 @@ impl<K: GeometryKernel + Default> Live<K> {
         for (_, message) in &failures {
             eprintln!("{message}");
         }
+
+        if self.options.test_pick_edge {
+            self.editor.input(Input::Move {
+                x: 1100.0,
+                y: 500.0,
+            });
+        }
+
+        let hover_pts = self.editor.hovered_edge().map(|(_, _, p0, p1)| (p0, p1));
+        let sel_pts = self.editor.selected_edge().map(|(_, _, p0, p1)| (p0, p1));
+        self.scene.update_edge_highlight(
+            &self.gpu.device,
+            self.gpu.capabilities.max_buffer_size,
+            hover_pts,
+            sel_pts,
+        );
 
         let raw = self.egui.take_egui_input(&self.window);
         let context = self.egui.egui_ctx().clone();
@@ -553,9 +641,17 @@ impl<K: GeometryKernel + Default> Live<K> {
 
         let selected = self.editor.selection();
         let selected_face = self.editor.selected_face();
-        let objects = self
-            .scene
-            .objects(self.editor.document(), &selected, selected_face);
+        let hovered_face = self.editor.hovered_face();
+        let selected_edge = self.editor.selected_edge().map(|(id, f, _, _)| (id, f));
+        let hovered_edge = self.editor.hovered_edge().map(|(id, f, _, _)| (id, f));
+        let objects = self.scene.objects(
+            self.editor.document(),
+            &selected,
+            selected_face,
+            hovered_face,
+            selected_edge,
+            hovered_edge,
+        );
         let vp = viewport(&self.gpu, &self.config);
         self.renderer.prepare(&vp, self.editor.camera(), &objects);
 
@@ -714,6 +810,36 @@ fn chrome<K: GeometryKernel + Default>(
             ui.selectable_value(active_tab, RibbonTab::Modify, "Modify");
             ui.selectable_value(active_tab, RibbonTab::View, "View");
             ui.selectable_value(active_tab, RibbonTab::File, "File");
+            ui.separator();
+            ui.label("Selection:");
+            let mode = editor.selection_mode();
+            if ui
+                .selectable_label(mode == crate::editor::SelectionMode::Body, "Body [1]")
+                .clicked()
+            {
+                execute_command(
+                    editor,
+                    Command::SetSelectionMode(crate::editor::SelectionMode::Body),
+                );
+            }
+            if ui
+                .selectable_label(mode == crate::editor::SelectionMode::Face, "Face [2]")
+                .clicked()
+            {
+                execute_command(
+                    editor,
+                    Command::SetSelectionMode(crate::editor::SelectionMode::Face),
+                );
+            }
+            if ui
+                .selectable_label(mode == crate::editor::SelectionMode::Edge, "Edge [3]")
+                .clicked()
+            {
+                execute_command(
+                    editor,
+                    Command::SetSelectionMode(crate::editor::SelectionMode::Edge),
+                );
+            }
         });
         ui.separator();
 
@@ -992,7 +1118,13 @@ fn chrome<K: GeometryKernel + Default>(
                 String::new()
             };
 
-            ui.label(format!("{}{mod_str}", editor.status()));
+            let mode_str = match editor.selection_mode() {
+                crate::editor::SelectionMode::Body => "[Mode: Body (1)]",
+                crate::editor::SelectionMode::Face => "[Mode: Face (2)]",
+                crate::editor::SelectionMode::Edge => "[Mode: Edge (3)]",
+            };
+
+            ui.label(format!("{mode_str} · {}{mod_str}", editor.status()));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let bodies = editor.document().len();
                 ui.label(format!(

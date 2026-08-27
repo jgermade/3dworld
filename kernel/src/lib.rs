@@ -154,6 +154,35 @@ impl Mesh {
         self.line_indices.len() / 2
     }
 
+    /// Returns the wireframe line positions and indices.
+    /// Falls back to extracting face boundary feature edges if line_indices is empty.
+    pub fn line_edges(&self) -> (&[[f32; 3]], Vec<u32>) {
+        if !self.line_positions.is_empty() && !self.line_indices.is_empty() {
+            (&self.line_positions, self.line_indices.clone())
+        } else {
+            let mut edge_map = std::collections::HashMap::new();
+            let num_triangles = self.triangle_count();
+            for t in 0..num_triangles {
+                let f_id = self.face_of_triangle.get(t).copied().unwrap_or(0);
+                let i0 = self.indices[t * 3];
+                let i1 = self.indices[t * 3 + 1];
+                let i2 = self.indices[t * 3 + 2];
+                for (a, b) in [(i0, i1), (i1, i2), (i2, i0)] {
+                    let key = if a < b { (a, b) } else { (b, a) };
+                    edge_map.entry(key).or_insert_with(Vec::new).push(f_id);
+                }
+            }
+            let mut line_indices = Vec::new();
+            for ((a, b), faces) in edge_map {
+                if faces.len() == 1 || faces.iter().any(|f| *f != faces[0]) {
+                    line_indices.push(a);
+                    line_indices.push(b);
+                }
+            }
+            (&self.positions, line_indices)
+        }
+    }
+
     /// Computes area, average unit normal, centroid, and triangle count for a
     /// specific face id. Returns `None` if no triangles correspond to the face id.
     pub fn face_metrics(&self, face_id: u32) -> Option<FaceMetrics> {

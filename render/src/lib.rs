@@ -50,6 +50,9 @@ pub struct Material {
     pub color: [f32; 4],
     pub selected: bool,
     pub selected_face: Option<u32>,
+    pub hovered_face: Option<u32>,
+    pub hovered_edge: bool,
+    pub selected_edge: bool,
 }
 
 impl Default for Material {
@@ -58,6 +61,9 @@ impl Default for Material {
             color: [0.72, 0.74, 0.78, 1.0],
             selected: false,
             selected_face: None,
+            hovered_face: None,
+            hovered_edge: false,
+            selected_edge: false,
         }
     }
 }
@@ -159,8 +165,8 @@ impl PickPending {
 
 /// Globals: a 4x4 and an eye position, padded to what `uniform` requires.
 const GLOBALS_SIZE: u64 = 80;
-/// `vec4` colour plus four `u32`.
-const OBJECT_SIZE: u64 = 32;
+/// `vec4` colour plus eight `u32`.
+const OBJECT_SIZE: u64 = 48;
 
 pub struct Renderer {
     shade: wgpu::RenderPipeline,
@@ -513,6 +519,16 @@ impl Renderer {
             w += 4;
             let sel_face = object.material.selected_face.unwrap_or(u32::MAX);
             bytes[w..w + 4].copy_from_slice(&sel_face.to_le_bytes());
+            w += 4;
+            let hov_face = object.material.hovered_face.unwrap_or(u32::MAX);
+            bytes[w..w + 4].copy_from_slice(&hov_face.to_le_bytes());
+            w += 4;
+            bytes[w..w + 4].copy_from_slice(&u32::from(object.material.hovered_edge).to_le_bytes());
+            w += 4;
+            bytes[w..w + 4]
+                .copy_from_slice(&u32::from(object.material.selected_edge).to_le_bytes());
+            w += 4;
+            bytes[w..w + 4].copy_from_slice(&0u32.to_le_bytes()); // _pad0
         }
         if !objects.is_empty() {
             queue.write_buffer(&self.objects, 0, &bytes);

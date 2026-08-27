@@ -80,6 +80,7 @@ pub enum Input {
         button: Button,
         additive: bool,
         ctrl: bool,
+        alt: bool,
     },
     Move {
         x: f64,
@@ -104,6 +105,12 @@ pub enum Reaction {
         y: u32,
         additive: bool,
     },
+    /// Read the ids at this pixel for hover highlighting and hand back to
+    /// [`Editor::hover_picked`].
+    PickHover {
+        x: u32,
+        y: u32,
+    },
 }
 
 /// Below this, a press-and-release is a click. Above it, it was a drag and
@@ -112,6 +119,8 @@ pub enum Reaction {
 /// every rotation.
 const DRAG_SLOP: f64 = 3.0;
 
+pub type EdgeHit = (NodeId, u32, [f32; 3], [f32; 3]);
+
 struct Drag {
     button: Button,
     start: (f64, f64),
@@ -119,6 +128,7 @@ struct Drag {
     moved: bool,
     additive: bool,
     ctrl: bool,
+    alt: bool,
 }
 
 pub struct Editor<K: GeometryKernel> {
@@ -134,6 +144,9 @@ pub struct Editor<K: GeometryKernel> {
     status: String,
     selection_mode: SelectionMode,
     selected_face: Option<(NodeId, u32)>,
+    hovered_face: Option<(NodeId, u32)>,
+    selected_edge: Option<(NodeId, u32, [f32; 3], [f32; 3])>,
+    hovered_edge: Option<(NodeId, u32, [f32; 3], [f32; 3])>,
 }
 
 impl<K: GeometryKernel> Editor<K> {
@@ -147,6 +160,9 @@ impl<K: GeometryKernel> Editor<K> {
             status: String::from("ready"),
             selection_mode: SelectionMode::Body,
             selected_face: None,
+            hovered_face: None,
+            selected_edge: None,
+            hovered_edge: None,
         }
     }
 
@@ -154,8 +170,36 @@ impl<K: GeometryKernel> Editor<K> {
         self.selected_face
     }
 
+    pub fn hovered_face(&self) -> Option<(NodeId, u32)> {
+        self.hovered_face
+    }
+
+    pub fn selected_edge(&self) -> Option<(NodeId, u32, [f32; 3], [f32; 3])> {
+        self.selected_edge
+    }
+
+    pub fn hovered_edge(&self) -> Option<(NodeId, u32, [f32; 3], [f32; 3])> {
+        self.hovered_edge
+    }
+
     pub fn clear_selected_face(&mut self) {
         self.selected_face = None;
+    }
+
+    pub fn clear_hovered_face(&mut self) {
+        self.hovered_face = None;
+    }
+
+    pub fn hover_picked(&mut self, pick: Pick) {
+        let Some((object, face)) = pick.hit() else {
+            self.hovered_face = None;
+            return;
+        };
+        let Some(id) = self.node_at(object) else {
+            self.hovered_face = None;
+            return;
+        };
+        self.hovered_face = Some((id, face));
     }
 
     pub fn face_metrics(
@@ -235,6 +279,7 @@ impl<K: GeometryKernel> Editor<K> {
                 button,
                 additive,
                 ctrl,
+                alt,
             } => {
                 self.drag = Some(Drag {
                     button,
@@ -243,13 +288,25 @@ impl<K: GeometryKernel> Editor<K> {
                     moved: false,
                     additive,
                     ctrl,
+                    alt,
                 });
                 Reaction::Nothing
             }
             Input::Move { x, y } => {
                 let height = f64::from(self.viewport.1);
                 let Some(drag) = &mut self.drag else {
-                    return Reaction::Nothing;
+                    if let Some((id, edge_idx, p0, p1)) = self.find_closest_edge(x, y) {
+                        self.hovered_edge = Some((id, edge_idx, p0, p1));
+                        self.status = format!("hovering Edge #{edge_idx} on {}", self.name_of(id));
+                        return Reaction::Redraw;
+                    } else if self.hovered_edge.is_some() {
+                        self.hovered_edge = None;
+                        return Reaction::Redraw;
+                    }
+                    return Reaction::PickHover {
+                        x: x.max(0.0) as u32,
+                        y: y.max(0.0) as u32,
+                    };
                 };
                 let (dx, dy) = (x - drag.last.0, y - drag.last.1);
                 drag.last = (x, y);
@@ -258,7 +315,14 @@ impl<K: GeometryKernel> Editor<K> {
                 }
                 match drag.button {
                     Button::Left => {
-                        if drag.additive {
+                        if drag.alt
+                            || (self.selection_mode == SelectionMode::Face
+                                && self.selected_face.is_some()
+                                && !drag.additive
+                                && !drag.ctrl)
+                        {
+                            return self.drag_face_extrude(dx, dy);
+                        } else if drag.additive {
                             // Shift + Left Drag = Pan
                             self.camera.pan(dx, dy, height);
                         } else if drag.ctrl {
@@ -299,11 +363,24 @@ impl<K: GeometryKernel> Editor<K> {
     /// renderer as an object id. Resolving it back can fail — a node can be
     /// deleted between the click and the readback, which is a frame or two —
     /// and that is a miss, not a panic.
+    #[allow(clippy::collapsible_if)]
     pub fn picked(&mut self, pick: Pick, additive: bool) {
+        if let Some((id, edge_idx, p0, p1)) = self.hovered_edge {
+            if self.selection_mode == SelectionMode::Edge || pick.hit().is_none() {
+                self.selected_edge = Some((id, edge_idx, p0, p1));
+                if !additive {
+                    self.doc.clear_selection();
+                }
+                let _ = self.doc.select(id);
+                self.status = format!("selected Edge #{edge_idx} on {}", self.name_of(id));
+                return;
+            }
+        }
         let Some((object, face)) = pick.hit() else {
             if !additive {
                 self.doc.clear_selection();
                 self.selected_face = None;
+                self.selected_edge = None;
                 self.status = String::from("nothing");
             }
             return;
@@ -314,6 +391,7 @@ impl<K: GeometryKernel> Editor<K> {
         };
         if !additive {
             self.doc.clear_selection();
+            self.selected_edge = None;
         }
 
         let is_same_face = self.selected_face == Some((id, face));
@@ -571,6 +649,151 @@ impl<K: GeometryKernel> Editor<K> {
         ))
     }
 
+    pub fn find_closest_edge(&mut self, cursor_x: f64, cursor_y: f64) -> Option<EdgeHit> {
+        let (width, height) = (f64::from(self.viewport.0), f64::from(self.viewport.1));
+        if width <= 0.0 || height <= 0.0 {
+            return None;
+        }
+        let aspect = width / height;
+        let vp_mat = self.camera.view_projection(aspect);
+
+        let project_pt = |p: [f32; 3]| -> Option<(f64, f64)> {
+            let col0 = vp_mat[0];
+            let col1 = vp_mat[1];
+            let col2 = vp_mat[2];
+            let col3 = vp_mat[3];
+            let (px, py, pz) = (f64::from(p[0]), f64::from(p[1]), f64::from(p[2]));
+
+            let clip_x = (col0[0] as f64) * px
+                + (col1[0] as f64) * py
+                + (col2[0] as f64) * pz
+                + (col3[0] as f64);
+            let clip_y = (col0[1] as f64) * px
+                + (col1[1] as f64) * py
+                + (col2[1] as f64) * pz
+                + (col3[1] as f64);
+            let clip_w = (col0[3] as f64) * px
+                + (col1[3] as f64) * py
+                + (col2[3] as f64) * pz
+                + (col3[3] as f64);
+
+            if clip_w <= 0.0 {
+                return None;
+            }
+            let sx = (clip_x / clip_w + 1.0) * 0.5 * width;
+            let sy = (1.0 - clip_y / clip_w) * 0.5 * height;
+            Some((sx, sy))
+        };
+
+        let mut closest: Option<(f64, EdgeHit)> = None;
+
+        let node_ids: Vec<NodeId> = self
+            .doc
+            .nodes()
+            .filter_map(|(id, node)| if node.visible { Some(id) } else { None })
+            .collect();
+
+        eprintln!(
+            "[EDGE DEBUG] width={width} height={height} node_count={}",
+            node_ids.len()
+        );
+
+        for id in node_ids {
+            let Ok(mesh) = self.doc.mesh(id) else {
+                continue;
+            };
+
+            let (line_pos, line_idx) = mesh.line_edges();
+
+            for i in (0..line_idx.len()).step_by(2) {
+                let idx0 = line_idx[i] as usize;
+                let idx1 = line_idx[i + 1] as usize;
+                if idx0 >= line_pos.len() || idx1 >= line_pos.len() {
+                    continue;
+                }
+                let p0 = line_pos[idx0];
+                let p1 = line_pos[idx1];
+
+                let (Some(s0), Some(s1)) = (project_pt(p0), project_pt(p1)) else {
+                    continue;
+                };
+
+                let vx = s1.0 - s0.0;
+                let vy = s1.1 - s0.1;
+                let len_sq = vx * vx + vy * vy;
+                if len_sq < 1e-6 {
+                    continue;
+                }
+
+                let t =
+                    (((cursor_x - s0.0) * vx + (cursor_y - s0.1) * vy) / len_sq).clamp(0.0, 1.0);
+                let px = s0.0 + t * vx;
+                let py = s0.1 + t * vy;
+
+                let dist = (cursor_x - px).hypot(cursor_y - py);
+                if dist <= 36.0 && closest.as_ref().is_none_or(|c| dist < c.0) {
+                    closest = Some((dist, (id, (i / 2) as u32, p0, p1)));
+                }
+            }
+        }
+
+        closest.map(|(_, hit)| hit)
+    }
+
+    pub fn drag_face_extrude(&mut self, dx: f64, dy: f64) -> Reaction {
+        let Some((id, face_id)) = self.selected_face else {
+            return Reaction::Nothing;
+        };
+        let Ok(mesh) = self.doc.mesh(id) else {
+            return Reaction::Nothing;
+        };
+        let Some(metrics) = mesh.face_metrics(face_id) else {
+            return Reaction::Nothing;
+        };
+
+        let height = f64::from(self.viewport.1);
+        if height <= 0.0 {
+            return Reaction::Nothing;
+        }
+
+        let camera = &self.camera;
+        let Some(forward) = (camera.target - camera.eye()).normalize(1.0e-12) else {
+            return Reaction::Nothing;
+        };
+        let Some(right) = forward.cross(w3d_render::camera::UP).normalize(1.0e-12) else {
+            return Reaction::Nothing;
+        };
+        let up = right.cross(forward);
+        let scale = 2.0 * camera.distance * (camera.fov_y * 0.5).tan() / height;
+
+        let n = metrics.normal;
+        let proj_x = n.dot(right);
+        let proj_y = n.dot(up);
+        let screen_n_len = (proj_x * proj_x + proj_y * proj_y).sqrt();
+
+        if screen_n_len < 1e-4 {
+            return Reaction::Nothing;
+        }
+
+        let (sn_x, sn_y) = (proj_x / screen_n_len, proj_y / screen_n_len);
+        let screen_v_x = dx;
+        let screen_v_y = -dy;
+
+        let delta_pixels = screen_v_x * sn_x + screen_v_y * sn_y;
+        let delta_d = delta_pixels * scale;
+
+        if delta_d.abs() < 1e-5 {
+            return Reaction::Nothing;
+        }
+
+        if self.doc.push_pull_face(id, face_id, delta_d).is_ok() {
+            self.status = format!("extruded face #{face_id} by {delta_d:.1} mm");
+            Reaction::Redraw
+        } else {
+            Reaction::Nothing
+        }
+    }
+
     pub fn measure_distance(&mut self) -> Result<String, String> {
         let selected = self.selection();
         if selected.len() < 2 {
@@ -760,6 +983,7 @@ mod tests {
             button: Button::Left,
             additive: false,
             ctrl: false,
+            alt: false,
         });
         assert_eq!(
             e.input(Input::Move { x: 140.0, y: 130.0 }),
@@ -783,6 +1007,7 @@ mod tests {
             button: Button::Left,
             additive: false,
             ctrl: false,
+            alt: false,
         });
         // Inside the slop: a hand shakes, and a click is still a click.
         e.input(Input::Move { x: 101.0, y: 101.0 });
@@ -809,6 +1034,7 @@ mod tests {
             button: Button::Middle,
             additive: false,
             ctrl: false,
+            alt: false,
         });
         e.input(Input::Move { x: 60.0, y: 10.0 });
         assert_ne!(e.camera().target, before.target);
@@ -831,6 +1057,7 @@ mod tests {
             button: Button::Left,
             additive: true,
             ctrl: false,
+            alt: false,
         });
         e.input(Input::Move { x: 60.0, y: 10.0 });
         assert_ne!(e.camera().target, before.target);
@@ -851,6 +1078,7 @@ mod tests {
             button: Button::Left,
             additive: false,
             ctrl: true,
+            alt: false,
         });
         e.input(Input::Move { x: 10.0, y: 60.0 });
         assert_ne!(
@@ -1259,5 +1487,106 @@ mod tests {
         // Run Shell
         e.run(Command::Shell(2.0));
         assert!(e.status().contains("shelled solid"));
+    }
+
+    #[test]
+    fn interactive_face_extrude_drag_updates_geometry() {
+        let mut e = editor();
+        e.run(Command::SetSelectionMode(SelectionMode::Face));
+        e.run(Command::AddBox);
+        let id = e.selection()[0];
+
+        // Pick face #1
+        e.picked(
+            Pick {
+                object: id.index(),
+                face: 1,
+            },
+            false,
+        );
+        assert_eq!(e.selected_face(), Some((id, 1)));
+
+        // Simulate interactive mouse drag to extrude
+        let reaction = e.drag_face_extrude(0.0, -50.0);
+        assert_eq!(reaction, Reaction::Redraw);
+        assert!(e.status().contains("extruded face #1"));
+    }
+
+    #[test]
+    fn transparent_subobject_hover_and_picking() {
+        let mut e = editor();
+        e.run(Command::AddBox);
+        let id = e.selection()[0];
+
+        // Simulate hover probing on face #2
+        e.hover_picked(Pick {
+            object: id.index(),
+            face: 2,
+        });
+        assert_eq!(e.hovered_face(), Some((id, 2)));
+
+        // Direct pick transparently selects face #2 without manual mode switch
+        e.picked(
+            Pick {
+                object: id.index(),
+                face: 2,
+            },
+            false,
+        );
+        assert_eq!(e.selected_face(), Some((id, 2)));
+
+        // Clearing hover
+        e.clear_hovered_face();
+        assert_eq!(e.hovered_face(), None);
+    }
+
+    #[test]
+    fn edge_hover_proximity_test() {
+        let mut e = editor();
+        e.set_viewport(1000, 800);
+        e.run(Command::AddBox);
+        e.run(Command::ZoomToFit);
+
+        let id = e.selection()[0];
+        let mesh = e.doc.mesh(id).expect("mesh").clone();
+        eprintln!(
+            "line_positions: {} line_indices: {}",
+            mesh.line_positions.len(),
+            mesh.line_indices.len()
+        );
+
+        let aspect = 1000.0 / 800.0;
+        let vp = e.camera().view_projection(aspect);
+        let col0 = vp[0];
+        let col1 = vp[1];
+        let col2 = vp[2];
+        let col3 = vp[3];
+        for i in (0..mesh.line_indices.len()).step_by(2) {
+            let p0 = mesh.line_positions[mesh.line_indices[i] as usize];
+            let p1 = mesh.line_positions[mesh.line_indices[i + 1] as usize];
+            let proj = |p: [f32; 3]| {
+                let (px, py, pz) = (f64::from(p[0]), f64::from(p[1]), f64::from(p[2]));
+                let cx = f64::from(col0[0]) * px
+                    + f64::from(col1[0]) * py
+                    + f64::from(col2[0]) * pz
+                    + f64::from(col3[0]);
+                let cy = f64::from(col0[1]) * px
+                    + f64::from(col1[1]) * py
+                    + f64::from(col2[1]) * pz
+                    + f64::from(col3[1]);
+                let cw = f64::from(col0[3]) * px
+                    + f64::from(col1[3]) * py
+                    + f64::from(col2[3]) * pz
+                    + f64::from(col3[3]);
+                (
+                    (cx / cw + 1.0) * 0.5 * 1000.0,
+                    (1.0 - cy / cw) * 0.5 * 800.0,
+                )
+            };
+            eprintln!("Edge #{}: {:?} -> {:?}", i / 2, proj(p0), proj(p1));
+        }
+
+        let hit = e.find_closest_edge(500.0, 400.0);
+        eprintln!("find_closest_edge at center: {:?}", hit);
     }
 }

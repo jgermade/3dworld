@@ -21,6 +21,8 @@ fn main() -> std::process::ExitCode {
             "--save-as" => options.save_as = args.next().map(Into::into),
             "--import-step" => options.import_step = args.next().map(Into::into),
             "--export-step" => options.export_step = args.next().map(Into::into),
+            "--test-pick-face" => options.test_pick_face = true,
+            "--test-pick-edge" => options.test_pick_edge = true,
             // A scene to start with, so that a screenshot has something in it
             // and so that `cargo run -- --demo` is a one-command look at the
             // thing.
@@ -75,6 +77,10 @@ fn main() -> std::process::ExitCode {
     let kernel = w3d_kernel_occt::OcctKernel::new();
     #[cfg(not(any(feature = "occt", feature = "truck")))]
     let kernel = w3d_kernel_fake::FakeKernel::default();
+
+    if options.open.is_none() && options.import_step.is_none() && options.startup.is_empty() {
+        options.startup = vec![Command::AddBox, Command::ZoomToFit];
+    }
 
     let mut shell = Shell::new(kernel, options);
     if let Err(e) = event_loop.run_app(&mut shell) {

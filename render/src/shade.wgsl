@@ -13,6 +13,9 @@ struct Object {
     id: u32,
     selected: u32,
     selected_face: u32,
+    hovered_face: u32,
+    hovered_edge: u32,
+    selected_edge: u32,
     _pad0: u32,
 };
 
@@ -60,11 +63,16 @@ fn fs_shade(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<
     let fill = max(dot(n, normalize(vec3<f32>(-0.3, -0.5, 0.8))), 0.0);
 
     var base = object.color.rgb;
-    if (object.selected != 0u) {
-        base = mix(base, vec3<f32>(1.0, 0.62, 0.16), 0.65);
-    }
-    if (object.selected_face != 0xFFFFFFFFu && in.face == object.selected_face) {
-        base = mix(base, vec3<f32>(0.15, 0.75, 1.0), 0.75);
+    if (object.hovered_edge != 0u) {
+        base = vec3<f32>(1.0, 0.85, 0.0);
+    } else if (object.selected_edge != 0u) {
+        base = vec3<f32>(1.0, 0.5, 0.0);
+    } else if (object.selected_face != 0xFFFFFFFFu && in.face == object.selected_face) {
+        base = mix(base, vec3<f32>(0.15, 0.75, 1.0), 0.85);
+    } else if (object.hovered_face != 0xFFFFFFFFu && in.face == object.hovered_face) {
+        base = mix(base, vec3<f32>(0.35, 0.85, 1.0), 0.65);
+    } else if (object.selected != 0u) {
+        base = mix(base, vec3<f32>(1.0, 0.5, 0.0), 0.35);
     }
     let lit = base * (0.18 + 0.72 * key + 0.22 * fill);
     return vec4<f32>(lit, object.color.a);
@@ -82,14 +90,22 @@ fn fs_pick(in: VsOut) -> @location(0) vec2<u32> {
 fn vs_line(
     @location(0) position: vec3<f32>,
 ) -> @builtin(position) vec4<f32> {
-    return globals.view_proj * vec4<f32>(position, 1.0);
+    var clip = globals.view_proj * vec4<f32>(position, 1.0);
+    if (object.hovered_edge != 0u || object.selected_edge != 0u) {
+        clip.z = clip.z - 0.0005 * clip.w;
+    }
+    return clip;
 }
 
 @fragment
 fn fs_line() -> @location(0) vec4<f32> {
     var line_color = vec3<f32>(0.12, 0.14, 0.18);
-    if (object.selected != 0u) {
+    if (object.selected != 0u || object.selected_edge != 0u) {
         line_color = vec3<f32>(1.0, 0.5, 0.0);
+    } else if (object.hovered_edge != 0u) {
+        line_color = vec3<f32>(1.0, 0.9, 0.1);
+    } else if (object.hovered_face != 0xFFFFFFFFu || object.selected_face != 0xFFFFFFFFu) {
+        line_color = vec3<f32>(0.2, 0.7, 0.9);
     }
     return vec4<f32>(line_color, 1.0);
 }
