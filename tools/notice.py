@@ -94,6 +94,8 @@ def find_license_file(manifest_path):
 
 
 def generate_notice():
+    subprocess.run(["cargo", "fetch"], capture_output=True, text=True)
+
     all_packages = {}
     for target in TARGETS:
         pkgs = get_packages_for_target(target)
