@@ -111,7 +111,7 @@ jobs:
           restore-keys: cargo-occt-${{ steps.rust.outputs.version }}-
       - run: make test-occt
       - name: A parser that is not OpenCASCADE
-        run: pip install steputils
+        run: pip install --break-system-packages steputils
       - name: Files three other programs wrote
         run: make step-samples
       - run: make step-check
