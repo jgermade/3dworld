@@ -116,7 +116,7 @@ def generate_notice():
         lic_file = find_license_file(pkg["manifest_path"])
         if lic_file:
             try:
-                text = lic_file.read_text(encoding="utf-8", errors="replace").strip()
+                text = lic_file.read_text(encoding="utf-8", errors="replace").replace("\r\n", "\n").strip()
                 sections.append(f"--- {name} v{version} ({license_str}) ---\nPath: {lic_file.name}\n\n{text}")
             except Exception as e:
                 sections.append(f"--- {name} v{version} ({license_str}) ---\n[Could not read license file: {e}]")
@@ -136,7 +136,7 @@ def main():
         if not out_path.exists():
             print("ERROR: NOTICE file does not exist. Run `make notice` to generate it.", file=sys.stderr)
             sys.exit(1)
-        existing = out_path.read_text(encoding="utf-8")
+        existing = out_path.read_text(encoding="utf-8").replace("\r\n", "\n")
         if existing != content:
             print("ERROR: NOTICE file is outdated. Run `make notice` to regenerate.", file=sys.stderr)
             sys.exit(1)
