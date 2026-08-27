@@ -46,8 +46,24 @@ fn main() {
     println!("cargo:rerun-if-changed=native/UPSTREAM");
 
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR"));
-    let include =
-        env::var("OCCT_INCLUDE_DIR").unwrap_or_else(|_| "/usr/include/opencascade".into());
+    let include = env::var("OCCT_INCLUDE_DIR").unwrap_or_else(|_| {
+        if PathBuf::from("/usr/include/opencascade").join("BRepPrimAPI_MakeBox.hxx").exists() {
+            "/usr/include/opencascade".into()
+        } else if let Ok(entries) = std::fs::read_dir("/usr/include") {
+            entries
+                .flatten()
+                .map(|e| e.path())
+                .find(|p| {
+                    p.file_name()
+                        .map_or(false, |n| n.to_string_lossy().starts_with("opencascade"))
+                        && p.join("BRepPrimAPI_MakeBox.hxx").exists()
+                })
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_else(|| "/usr/include/opencascade".into())
+        } else {
+            "/usr/include/opencascade".into()
+        }
+    });
 
     if !PathBuf::from(&include)
         .join("BRepPrimAPI_MakeBox.hxx")

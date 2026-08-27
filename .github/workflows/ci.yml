@@ -94,14 +94,12 @@ jobs:
             libocct-modeling-algorithms-dev libocct-data-exchange-dev \
             libocct-ocaf-dev
       - name: The header Ubuntu Noble forgot to ship, if this image forgot it too
-        # Conditional rather than unconditional: the packaging bug is real and
-        # is also fixed in some images, and fetching a header nobody needs is a
-        # network call nobody asked for. See README.md.
         run: |
-          if [ ! -f /usr/include/opencascade/NCollection_AliasedArray.hxx ]; then
+          FOUND_HDR=$(find /usr/include -maxdepth 2 -name "NCollection_AliasedArray.hxx" 2>/dev/null | head -n 1)
+          if [ -z "$FOUND_HDR" ]; then
             make occt-headers
           else
-            echo "the distribution shipped it"
+            echo "the distribution shipped it at $FOUND_HDR"
           fi
       - uses: actions/cache@v4
         with:
@@ -149,7 +147,8 @@ jobs:
             libocct-ocaf-dev
       - name: The header Ubuntu Noble forgot to ship, if this image forgot it too
         run: |
-          if [ ! -f /usr/include/opencascade/NCollection_AliasedArray.hxx ]; then
+          FOUND_HDR=$(find /usr/include -maxdepth 2 -name "NCollection_AliasedArray.hxx" 2>/dev/null | head -n 1)
+          if [ -z "$FOUND_HDR" ]; then
             make occt-headers
           fi
       - uses: actions/cache@v4
