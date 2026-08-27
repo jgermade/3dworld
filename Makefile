@@ -20,7 +20,7 @@ check:
 ## Override discovery with OCCT_INCLUDE_DIR / OCCT_LIB_DIR.
 .PHONY: test-occt
 test-occt:
-	$(CARGO) test -p w3d-kernel-occt
+	$(CARGO) test -p w3d-kernel-occt -- --test-threads=1
 	@# `make clippy` cannot reach this crate: it is outside default-members,
 	@# which is what keeps `make test` free of setup. So it is linted here, by
 	@# the one command that already needs OCCT installed — a crate nothing
