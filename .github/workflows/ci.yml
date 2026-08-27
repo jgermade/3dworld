@@ -92,7 +92,7 @@ jobs:
             build-essential pkg-config \
             libocct-foundation-dev libocct-modeling-data-dev \
             libocct-modeling-algorithms-dev libocct-data-exchange-dev \
-            libocct-ocaf-dev
+            libocct-ocaf-dev libocct-visualization-dev
       - name: The header Ubuntu Noble forgot to ship, if this image forgot it too
         run: |
           FOUND_HDR=$(find /usr/include -maxdepth 2 -name "NCollection_AliasedArray.hxx" 2>/dev/null | head -n 1)
@@ -144,7 +144,7 @@ jobs:
             build-essential pkg-config \
             libocct-foundation-dev libocct-modeling-data-dev \
             libocct-modeling-algorithms-dev libocct-data-exchange-dev \
-            libocct-ocaf-dev
+            libocct-ocaf-dev libocct-visualization-dev
       - name: The header Ubuntu Noble forgot to ship, if this image forgot it too
         run: |
           FOUND_HDR=$(find /usr/include -maxdepth 2 -name "NCollection_AliasedArray.hxx" 2>/dev/null | head -n 1)
