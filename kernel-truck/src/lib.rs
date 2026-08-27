@@ -77,9 +77,15 @@ fn convert_structured_mesh(structured: &StructuredMesh, out_mesh: &mut Mesh, fac
             out_mesh
                 .positions
                 .push([p.x as f32, p.y as f32, p.z as f32]);
-            if has_normals {
+            let norm = if has_normals {
                 let n = normals_opt.unwrap()[r][c];
-                out_mesh.normals.push([n.x as f32, n.y as f32, n.z as f32]);
+                let (nx, ny, nz) = (n.x as f32, n.y as f32, n.z as f32);
+                let len = (nx * nx + ny * ny + nz * nz).sqrt();
+                if len.is_normal() && len > 1e-6 {
+                    [nx / len, ny / len, nz / len]
+                } else {
+                    [0.0, 0.0, 1.0]
+                }
             } else {
                 let r_next = (r + 1).min(row_count - 1);
                 let r_prev = r.saturating_sub(1);
@@ -98,13 +104,13 @@ fn convert_structured_mesh(structured: &StructuredMesh, out_mesh: &mut Mesh, fac
                 let ny = (du[2] * dv[0] - du[0] * dv[2]) as f32;
                 let nz = (du[0] * dv[1] - du[1] * dv[0]) as f32;
                 let len = (nx * nx + ny * ny + nz * nz).sqrt();
-                let norm = if len > 1e-6 {
+                if len.is_normal() && len > 1e-6 {
                     [nx / len, ny / len, nz / len]
                 } else {
                     [0.0, 0.0, 1.0]
-                };
-                out_mesh.normals.push(norm);
-            }
+                }
+            };
+            out_mesh.normals.push(norm);
         }
     }
 
@@ -364,16 +370,64 @@ impl GeometryKernel for TruckKernel {
         let solid = self.get(body)?;
         let compressed = solid.compress();
         let mut out_mesh = Mesh::default();
-        let mut face_idx = 0u32;
+        let mut faces = Vec::new();
         for shell in &compressed.boundaries {
             for face in &shell.faces {
-                let range_u = get_range(face.surface.parameter_range().0);
-                let range_v = get_range(face.surface.parameter_range().1);
-                let structured =
-                    StructuredMesh::from_surface(&face.surface, (range_u, range_v), quality.sag);
-                convert_structured_mesh(&structured, &mut out_mesh, face_idx);
-                face_idx += 1;
+                faces.push(face);
             }
+        }
+        faces.sort_by(|a, b| {
+            let (u_a, v_a) = (
+                get_range(a.surface.parameter_range().0),
+                get_range(a.surface.parameter_range().1),
+            );
+            let (u_b, v_b) = (
+                get_range(b.surface.parameter_range().0),
+                get_range(b.surface.parameter_range().1),
+            );
+            let p_a = a.surface.subs((u_a.0 + u_a.1) * 0.5, (v_a.0 + v_a.1) * 0.5);
+            let p_b = b.surface.subs((u_b.0 + u_b.1) * 0.5, (v_b.0 + v_b.1) * 0.5);
+
+            u_a.0
+                .partial_cmp(&u_b.0)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| {
+                    u_a.1
+                        .partial_cmp(&u_b.1)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .then_with(|| {
+                    v_a.0
+                        .partial_cmp(&v_b.0)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .then_with(|| {
+                    v_a.1
+                        .partial_cmp(&v_b.1)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .then_with(|| {
+                    p_a.x
+                        .partial_cmp(&p_b.x)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .then_with(|| {
+                    p_a.y
+                        .partial_cmp(&p_b.y)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .then_with(|| {
+                    p_a.z
+                        .partial_cmp(&p_b.z)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+        });
+        for (face_idx, face) in faces.into_iter().enumerate() {
+            let range_u = get_range(face.surface.parameter_range().0);
+            let range_v = get_range(face.surface.parameter_range().1);
+            let structured =
+                StructuredMesh::from_surface(&face.surface, (range_u, range_v), quality.sag);
+            convert_structured_mesh(&structured, &mut out_mesh, face_idx as u32);
         }
         if out_mesh.positions.is_empty() {
             return Err(KernelError::Failed("empty mesh".into()));
