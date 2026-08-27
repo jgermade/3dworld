@@ -58,7 +58,7 @@ fn main() {
                 .map(|e| e.path())
                 .find(|p| {
                     p.file_name()
-                        .map_or(false, |n| n.to_string_lossy().starts_with("opencascade"))
+                        .is_some_and(|n| n.to_string_lossy().starts_with("opencascade"))
                         && p.join("BRepPrimAPI_MakeBox.hxx").exists()
                 })
                 .map(|p| p.to_string_lossy().to_string())
