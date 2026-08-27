@@ -146,6 +146,7 @@ fn main() {
         }
     });
     println!("cargo:rustc-link-search=native={lib_dir}");
+    println!("cargo:rustc-link-arg=-Wl,-rpath,{lib_dir}");
 
     for tk in BASE_TOOLKITS {
         println!("cargo:rustc-link-lib=dylib={tk}");
