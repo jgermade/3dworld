@@ -16,7 +16,7 @@ struct Object {
     hovered_face: u32,
     hovered_edge: u32,
     selected_edge: u32,
-    _pad0: u32,
+    hovered_body: u32,
 };
 
 @group(0) @binding(0) var<uniform> globals: Globals;
@@ -63,16 +63,18 @@ fn fs_shade(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<
     let fill = max(dot(n, normalize(vec3<f32>(-0.3, -0.5, 0.8))), 0.0);
 
     var base = object.color.rgb;
-    if (object.hovered_edge != 0u) {
-        base = vec3<f32>(1.0, 0.85, 0.0);
-    } else if (object.selected_edge != 0u) {
-        base = vec3<f32>(1.0, 0.5, 0.0);
-    } else if (object.selected_face != 0xFFFFFFFFu && in.face == object.selected_face) {
-        base = mix(base, vec3<f32>(0.15, 0.75, 1.0), 0.85);
+    if (object.selected_face != 0xFFFFFFFFu && in.face == object.selected_face) {
+        // Face Selected: Vivid Emerald Green-Teal
+        base = mix(base, vec3<f32>(0.0, 0.9, 0.45), 0.85);
     } else if (object.hovered_face != 0xFFFFFFFFu && in.face == object.hovered_face) {
-        base = mix(base, vec3<f32>(0.35, 0.85, 1.0), 0.65);
+        // Face Hover: Electric Cyan-Blue
+        base = mix(base, vec3<f32>(0.15, 0.65, 1.0), 0.70);
     } else if (object.selected != 0u) {
+        // Body Selected: Warm Orange
         base = mix(base, vec3<f32>(1.0, 0.5, 0.0), 0.35);
+    } else if (object.hovered_body != 0u) {
+        // Body Hover (unselected body): Soft Bright Glow Highlight
+        base = mix(base, vec3<f32>(0.90, 0.92, 0.98), 0.45);
     }
     let lit = base * (0.18 + 0.72 * key + 0.22 * fill);
     return vec4<f32>(lit, object.color.a);

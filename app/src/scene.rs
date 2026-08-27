@@ -29,6 +29,7 @@ pub struct Scene {
     selected_edge_mesh: Option<GpuMesh>,
     last_hover_edge: Option<([f32; 3], [f32; 3])>,
     last_sel_edge: Option<([f32; 3], [f32; 3])>,
+    hover_edge_is_near: bool,
 }
 
 impl Scene {
@@ -36,20 +37,24 @@ impl Scene {
         &mut self,
         device: &wgpu::Device,
         max_buffer_size: u64,
-        hover_edge_pts: Option<([f32; 3], [f32; 3])>,
+        hover_edge: Option<([f32; 3], [f32; 3], bool)>,
         sel_edge_pts: Option<([f32; 3], [f32; 3])>,
     ) {
-        if self.last_hover_edge != hover_edge_pts {
-            self.last_hover_edge = hover_edge_pts;
-            self.hover_edge_mesh = hover_edge_pts.and_then(|(p0, p1)| {
-                let mesh = build_edge_bar_mesh(p0, p1, 0.6);
+        let hover_pts = hover_edge.map(|(p0, p1, _)| (p0, p1));
+        let hover_is_near = hover_edge.is_some_and(|(_, _, near)| near);
+        if self.last_hover_edge != hover_pts || self.hover_edge_is_near != hover_is_near {
+            self.last_hover_edge = hover_pts;
+            self.hover_edge_is_near = hover_is_near;
+            self.hover_edge_mesh = hover_edge.and_then(|(p0, p1, near)| {
+                let radius = if near { 0.12 } else { 0.18 };
+                let mesh = build_edge_tube_mesh(p0, p1, radius);
                 GpuMesh::upload(device, max_buffer_size, "hover_edge", &mesh).ok()
             });
         }
         if self.last_sel_edge != sel_edge_pts {
             self.last_sel_edge = sel_edge_pts;
             self.selected_edge_mesh = sel_edge_pts.and_then(|(p0, p1)| {
-                let mesh = build_edge_bar_mesh(p0, p1, 0.7);
+                let mesh = build_edge_tube_mesh(p0, p1, 0.2);
                 GpuMesh::upload(device, max_buffer_size, "selected_edge", &mesh).ok()
             });
         }
@@ -105,10 +110,9 @@ impl Scene {
         &'a self,
         doc: &Document<K>,
         selected: &[NodeId],
+        hovered_body: Option<NodeId>,
         selected_face: Option<(NodeId, u32)>,
         hovered_face: Option<(NodeId, u32)>,
-        selected_edge: Option<(NodeId, u32)>,
-        hovered_edge: Option<(NodeId, u32)>,
     ) -> Vec<Object<'a>> {
         let mut list: Vec<Object<'a>> = doc
             .nodes()
@@ -118,17 +122,17 @@ impl Scene {
                     selected_face.and_then(|(sel_id, f)| if sel_id == id { Some(f) } else { None });
                 let hov =
                     hovered_face.and_then(|(hov_id, f)| if hov_id == id { Some(f) } else { None });
-                let sel_e = selected_edge.is_some_and(|(sel_id, _)| sel_id == id);
-                let hov_e = hovered_edge.is_some_and(|(hov_id, _)| hov_id == id);
+                let hov_b = hovered_body.is_some_and(|hov_id| hov_id == id);
                 self.meshes.get(&node.body.raw()).map(|mesh| Object {
                     mesh,
                     id: id.index(),
                     material: Material {
                         selected: selected.contains(&id),
+                        hovered: hov_b,
                         selected_face: face,
                         hovered_face: hov,
-                        selected_edge: sel_e,
-                        hovered_edge: hov_e,
+                        selected_edge: false,
+                        hovered_edge: false,
                         ..Material::default()
                     },
                 })
@@ -140,16 +144,23 @@ impl Scene {
                 mesh: sel_e,
                 id: u32::MAX - 2,
                 material: Material {
+                    color: [1.0, 0.5, 0.0, 1.0],
                     selected_edge: true,
                     ..Material::default()
                 },
             });
         }
         if let Some(hov_e) = &self.hover_edge_mesh {
+            let color = if self.hover_edge_is_near {
+                [0.65, 0.67, 0.72, 1.0]
+            } else {
+                [1.0, 0.85, 0.0, 1.0]
+            };
             list.push(Object {
                 mesh: hov_e,
                 id: u32::MAX - 1,
                 material: Material {
+                    color,
                     hovered_edge: true,
                     ..Material::default()
                 },
@@ -178,7 +189,13 @@ fn upload<K: GeometryKernel>(
     GpuMesh::upload(device, max_buffer_size, "body", &mesh).map_err(|e: MeshError| e.to_string())
 }
 
-fn build_edge_bar_mesh(p0: [f32; 3], p1: [f32; 3], radius: f32) -> Mesh {
+/// Builds a cylindrical tube mesh between two points with closed end caps.
+///
+/// `segments` controls the number of facets around the circumference — 10 is
+/// enough to look round at the radii used here.
+fn build_edge_tube_mesh(p0: [f32; 3], p1: [f32; 3], radius: f32) -> Mesh {
+    const SEGMENTS: usize = 10;
+
     let (v0, v1) = (
         w3d_core::kernel::Vec3::new(f64::from(p0[0]), f64::from(p0[1]), f64::from(p0[2])),
         w3d_core::kernel::Vec3::new(f64::from(p1[0]), f64::from(p1[1]), f64::from(p1[2])),
@@ -189,6 +206,8 @@ fn build_edge_bar_mesh(p0: [f32; 3], p1: [f32; 3], radius: f32) -> Mesh {
         return Mesh::default();
     }
     let d = dir * (1.0 / len);
+
+    // Build a local frame perpendicular to the edge direction.
     let up = if d.x.abs() < 0.9 {
         w3d_core::kernel::Vec3::new(1.0, 0.0, 0.0)
     } else {
@@ -201,46 +220,92 @@ fn build_edge_bar_mesh(p0: [f32; 3], p1: [f32; 3], radius: f32) -> Mesh {
     let w = d.cross(u);
 
     let r = f64::from(radius);
-    let u_r = u * r;
-    let w_r = w * r;
+    let mut positions = Vec::with_capacity(SEGMENTS * 4 + 2);
+    let mut normals = Vec::with_capacity(SEGMENTS * 4 + 2);
 
-    let pts = [
-        v0 - u_r - w_r,
-        v0 + u_r - w_r,
-        v0 + u_r + w_r,
-        v0 - u_r + w_r,
-        v1 - u_r - w_r,
-        v1 + u_r - w_r,
-        v1 + u_r + w_r,
-        v1 - u_r + w_r,
-    ];
+    // 1. Side vertices
+    for i in 0..SEGMENTS {
+        let angle = 2.0 * std::f64::consts::PI * (i as f64) / (SEGMENTS as f64);
+        let (sin_a, cos_a) = angle.sin_cos();
+        let nx = u.x * cos_a + w.x * sin_a;
+        let ny = u.y * cos_a + w.y * sin_a;
+        let nz = u.z * cos_a + w.z * sin_a;
+        let side_normal = [nx as f32, ny as f32, nz as f32];
 
-    let positions: Vec<[f32; 3]> = pts
-        .iter()
-        .map(|p| [p.x as f32, p.y as f32, p.z as f32])
-        .collect();
+        // Bottom ring (at v0)
+        let bx = v0.x + r * nx;
+        let by = v0.y + r * ny;
+        let bz = v0.z + r * nz;
+        positions.push([bx as f32, by as f32, bz as f32]);
+        normals.push(side_normal);
 
-    let normals = vec![
-        [-u.x as f32, -u.y as f32, -u.z as f32],
-        [u.x as f32, u.y as f32, u.z as f32],
-        [u.x as f32, u.y as f32, u.z as f32],
-        [-u.x as f32, -u.y as f32, -u.z as f32],
-        [-u.x as f32, -u.y as f32, -u.z as f32],
-        [u.x as f32, u.y as f32, u.z as f32],
-        [u.x as f32, u.y as f32, u.z as f32],
-        [-u.x as f32, -u.y as f32, -u.z as f32],
-    ];
+        // Top ring (at v1)
+        let tx = v1.x + r * nx;
+        let ty = v1.y + r * ny;
+        let tz = v1.z + r * nz;
+        positions.push([tx as f32, ty as f32, tz as f32]);
+        normals.push(side_normal);
+    }
 
-    let indices = vec![
-        0, 1, 2, 0, 2, 3, // bottom/front
-        4, 6, 5, 4, 7, 6, // top/back
-        0, 4, 5, 0, 5, 1, // side 1
-        1, 5, 6, 1, 6, 2, // side 2
-        2, 6, 7, 2, 7, 3, // side 3
-        3, 7, 4, 3, 4, 0, // side 4
-    ];
+    // Side indices
+    let mut indices = Vec::with_capacity(SEGMENTS * 6 + SEGMENTS * 6);
+    for i in 0..SEGMENTS {
+        let next = (i + 1) % SEGMENTS;
+        let b0 = (i * 2) as u32;
+        let t0 = (i * 2 + 1) as u32;
+        let b1 = (next * 2) as u32;
+        let t1 = (next * 2 + 1) as u32;
+        indices.extend_from_slice(&[b0, b1, t0, t0, b1, t1]);
+    }
 
-    let face_of_triangle = vec![0; 12];
+    // 2. Bottom end cap (normal = -d)
+    let bottom_norm = [-d.x as f32, -d.y as f32, -d.z as f32];
+    let bottom_center_idx = positions.len() as u32;
+    positions.push([v0.x as f32, v0.y as f32, v0.z as f32]);
+    normals.push(bottom_norm);
+
+    let bottom_ring_start = positions.len() as u32;
+    for i in 0..SEGMENTS {
+        let angle = 2.0 * std::f64::consts::PI * (i as f64) / (SEGMENTS as f64);
+        let (sin_a, cos_a) = angle.sin_cos();
+        let nx = u.x * cos_a + w.x * sin_a;
+        let ny = u.y * cos_a + w.y * sin_a;
+        let nz = u.z * cos_a + w.z * sin_a;
+        positions.push([(v0.x + r * nx) as f32, (v0.y + r * ny) as f32, (v0.z + r * nz) as f32]);
+        normals.push(bottom_norm);
+    }
+    for i in 0..SEGMENTS {
+        let next = (i + 1) % SEGMENTS;
+        let c0 = bottom_ring_start + i as u32;
+        let c1 = bottom_ring_start + next as u32;
+        indices.extend_from_slice(&[bottom_center_idx, c1, c0]);
+    }
+
+    // 3. Top end cap (normal = +d)
+    let top_norm = [d.x as f32, d.y as f32, d.z as f32];
+    let top_center_idx = positions.len() as u32;
+    positions.push([v1.x as f32, v1.y as f32, v1.z as f32]);
+    normals.push(top_norm);
+
+    let top_ring_start = positions.len() as u32;
+    for i in 0..SEGMENTS {
+        let angle = 2.0 * std::f64::consts::PI * (i as f64) / (SEGMENTS as f64);
+        let (sin_a, cos_a) = angle.sin_cos();
+        let nx = u.x * cos_a + w.x * sin_a;
+        let ny = u.y * cos_a + w.y * sin_a;
+        let nz = u.z * cos_a + w.z * sin_a;
+        positions.push([(v1.x + r * nx) as f32, (v1.y + r * ny) as f32, (v1.z + r * nz) as f32]);
+        normals.push(top_norm);
+    }
+    for i in 0..SEGMENTS {
+        let next = (i + 1) % SEGMENTS;
+        let c0 = top_ring_start + i as u32;
+        let c1 = top_ring_start + next as u32;
+        indices.extend_from_slice(&[top_center_idx, c0, c1]);
+    }
+
+    let face_count = indices.len() / 3;
+    let face_of_triangle = vec![0u32; face_count];
 
     Mesh {
         positions,
@@ -251,3 +316,4 @@ fn build_edge_bar_mesh(p0: [f32; 3], p1: [f32; 3], radius: f32) -> Mesh {
         line_indices: vec![0, 1],
     }
 }
+

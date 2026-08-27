@@ -49,6 +49,7 @@ pub const NOTHING: u32 = u32::MAX;
 pub struct Material {
     pub color: [f32; 4],
     pub selected: bool,
+    pub hovered: bool,
     pub selected_face: Option<u32>,
     pub hovered_face: Option<u32>,
     pub hovered_edge: bool,
@@ -60,6 +61,7 @@ impl Default for Material {
         Self {
             color: [0.72, 0.74, 0.78, 1.0],
             selected: false,
+            hovered: false,
             selected_face: None,
             hovered_face: None,
             hovered_edge: false,
@@ -528,7 +530,7 @@ impl Renderer {
             bytes[w..w + 4]
                 .copy_from_slice(&u32::from(object.material.selected_edge).to_le_bytes());
             w += 4;
-            bytes[w..w + 4].copy_from_slice(&0u32.to_le_bytes()); // _pad0
+            bytes[w..w + 4].copy_from_slice(&u32::from(object.material.hovered).to_le_bytes());
         }
         if !objects.is_empty() {
             queue.write_buffer(&self.objects, 0, &bytes);

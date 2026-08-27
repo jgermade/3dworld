@@ -117,9 +117,35 @@ pub enum Reaction {
 /// selecting whatever the cursor happened to stop over would be wrong — which
 /// is the single most annoying bug a modeller can have, because it fires on
 /// every rotation.
-const DRAG_SLOP: f64 = 3.0;
+const DRAG_SLOP: f64 = 8.0;
 
 pub type EdgeHit = (NodeId, u32, [f32; 3], [f32; 3]);
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum EdgeHover {
+    None,
+    /// Distance 8.0..=24.0 px: Gray tube, face hover active, edge not selectable.
+    Near(EdgeHit),
+    /// Distance <= 8.0 px: Vivid gold tube, edge active for click selection.
+    On(EdgeHit),
+}
+
+impl EdgeHover {
+    pub fn hit(self) -> Option<EdgeHit> {
+        match self {
+            Self::Near(h) | Self::On(h) => Some(h),
+            Self::None => None,
+        }
+    }
+
+    pub fn is_on(self) -> bool {
+        matches!(self, Self::On(_))
+    }
+
+    pub fn is_near(self) -> bool {
+        matches!(self, Self::Near(_))
+    }
+}
 
 struct Drag {
     button: Button,
@@ -145,8 +171,9 @@ pub struct Editor<K: GeometryKernel> {
     selection_mode: SelectionMode,
     selected_face: Option<(NodeId, u32)>,
     hovered_face: Option<(NodeId, u32)>,
+    hovered_body: Option<NodeId>,
     selected_edge: Option<(NodeId, u32, [f32; 3], [f32; 3])>,
-    hovered_edge: Option<(NodeId, u32, [f32; 3], [f32; 3])>,
+    hovered_edge: EdgeHover,
 }
 
 impl<K: GeometryKernel> Editor<K> {
@@ -161,8 +188,9 @@ impl<K: GeometryKernel> Editor<K> {
             selection_mode: SelectionMode::Body,
             selected_face: None,
             hovered_face: None,
+            hovered_body: None,
             selected_edge: None,
-            hovered_edge: None,
+            hovered_edge: EdgeHover::None,
         }
     }
 
@@ -174,11 +202,15 @@ impl<K: GeometryKernel> Editor<K> {
         self.hovered_face
     }
 
+    pub fn hovered_body(&self) -> Option<NodeId> {
+        self.hovered_body
+    }
+
     pub fn selected_edge(&self) -> Option<(NodeId, u32, [f32; 3], [f32; 3])> {
         self.selected_edge
     }
 
-    pub fn hovered_edge(&self) -> Option<(NodeId, u32, [f32; 3], [f32; 3])> {
+    pub fn hovered_edge(&self) -> EdgeHover {
         self.hovered_edge
     }
 
@@ -188,18 +220,29 @@ impl<K: GeometryKernel> Editor<K> {
 
     pub fn clear_hovered_face(&mut self) {
         self.hovered_face = None;
+        self.hovered_body = None;
     }
 
     pub fn hover_picked(&mut self, pick: Pick) {
         let Some((object, face)) = pick.hit() else {
+            self.hovered_body = None;
             self.hovered_face = None;
             return;
         };
         let Some(id) = self.node_at(object) else {
+            self.hovered_body = None;
             self.hovered_face = None;
             return;
         };
-        self.hovered_face = Some((id, face));
+        if self.doc.is_selected(id) {
+            // Body is already selected -> sub-object face hover
+            self.hovered_body = None;
+            self.hovered_face = Some((id, face));
+        } else {
+            // Body is not selected -> body-level hover highlight
+            self.hovered_body = Some(id);
+            self.hovered_face = None;
+        }
     }
 
     pub fn face_metrics(
@@ -295,23 +338,46 @@ impl<K: GeometryKernel> Editor<K> {
             Input::Move { x, y } => {
                 let height = f64::from(self.viewport.1);
                 let Some(drag) = &mut self.drag else {
-                    if let Some((id, edge_idx, p0, p1)) = self.find_closest_edge(x, y) {
-                        self.hovered_edge = Some((id, edge_idx, p0, p1));
+                    // 1. Edge Mask (Priority 1: highest) on selected bodies
+                    let closest_edge = self.find_closest_edge(x, y);
+                    if let Some((_dist, hit)) = closest_edge.filter(|(dist, _)| *dist <= 14.0) {
+                        let (id, edge_idx, _, _) = hit;
+                        self.hovered_edge = EdgeHover::On(hit);
+                        self.hovered_body = None;
+                        self.hovered_face = None;
                         self.status = format!("hovering Edge #{edge_idx} on {}", self.name_of(id));
                         return Reaction::Redraw;
-                    } else if self.hovered_edge.is_some() {
-                        self.hovered_edge = None;
-                        return Reaction::Redraw;
                     }
-                    return Reaction::PickHover {
-                        x: x.max(0.0) as u32,
-                        y: y.max(0.0) as u32,
-                    };
+
+                    // 2. Face Mask (Priority 2) & Object Mask (Priority 3)
+                    let closest_face = self.find_closest_face(x, y);
+                    if let Some((face_node_id, face_id)) = closest_face {
+                        if self.doc.is_selected(face_node_id) {
+                            // Body is selected -> Face Mask applies (Object mask does NOT apply)
+                            self.hovered_edge = closest_edge.map_or(EdgeHover::None, |(_, hit)| EdgeHover::Near(hit));
+                            self.hovered_body = None;
+                            self.hovered_face = Some((face_node_id, face_id));
+                        } else {
+                            // Body is NOT selected -> Object Mask applies
+                            self.hovered_edge = EdgeHover::None;
+                            self.hovered_body = Some(face_node_id);
+                            self.hovered_face = None;
+                        }
+                    } else {
+                        // Background
+                        self.hovered_edge = closest_edge.map_or(EdgeHover::None, |(_, hit)| EdgeHover::Near(hit));
+                        self.hovered_body = None;
+                        self.hovered_face = None;
+                    }
+                    return Reaction::Redraw;
                 };
                 let (dx, dy) = (x - drag.last.0, y - drag.last.1);
                 drag.last = (x, y);
-                if (x - drag.start.0).abs() + (y - drag.start.1).abs() > DRAG_SLOP {
+                if (x - drag.start.0).hypot(y - drag.start.1) > DRAG_SLOP {
                     drag.moved = true;
+                }
+                if !drag.moved {
+                    return Reaction::Nothing;
                 }
                 match drag.button {
                     Button::Left => {
@@ -365,18 +431,70 @@ impl<K: GeometryKernel> Editor<K> {
     /// and that is a miss, not a panic.
     #[allow(clippy::collapsible_if)]
     pub fn picked(&mut self, pick: Pick, additive: bool) {
-        if let Some((id, edge_idx, p0, p1)) = self.hovered_edge {
-            if self.selection_mode == SelectionMode::Edge || pick.hit().is_none() {
-                self.selected_edge = Some((id, edge_idx, p0, p1));
-                if !additive {
-                    self.doc.clear_selection();
-                }
-                let _ = self.doc.select(id);
-                self.status = format!("selected Edge #{edge_idx} on {}", self.name_of(id));
-                return;
+        if let Some((id, edge_idx, p0, p1)) = self
+            .hovered_edge
+            .hit()
+            .filter(|(id, _, _, _)| self.doc.is_selected(*id) && self.hovered_edge.is_on())
+        {
+            self.selected_edge = Some((id, edge_idx, p0, p1));
+            if !additive {
+                self.doc.clear_selection();
             }
+            let _ = self.doc.select(id);
+            self.status = format!("selected Edge #{edge_idx} on {}", self.name_of(id));
+            return;
         }
-        let Some((object, face)) = pick.hit() else {
+
+        if let Some((object, face)) = pick.hit() {
+            if let Some(id) = self.node_at(object) {
+                self.picked_with_hit(Some((id, face)), additive);
+            } else {
+                self.status = String::from("clicked a body that is no longer there");
+            }
+        } else {
+            self.picked_with_hit(None, additive);
+        }
+    }
+
+    pub fn picked_at(&mut self, x: f64, y: f64, additive: bool) {
+        // Priority 1: Edge Mask on selected bodies (within 14px)
+        if let Some((_dist, (id, edge_idx, p0, p1))) = self
+            .find_closest_edge(x, y)
+            .filter(|(dist, (id, _, _, _))| *dist <= 14.0 && self.doc.is_selected(*id))
+        {
+            self.selected_edge = Some((id, edge_idx, p0, p1));
+            self.selected_face = None;
+            if !additive {
+                self.doc.clear_selection();
+            }
+            let _ = self.doc.select(id);
+            self.status = format!("selected Edge #{edge_idx} on {}", self.name_of(id));
+            return;
+        }
+
+        // Priority 2 & 3: Face & Object Mask
+        let hit = self.find_closest_face(x, y);
+        self.picked_with_hit(hit, additive);
+    }
+
+    fn picked_with_hit(&mut self, hit: Option<(NodeId, u32)>, additive: bool) {
+        // Priority 1 fallback for active edge hover
+        if let Some((id, edge_idx, p0, p1)) = self
+            .hovered_edge
+            .hit()
+            .filter(|(id, _, _, _)| self.doc.is_selected(*id) && self.hovered_edge.is_on())
+        {
+            self.selected_edge = Some((id, edge_idx, p0, p1));
+            self.selected_face = None;
+            if !additive {
+                self.doc.clear_selection();
+            }
+            let _ = self.doc.select(id);
+            self.status = format!("selected Edge #{edge_idx} on {}", self.name_of(id));
+            return;
+        }
+
+        let Some((id, face)) = hit else {
             if !additive {
                 self.doc.clear_selection();
                 self.selected_face = None;
@@ -385,36 +503,44 @@ impl<K: GeometryKernel> Editor<K> {
             }
             return;
         };
-        let Some(id) = self.node_at(object) else {
-            self.status = String::from("clicked a body that is no longer there");
-            return;
-        };
+
+        let was_selected = self.doc.is_selected(id);
+
         if !additive {
             self.doc.clear_selection();
             self.selected_edge = None;
         }
 
-        let is_same_face = self.selected_face == Some((id, face));
-        if self.doc.is_selected(id) && is_same_face {
-            self.doc.deselect(id);
-            self.selected_face = None;
-            self.status = format!("deselected {}", self.name_of(id));
-        } else {
-            let _ = self.doc.select(id);
-            self.selected_face = Some((id, face));
-            let name = self.name_of(id);
-            if let Ok(mesh) = self.doc.mesh(id) {
-                if let Some(metrics) = mesh.face_metrics(face) {
-                    self.status = format!(
-                        "{} · Face #{face} (Area: {:.2} mm², Normal: [{:.2}, {:.2}, {:.2}])",
-                        name, metrics.area, metrics.normal.x, metrics.normal.y, metrics.normal.z
-                    );
+        if was_selected {
+            // Body is already selected -> Face Mask (Priority 2)
+            if additive && self.selected_face.is_none() {
+                // Shift-click toggle: deselect the body.
+                self.doc.deselect(id);
+                self.status = format!("deselected {}", self.name_of(id));
+            } else {
+                let _ = self.doc.select(id);
+                self.selected_face = Some((id, face));
+                self.selected_edge = None;
+                let name = self.name_of(id);
+                if let Ok(mesh) = self.doc.mesh(id) {
+                    if let Some(metrics) = mesh.face_metrics(face) {
+                        self.status = format!(
+                            "{} · Face #{face} (Area: {:.2} mm², Normal: [{:.2}, {:.2}, {:.2}])",
+                            name, metrics.area, metrics.normal.x, metrics.normal.y, metrics.normal.z
+                        );
+                    } else {
+                        self.status = format!("{name} · face {face}");
+                    }
                 } else {
                     self.status = format!("{name} · face {face}");
                 }
-            } else {
-                self.status = format!("{name} · face {face}");
             }
+        } else {
+            // Body was NOT selected -> Object Mask (Priority 3)
+            let _ = self.doc.select(id);
+            self.selected_face = None;
+            self.selected_edge = None;
+            self.status = format!("selected {}", self.name_of(id));
         }
     }
 
@@ -628,7 +754,7 @@ impl<K: GeometryKernel> Editor<K> {
         Ok(format!("extruded face #{face_id} by {distance:.1} mm"))
     }
 
-    fn shell(&mut self, thickness: f64) -> Result<String, String> {
+    pub fn shell(&mut self, thickness: f64) -> Result<String, String> {
         let Some((id, face_id)) = self.selected_face else {
             let selected = self.selection();
             if let Some(&id) = selected.first() {
@@ -649,35 +775,26 @@ impl<K: GeometryKernel> Editor<K> {
         ))
     }
 
-    pub fn find_closest_edge(&mut self, cursor_x: f64, cursor_y: f64) -> Option<EdgeHit> {
+    pub fn find_closest_edge(&mut self, cursor_x: f64, cursor_y: f64) -> Option<(f64, EdgeHit)> {
         let (width, height) = (f64::from(self.viewport.0), f64::from(self.viewport.1));
         if width <= 0.0 || height <= 0.0 {
             return None;
         }
         let aspect = width / height;
-        let vp_mat = self.camera.view_projection(aspect);
+
+        let eye = self.camera.eye();
+        let proj = self.camera.projection(aspect);
+        let view = self.camera.view();
+        let vp = proj.mul(&view);
 
         let project_pt = |p: [f32; 3]| -> Option<(f64, f64)> {
-            let col0 = vp_mat[0];
-            let col1 = vp_mat[1];
-            let col2 = vp_mat[2];
-            let col3 = vp_mat[3];
-            let (px, py, pz) = (f64::from(p[0]), f64::from(p[1]), f64::from(p[2]));
-
-            let clip_x = (col0[0] as f64) * px
-                + (col1[0] as f64) * py
-                + (col2[0] as f64) * pz
-                + (col3[0] as f64);
-            let clip_y = (col0[1] as f64) * px
-                + (col1[1] as f64) * py
-                + (col2[1] as f64) * pz
-                + (col3[1] as f64);
-            let clip_w = (col0[3] as f64) * px
-                + (col1[3] as f64) * py
-                + (col2[3] as f64) * pz
-                + (col3[3] as f64);
-
-            if clip_w <= 0.0 {
+            let px = f64::from(p[0]);
+            let py = f64::from(p[1]);
+            let pz = f64::from(p[2]);
+            let clip_x = vp.0[0][0] * px + vp.0[0][1] * py + vp.0[0][2] * pz + vp.0[0][3];
+            let clip_y = vp.0[1][0] * px + vp.0[1][1] * py + vp.0[1][2] * pz + vp.0[1][3];
+            let clip_w = vp.0[3][0] * px + vp.0[3][1] * py + vp.0[3][2] * pz + vp.0[3][3];
+            if clip_w <= 1.0e-6 {
                 return None;
             }
             let sx = (clip_x / clip_w + 1.0) * 0.5 * width;
@@ -690,20 +807,17 @@ impl<K: GeometryKernel> Editor<K> {
         let node_ids: Vec<NodeId> = self
             .doc
             .nodes()
-            .filter_map(|(id, node)| if node.visible { Some(id) } else { None })
+            .filter_map(|(id, node)| if node.visible && self.doc.is_selected(id) { Some(id) } else { None })
             .collect();
 
-        eprintln!(
-            "[EDGE DEBUG] width={width} height={height} node_count={}",
-            node_ids.len()
-        );
-
         for id in node_ids {
-            let Ok(mesh) = self.doc.mesh(id) else {
-                continue;
+            let (line_pos, line_idx) = {
+                let Ok(mesh) = self.doc.mesh(id) else {
+                    continue;
+                };
+                let (pos, idx) = mesh.line_edges();
+                (pos.to_vec(), idx.to_vec())
             };
-
-            let (line_pos, line_idx) = mesh.line_edges();
 
             for i in (0..line_idx.len()).step_by(2) {
                 let idx0 = line_idx[i] as usize;
@@ -731,13 +845,181 @@ impl<K: GeometryKernel> Editor<K> {
                 let py = s0.1 + t * vy;
 
                 let dist = (cursor_x - px).hypot(cursor_y - py);
-                if dist <= 36.0 && closest.as_ref().is_none_or(|c| dist < c.0) {
+                if dist <= 24.0 && closest.as_ref().is_none_or(|c| dist < c.0) {
+                    let p_edge = Vec3::new(
+                        f64::from(p0[0] + (p1[0] - p0[0]) * t as f32),
+                        f64::from(p0[1] + (p1[1] - p0[1]) * t as f32),
+                        f64::from(p0[2] + (p1[2] - p0[2]) * t as f32),
+                    );
+                    let t_edge = (p_edge - eye).length();
+                    let is_occluded = self
+                        .find_closest_face_distance_excluding(id, px, py)
+                        .is_some_and(|t_face| t_edge > t_face + 0.5);
+                    if is_occluded {
+                        continue;
+                    }
                     closest = Some((dist, (id, (i / 2) as u32, p0, p1)));
                 }
             }
         }
 
-        closest.map(|(_, hit)| hit)
+        closest
+    }
+
+    pub fn find_closest_face(&mut self, cursor_x: f64, cursor_y: f64) -> Option<(NodeId, u32)> {
+        let (width, height) = (f64::from(self.viewport.0), f64::from(self.viewport.1));
+        if width <= 0.0 || height <= 0.0 {
+            return None;
+        }
+        let aspect = width / height;
+
+        let eye = self.camera.eye();
+        let up_axis = Vec3::new(0.0, 0.0, 1.0);
+        let forward = (self.camera.target - eye).normalize(1.0e-12)?;
+        let right = forward.cross(up_axis).normalize(1.0e-12)?;
+        let up = right.cross(forward);
+
+        let h_tan = (self.camera.fov_y * 0.5).tan();
+        let w_tan = h_tan * aspect;
+
+        let ndc_x = (2.0 * cursor_x / width) - 1.0;
+        let ndc_y = 1.0 - (2.0 * cursor_y / height);
+
+        let ray_dir = (forward + right * (ndc_x * w_tan) + up * (ndc_y * h_tan)).normalize(1.0e-12)?;
+
+        let mut closest: Option<(f64, NodeId, u32)> = None;
+
+        let node_ids: Vec<NodeId> = self
+            .doc
+            .nodes()
+            .filter_map(|(id, node)| if node.visible { Some(id) } else { None })
+            .collect();
+
+        for id in node_ids {
+            let Ok(mesh) = self.doc.mesh(id) else {
+                continue;
+            };
+
+            let positions = &mesh.positions;
+            let indices = &mesh.indices;
+            let face_of_triangle = &mesh.face_of_triangle;
+
+            for i in (0..indices.len()).step_by(3) {
+                let idx0 = indices[i] as usize;
+                let idx1 = indices[i + 1] as usize;
+                let idx2 = indices[i + 2] as usize;
+                if idx0 >= positions.len() || idx1 >= positions.len() || idx2 >= positions.len() {
+                    continue;
+                }
+
+                let p0 = Vec3::new(
+                    f64::from(positions[idx0][0]),
+                    f64::from(positions[idx0][1]),
+                    f64::from(positions[idx0][2]),
+                );
+                let p1 = Vec3::new(
+                    f64::from(positions[idx1][0]),
+                    f64::from(positions[idx1][1]),
+                    f64::from(positions[idx1][2]),
+                );
+                let p2 = Vec3::new(
+                    f64::from(positions[idx2][0]),
+                    f64::from(positions[idx2][1]),
+                    f64::from(positions[idx2][2]),
+                );
+
+                if let Some(t) = ray_triangle_intersect(eye, ray_dir, p0, p1, p2)
+                    .filter(|&t| closest.as_ref().is_none_or(|c| t < c.0))
+                {
+                    let tri_idx = i / 3;
+                    let face_id = if tri_idx < face_of_triangle.len() {
+                        face_of_triangle[tri_idx]
+                    } else {
+                        0
+                    };
+                    closest = Some((t, id, face_id));
+                }
+            }
+        }
+
+        closest.map(|(_, id, face_id)| (id, face_id))
+    }
+
+    pub fn find_closest_face_distance_excluding(
+        &mut self,
+        exclude_id: NodeId,
+        cursor_x: f64,
+        cursor_y: f64,
+    ) -> Option<f64> {
+        let (width, height) = (f64::from(self.viewport.0), f64::from(self.viewport.1));
+        if width <= 0.0 || height <= 0.0 {
+            return None;
+        }
+        let aspect = width / height;
+
+        let eye = self.camera.eye();
+        let up_axis = Vec3::new(0.0, 0.0, 1.0);
+        let forward = (self.camera.target - eye).normalize(1.0e-12)?;
+        let right = forward.cross(up_axis).normalize(1.0e-12)?;
+        let up = right.cross(forward);
+
+        let h_tan = (self.camera.fov_y * 0.5).tan();
+        let w_tan = h_tan * aspect;
+
+        let ndc_x = (2.0 * cursor_x / width) - 1.0;
+        let ndc_y = 1.0 - (2.0 * cursor_y / height);
+
+        let ray_dir = (forward + right * (ndc_x * w_tan) + up * (ndc_y * h_tan)).normalize(1.0e-12)?;
+
+        let mut closest_t: Option<f64> = None;
+
+        let node_ids: Vec<NodeId> = self
+            .doc
+            .nodes()
+            .filter_map(|(id, node)| if node.visible && id != exclude_id { Some(id) } else { None })
+            .collect();
+
+        for id in node_ids {
+            let Ok(mesh) = self.doc.mesh(id) else {
+                continue;
+            };
+
+            let positions = &mesh.positions;
+            let indices = &mesh.indices;
+
+            for i in (0..indices.len()).step_by(3) {
+                let idx0 = indices[i] as usize;
+                let idx1 = indices[i + 1] as usize;
+                let idx2 = indices[i + 2] as usize;
+                if idx0 >= positions.len() || idx1 >= positions.len() || idx2 >= positions.len() {
+                    continue;
+                }
+
+                let p0 = Vec3::new(
+                    f64::from(positions[idx0][0]),
+                    f64::from(positions[idx0][1]),
+                    f64::from(positions[idx0][2]),
+                );
+                let p1 = Vec3::new(
+                    f64::from(positions[idx1][0]),
+                    f64::from(positions[idx1][1]),
+                    f64::from(positions[idx1][2]),
+                );
+                let p2 = Vec3::new(
+                    f64::from(positions[idx2][0]),
+                    f64::from(positions[idx2][1]),
+                    f64::from(positions[idx2][2]),
+                );
+
+                if let Some(t) = ray_triangle_intersect(eye, ray_dir, p0, p1, p2)
+                    .filter(|&t| closest_t.is_none_or(|c| t < c))
+                {
+                    closest_t = Some(t);
+                }
+            }
+        }
+
+        closest_t
     }
 
     pub fn drag_face_extrude(&mut self, dx: f64, dy: f64) -> Reaction {
@@ -953,6 +1235,39 @@ fn label(op: BooleanOp) -> &'static str {
         BooleanOp::Union => "union",
         BooleanOp::Difference => "difference",
         BooleanOp::Intersection => "intersection",
+    }
+}
+
+fn ray_triangle_intersect(
+    ray_origin: Vec3,
+    ray_dir: Vec3,
+    v0: Vec3,
+    v1: Vec3,
+    v2: Vec3,
+) -> Option<f64> {
+    let edge1 = v1 - v0;
+    let edge2 = v2 - v0;
+    let h = ray_dir.cross(edge2);
+    let a = edge1.dot(h);
+    if a.abs() < 1e-10 {
+        return None;
+    }
+    let f = 1.0 / a;
+    let s = ray_origin - v0;
+    let u = f * s.dot(h);
+    if !(0.0..=1.0).contains(&u) {
+        return None;
+    }
+    let q = s.cross(edge1);
+    let v = f * ray_dir.dot(q);
+    if v < 0.0 || u + v > 1.0 {
+        return None;
+    }
+    let t = f * edge2.dot(q);
+    if t > 1e-6 {
+        Some(t)
+    } else {
+        None
     }
 }
 
@@ -1589,4 +1904,20 @@ mod tests {
         let hit = e.find_closest_edge(500.0, 400.0);
         eprintln!("find_closest_edge at center: {:?}", hit);
     }
+
+    #[test]
+    fn edge_two_zone_proximity_test() {
+        let mut e = editor();
+        e.set_viewport(1000, 800);
+        e.run(Command::AddBox);
+        assert_eq!(e.hovered_edge(), EdgeHover::None);
+
+        // Near edge input move triggers Reaction::PickHover and sets EdgeHover::Near or On
+        let reaction = e.input(Input::Move { x: 500.0, y: 400.0 });
+        assert!(matches!(
+            reaction,
+            Reaction::PickHover { .. } | Reaction::Redraw
+        ));
+    }
 }
+

@@ -498,17 +498,15 @@ impl<K: GeometryKernel + Default> Live<K> {
             Reaction::Redraw => self.window.request_redraw(),
             Reaction::Pick { x, y, additive } => {
                 let selected = self.editor.selection();
+                let hovered_body = self.editor.hovered_body();
                 let selected_face = self.editor.selected_face();
                 let hovered_face = self.editor.hovered_face();
-                let selected_edge = self.editor.selected_edge().map(|(id, f, _, _)| (id, f));
-                let hovered_edge = self.editor.hovered_edge().map(|(id, f, _, _)| (id, f));
                 let objects = self.scene.objects(
                     self.editor.document(),
                     &selected,
+                    hovered_body,
                     selected_face,
                     hovered_face,
-                    selected_edge,
-                    hovered_edge,
                 );
                 let vp = viewport(&self.gpu, &self.config);
                 let pending = self
@@ -520,17 +518,15 @@ impl<K: GeometryKernel + Default> Live<K> {
             }
             Reaction::PickHover { x, y } => {
                 let selected = self.editor.selection();
+                let hovered_body = self.editor.hovered_body();
                 let selected_face = self.editor.selected_face();
                 let hovered_face = self.editor.hovered_face();
-                let selected_edge = self.editor.selected_edge().map(|(id, f, _, _)| (id, f));
-                let hovered_edge = self.editor.hovered_edge().map(|(id, f, _, _)| (id, f));
                 let objects = self.scene.objects(
                     self.editor.document(),
                     &selected,
+                    hovered_body,
                     selected_face,
                     hovered_face,
-                    selected_edge,
-                    hovered_edge,
                 );
                 let vp = viewport(&self.gpu, &self.config);
                 let pending = self
@@ -556,8 +552,11 @@ impl<K: GeometryKernel + Default> Live<K> {
                 }
                 PendingKind::Hover => {
                     let old_hover = self.editor.hovered_face();
+                    let old_hover_body = self.editor.hovered_body();
                     self.editor.hover_picked(pick);
-                    if self.editor.hovered_face() != old_hover {
+                    if self.editor.hovered_face() != old_hover
+                        || self.editor.hovered_body() != old_hover_body
+                    {
                         self.window.request_redraw();
                     }
                 }
@@ -584,14 +583,26 @@ impl<K: GeometryKernel + Default> Live<K> {
             });
         }
 
-        let hover_pts = self.editor.hovered_edge().map(|(_, _, p0, p1)| (p0, p1));
+        let hover = self.editor.hovered_edge();
+        let hover_edge = hover
+            .hit()
+            .map(|(_, _, p0, p1)| (p0, p1, hover.is_near()));
         let sel_pts = self.editor.selected_edge().map(|(_, _, p0, p1)| (p0, p1));
         self.scene.update_edge_highlight(
             &self.gpu.device,
             self.gpu.capabilities.max_buffer_size,
-            hover_pts,
+            hover_edge,
             sel_pts,
         );
+
+        let cursor_icon = if hover.is_on() {
+            winit::window::CursorIcon::Crosshair
+        } else if self.editor.hovered_face().is_some() || self.editor.hovered_body().is_some() {
+            winit::window::CursorIcon::Pointer
+        } else {
+            winit::window::CursorIcon::Default
+        };
+        self.window.set_cursor(cursor_icon);
 
         let raw = self.egui.take_egui_input(&self.window);
         let context = self.egui.egui_ctx().clone();
@@ -640,17 +651,15 @@ impl<K: GeometryKernel + Default> Live<K> {
         let depth_view = self.depth.create_view(&Default::default());
 
         let selected = self.editor.selection();
+        let hovered_body = self.editor.hovered_body();
         let selected_face = self.editor.selected_face();
         let hovered_face = self.editor.hovered_face();
-        let selected_edge = self.editor.selected_edge().map(|(id, f, _, _)| (id, f));
-        let hovered_edge = self.editor.hovered_edge().map(|(id, f, _, _)| (id, f));
         let objects = self.scene.objects(
             self.editor.document(),
             &selected,
+            hovered_body,
             selected_face,
             hovered_face,
-            selected_edge,
-            hovered_edge,
         );
         let vp = viewport(&self.gpu, &self.config);
         self.renderer.prepare(&vp, self.editor.camera(), &objects);
