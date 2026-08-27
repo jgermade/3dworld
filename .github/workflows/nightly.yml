@@ -26,7 +26,7 @@ jobs:
     name: make web-test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v4
       - name: Rust, and the wasm target
         id: rust
         run: |
@@ -34,7 +34,7 @@ jobs:
           rustup default stable
           rustup target add wasm32-unknown-unknown
           echo "version=$(rustc --version | tr ' ()/' '____')" >> "$GITHUB_OUTPUT"
-      - uses: actions/cache@v6
+      - uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
