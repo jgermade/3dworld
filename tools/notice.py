@@ -100,9 +100,9 @@ def generate_notice():
     for target in TARGETS:
         pkgs = get_packages_for_target(target)
         for name, pkg in pkgs.items():
-            all_packages[name] = pkg
+            all_packages[(name, pkg["version"])] = pkg
 
-    sorted_pkgs = sorted(all_packages.values(), key=lambda p: p["name"].lower())
+    sorted_pkgs = sorted(all_packages.values(), key=lambda p: (p["name"].lower(), p["version"]))
 
     sections = [PROJECT_HEADER.strip(), NON_CARGO_NOTICES.strip()]
 

@@ -47,7 +47,10 @@ fn main() {
 
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR"));
     let include = env::var("OCCT_INCLUDE_DIR").unwrap_or_else(|_| {
-        if PathBuf::from("/usr/include/opencascade").join("BRepPrimAPI_MakeBox.hxx").exists() {
+        if PathBuf::from("/usr/include/opencascade")
+            .join("BRepPrimAPI_MakeBox.hxx")
+            .exists()
+        {
             "/usr/include/opencascade".into()
         } else if let Ok(entries) = std::fs::read_dir("/usr/include") {
             entries
