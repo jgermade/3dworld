@@ -116,6 +116,13 @@ unsafe extern "C" {
     fn w3d_occt_delete(ctx: *mut Context, body: u32) -> i32;
     fn w3d_occt_fillet(ctx: *mut Context, body: u32, radius: f64, out: *mut u32) -> i32;
     fn w3d_occt_chamfer(ctx: *mut Context, body: u32, distance: f64, out: *mut u32) -> i32;
+    fn w3d_occt_shell(
+        ctx: *mut Context,
+        body: u32,
+        face_id: u32,
+        thickness: f64,
+        out: *mut u32,
+    ) -> i32;
     fn w3d_occt_topology(ctx: *mut Context, body: u32, out4: *mut u32) -> i32;
     fn w3d_occt_bounds(ctx: *mut Context, body: u32, out6: *mut f64) -> i32;
     fn w3d_occt_tessellate(
@@ -314,6 +321,18 @@ impl GeometryKernel for OcctKernel {
                 self.create_box(Vec3::new(20.0, 20.0, distance))
             }
         }
+    }
+
+    fn shell(&mut self, body: Body, face_id: u32, thickness: f64) -> Result<Body> {
+        if thickness <= 0.0 {
+            return Err(KernelError::Degenerate("shell thickness must be positive"));
+        }
+        let mut id = 0u32;
+        check(
+            unsafe { w3d_occt_shell(self.ctx, body.raw(), face_id, thickness, &mut id) },
+            body,
+        )?;
+        Ok(Body::from_raw(id))
     }
 
     fn topology(&self, body: Body) -> Result<Topology> {

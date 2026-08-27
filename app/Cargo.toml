@@ -50,7 +50,7 @@ path = "../kernel-truck"
 optional = true
 
 [features]
-default = []
+default = ["truck"]
 occt = ["dep:w3d-kernel-occt"]
 truck = ["dep:w3d-kernel-truck"]
 

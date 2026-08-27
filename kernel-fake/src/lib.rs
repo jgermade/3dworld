@@ -309,6 +309,19 @@ impl GeometryKernel for FakeKernel {
         }
     }
 
+    fn shell(&mut self, body: Body, _face_id: u32, thickness: f64) -> Result<Body> {
+        if thickness <= 0.0 {
+            return Err(KernelError::Degenerate("shell thickness must be positive"));
+        }
+        let bounds = self.get(body)?.bounds();
+        let shrunk = Vec3::new(
+            (bounds.max.x - bounds.min.x - thickness * 2.0).max(1.0),
+            (bounds.max.y - bounds.min.y - thickness * 2.0).max(1.0),
+            (bounds.max.z - bounds.min.z - thickness * 2.0).max(1.0),
+        );
+        self.create_box(shrunk)
+    }
+
     fn topology(&self, body: Body) -> Result<Topology> {
         Ok(self.get(body)?.topology())
     }

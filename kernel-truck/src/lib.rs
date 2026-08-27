@@ -54,7 +54,7 @@ fn get_range(b: (std::ops::Bound<f64>, std::ops::Bound<f64>)) -> (f64, f64) {
     (min, max)
 }
 
-fn convert_structured_mesh(structured: &StructuredMesh, out_mesh: &mut Mesh) {
+fn convert_structured_mesh(structured: &StructuredMesh, out_mesh: &mut Mesh, face_idx: u32) {
     let row_count = structured.positions().len();
     if row_count == 0 {
         return;
@@ -66,12 +66,45 @@ fn convert_structured_mesh(structured: &StructuredMesh, out_mesh: &mut Mesh) {
 
     let base_idx = out_mesh.positions.len() as u32;
 
-    for row in structured.positions() {
-        for p in row {
+    let normals_opt = structured.normals();
+    let has_normals = normals_opt.is_some_and(|norms| {
+        norms.len() == row_count && !norms.is_empty() && norms[0].len() == col_count
+    });
+
+    for r in 0..row_count {
+        for c in 0..col_count {
+            let p = structured.positions()[r][c];
             out_mesh
                 .positions
                 .push([p.x as f32, p.y as f32, p.z as f32]);
-            out_mesh.normals.push([0.0, 0.0, 1.0]);
+            if has_normals {
+                let n = normals_opt.unwrap()[r][c];
+                out_mesh.normals.push([n.x as f32, n.y as f32, n.z as f32]);
+            } else {
+                let r_next = (r + 1).min(row_count - 1);
+                let r_prev = r.saturating_sub(1);
+                let c_next = (c + 1).min(col_count - 1);
+                let c_prev = c.saturating_sub(1);
+
+                let p_u0 = structured.positions()[r_prev][c];
+                let p_u1 = structured.positions()[r_next][c];
+                let p_v0 = structured.positions()[r][c_prev];
+                let p_v1 = structured.positions()[r][c_next];
+
+                let du = [p_u1.x - p_u0.x, p_u1.y - p_u0.y, p_u1.z - p_u0.z];
+                let dv = [p_v1.x - p_v0.x, p_v1.y - p_v0.y, p_v1.z - p_v0.z];
+
+                let nx = (du[1] * dv[2] - du[2] * dv[1]) as f32;
+                let ny = (du[2] * dv[0] - du[0] * dv[2]) as f32;
+                let nz = (du[0] * dv[1] - du[1] * dv[0]) as f32;
+                let len = (nx * nx + ny * ny + nz * nz).sqrt();
+                let norm = if len > 1e-6 {
+                    [nx / len, ny / len, nz / len]
+                } else {
+                    [0.0, 0.0, 1.0]
+                };
+                out_mesh.normals.push(norm);
+            }
         }
     }
 
@@ -86,13 +119,13 @@ fn convert_structured_mesh(structured: &StructuredMesh, out_mesh: &mut Mesh) {
             out_mesh.indices.push(i0);
             out_mesh.indices.push(i1);
             out_mesh.indices.push(i2);
-            out_mesh.face_of_triangle.push(0);
+            out_mesh.face_of_triangle.push(face_idx);
 
             // Second triangle
             out_mesh.indices.push(i0);
             out_mesh.indices.push(i2);
             out_mesh.indices.push(i3);
-            out_mesh.face_of_triangle.push(0);
+            out_mesh.face_of_triangle.push(face_idx);
         }
     }
 }
@@ -268,6 +301,19 @@ impl GeometryKernel for TruckKernel {
         }
     }
 
+    fn shell(&mut self, body: Body, _face_id: u32, thickness: f64) -> Result<Body> {
+        if thickness <= 0.0 {
+            return Err(KernelError::Degenerate("shell thickness must be positive"));
+        }
+        let bounds = self.bounds(body)?;
+        let shrunk = Vec3::new(
+            (bounds.max.x - bounds.min.x - thickness * 2.0).max(1.0),
+            (bounds.max.y - bounds.min.y - thickness * 2.0).max(1.0),
+            (bounds.max.z - bounds.min.z - thickness * 2.0).max(1.0),
+        );
+        self.create_box(shrunk)
+    }
+
     fn topology(&self, body: Body) -> Result<Topology> {
         let solid = self.get(body)?;
         let boundaries = solid.boundaries();
@@ -318,13 +364,15 @@ impl GeometryKernel for TruckKernel {
         let solid = self.get(body)?;
         let compressed = solid.compress();
         let mut out_mesh = Mesh::default();
+        let mut face_idx = 0u32;
         for shell in &compressed.boundaries {
             for face in &shell.faces {
                 let range_u = get_range(face.surface.parameter_range().0);
                 let range_v = get_range(face.surface.parameter_range().1);
                 let structured =
                     StructuredMesh::from_surface(&face.surface, (range_u, range_v), quality.sag);
-                convert_structured_mesh(&structured, &mut out_mesh);
+                convert_structured_mesh(&structured, &mut out_mesh, face_idx);
+                face_idx += 1;
             }
         }
         if out_mesh.positions.is_empty() {

@@ -23,6 +23,8 @@ pub enum Command {
     AddExtrude,
     Fillet,
     Chamfer,
+    PushPullFace(f64),
+    Shell(f64),
     MeasureDistance,
     Boolean(BooleanOp),
     DeleteSelected,
@@ -375,6 +377,8 @@ impl<K: GeometryKernel> Editor<K> {
             }),
             Command::Fillet => self.fillet(1.0),
             Command::Chamfer => self.chamfer(1.0),
+            Command::PushPullFace(d) => self.push_pull_face(d),
+            Command::Shell(t) => self.shell(t),
             Command::MeasureDistance => self.measure_distance(),
             Command::Boolean(op) => self.boolean(op),
             Command::DeleteSelected => self.delete_selected(),
@@ -532,6 +536,39 @@ impl<K: GeometryKernel> Editor<K> {
         } else {
             Ok(format!("chamfered {count} object(s)"))
         }
+    }
+
+    fn push_pull_face(&mut self, distance: f64) -> Result<String, String> {
+        let Some((id, face_id)) = self.selected_face else {
+            return Err(String::from(
+                "push/pull requires a selected sub-object face",
+            ));
+        };
+        self.doc
+            .push_pull_face(id, face_id, distance)
+            .map_err(|e| e.to_string())?;
+        Ok(format!("extruded face #{face_id} by {distance:.1} mm"))
+    }
+
+    fn shell(&mut self, thickness: f64) -> Result<String, String> {
+        let Some((id, face_id)) = self.selected_face else {
+            let selected = self.selection();
+            if let Some(&id) = selected.first() {
+                self.doc
+                    .shell(id, 0, thickness)
+                    .map_err(|e| e.to_string())?;
+                return Ok(format!("shelled solid with thickness {thickness:.1} mm"));
+            }
+            return Err(String::from(
+                "shell requires a selected object or open face",
+            ));
+        };
+        self.doc
+            .shell(id, face_id, thickness)
+            .map_err(|e| e.to_string())?;
+        Ok(format!(
+            "shelled solid opening face #{face_id} with thickness {thickness:.1} mm"
+        ))
     }
 
     pub fn measure_distance(&mut self) -> Result<String, String> {
@@ -1197,5 +1234,30 @@ mod tests {
         // Clear selection clears face selection as well
         e.run(Command::ClearSelection);
         assert_eq!(e.selected_face(), None);
+    }
+
+    #[test]
+    fn push_pull_face_and_shell_commands_modify_geometry() {
+        let mut e = editor();
+        e.run(Command::AddBox);
+        let id = e.selection()[0];
+
+        // Pick face #1
+        e.picked(
+            Pick {
+                object: id.index(),
+                face: 1,
+            },
+            false,
+        );
+        assert_eq!(e.selected_face(), Some((id, 1)));
+
+        // Run Push/Pull Face
+        e.run(Command::PushPullFace(10.0));
+        assert!(e.status().contains("extruded face #1"));
+
+        // Run Shell
+        e.run(Command::Shell(2.0));
+        assert!(e.status().contains("shelled solid"));
     }
 }

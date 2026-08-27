@@ -25,6 +25,7 @@
 #include <BRepBuilderAPI_Transform.hxx>
 #include <BRepFilletAPI_MakeChamfer.hxx>
 #include <BRepFilletAPI_MakeFillet.hxx>
+#include <BRepOffsetAPI_MakeThickSolid.hxx>
 #include <BRepMesh_IncrementalMesh.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <BRepPrimAPI_MakeCylinder.hxx>
@@ -335,6 +336,33 @@ int32_t w3d_occt_chamfer(W3dOcctContext *ctx, uint32_t body, double distance, ui
     maker.Build();
     if (!maker.IsDone()) {
       return fail("chamfer operation failed: OpenCASCADE could not construct bevel surfaces");
+    }
+    *out = ctx->store(maker.Shape());
+    return W3D_OCCT_OK;
+  });
+}
+
+int32_t w3d_occt_shell(W3dOcctContext *ctx, uint32_t body, uint32_t face_id, double thickness, uint32_t *out) {
+  if (thickness <= 0.0) {
+    return W3D_OCCT_ERR_DEGENERATE;
+  }
+  const TopoDS_Shape *s = ctx->find(body);
+  if (!s) {
+    return W3D_OCCT_ERR_UNKNOWN_BODY;
+  }
+  return guarded([&] {
+    TopTools_ListOfShape closing_faces;
+    uint32_t current_face = 0;
+    for (TopExp_Explorer e(*s, TopAbs_FACE); e.More(); e.Next()) {
+      if (current_face == face_id) {
+        closing_faces.Append(e.Current());
+      }
+      current_face++;
+    }
+    BRepOffsetAPI_MakeThickSolid maker;
+    maker.MakeThickSolidBySimple(*s, closing_faces, -thickness);
+    if (!maker.IsDone()) {
+      return fail("shell operation failed: OpenCASCADE could not construct hollow solid");
     }
     *out = ctx->store(maker.Shape());
     return W3D_OCCT_OK;

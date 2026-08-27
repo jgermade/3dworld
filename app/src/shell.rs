@@ -428,6 +428,8 @@ fn map_key(key: &Key, modifiers: ModifiersState) -> Option<Command> {
             ("d", false, _) => Some(Command::Boolean(BooleanOp::Difference)),
             ("i", false, _) => Some(Command::Boolean(BooleanOp::Intersection)),
             ("r", false, _) => Some(Command::Fillet),
+            ("p", false, _) => Some(Command::PushPullFace(5.0)),
+            ("h", false, _) => Some(Command::Shell(1.5)),
             _ => None,
         },
         Key::Named(NamedKey::Delete) | Key::Named(NamedKey::Backspace) => {
@@ -776,6 +778,7 @@ fn chrome<K: GeometryKernel + Default>(
                 ui.group(|ui| {
                     ui.label("Features");
                     ui.horizontal(|ui| {
+                        let face_selected = editor.selected_face().is_some();
                         if ui
                             .add_enabled(one_or_more, egui::Button::new("Fillet [R]"))
                             .clicked()
@@ -787,6 +790,18 @@ fn chrome<K: GeometryKernel + Default>(
                             .clicked()
                         {
                             execute_command(editor, Command::Chamfer);
+                        }
+                        if ui
+                            .add_enabled(face_selected, egui::Button::new("Push/Pull [P]"))
+                            .clicked()
+                        {
+                            execute_command(editor, Command::PushPullFace(5.0));
+                        }
+                        if ui
+                            .add_enabled(one_or_more, egui::Button::new("Shell [H]"))
+                            .clicked()
+                        {
+                            execute_command(editor, Command::Shell(1.5));
                         }
                     });
                 });
@@ -1131,6 +1146,12 @@ fn chrome<K: GeometryKernel + Default>(
                         }
                         if ui.button("Chamfer [C]").clicked() {
                             execute_command(editor, Command::Chamfer);
+                        }
+                        if ui.button("Push/Pull [P]").clicked() {
+                            execute_command(editor, Command::PushPullFace(5.0));
+                        }
+                        if ui.button("Shell [H]").clicked() {
+                            execute_command(editor, Command::Shell(1.5));
                         }
                     });
                 });

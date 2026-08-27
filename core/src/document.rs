@@ -327,6 +327,28 @@ impl<K: GeometryKernel> Document<K> {
         Ok(())
     }
 
+    pub fn shell(&mut self, id: NodeId, face_id: u32, thickness: f64) -> Result<()> {
+        let before = self.node(id)?.clone();
+        let body = self.kernel.shell(before.body, face_id, thickness)?;
+        let body = self.track(body);
+        let after = Node {
+            body,
+            ..before.clone()
+        };
+        self.replace(id, "Shell", before, after);
+        Ok(())
+    }
+
+    pub fn push_pull_face(&mut self, id: NodeId, face_id: u32, distance: f64) -> Result<()> {
+        let mesh = self.mesh(id)?.clone();
+        let metrics = mesh
+            .face_metrics(face_id)
+            .ok_or_else(|| KernelError::Failed(format!("face #{face_id} not found on body")))?;
+        let translation = metrics.normal * distance;
+        let m = Mat4::from_translation(translation);
+        self.transform(id, &m)
+    }
+
     pub fn rename(&mut self, id: NodeId, name: impl Into<String>) -> Result<()> {
         let before = self.node(id)?.clone();
         let after = Node {

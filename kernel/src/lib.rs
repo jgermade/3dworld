@@ -309,6 +309,9 @@ pub trait GeometryKernel {
     /// Extrudes a 2D planar profile linearly along +Z by `distance`.
     fn extrude(&mut self, profile: &Profile, distance: f64) -> Result<Body>;
 
+    /// Creates a hollow/thin-walled solid by removing `face_id` with `thickness`.
+    fn shell(&mut self, body: Body, face_id: u32, thickness: f64) -> Result<Body>;
+
     fn topology(&self, body: Body) -> Result<Topology>;
 
     fn bounds(&self, body: Body) -> Result<Aabb>;
