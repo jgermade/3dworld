@@ -53,3 +53,32 @@ fn iteration_is_in_index_order_and_skips_holes() {
     assert_eq!(seen, vec![0, 2, 4]);
     assert_eq!(arena.len(), 3);
 }
+
+#[test]
+fn compaction_removes_tombstones_and_reindexes_surviving_items() {
+    let mut arena = Arena::new();
+    let ids: Vec<_> = (0..5).map(|i| arena.insert(Thing(i))).collect();
+    arena.remove(ids[1]);
+    arena.remove(ids[3]);
+
+    assert_eq!(arena.slot_count(), 5);
+    assert_eq!(arena.len(), 3);
+
+    let id_map = arena.compact();
+
+    assert_eq!(arena.slot_count(), 3);
+    assert_eq!(arena.len(), 3);
+
+    // Old IDs [0, 2, 4] mapped to new contiguous indices [0, 1, 2]
+    let new_id0 = id_map.get(&ids[0]).copied().unwrap();
+    let new_id2 = id_map.get(&ids[2]).copied().unwrap();
+    let new_id4 = id_map.get(&ids[4]).copied().unwrap();
+
+    assert_eq!(new_id0.index(), 0);
+    assert_eq!(new_id2.index(), 1);
+    assert_eq!(new_id4.index(), 2);
+
+    assert_eq!(arena.get(new_id0), Some(&Thing(0)));
+    assert_eq!(arena.get(new_id2), Some(&Thing(2)));
+    assert_eq!(arena.get(new_id4), Some(&Thing(4)));
+}

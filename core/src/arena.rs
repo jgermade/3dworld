@@ -203,4 +203,32 @@ impl<T> Arena<T> {
                 .map(|v| (Id::new(i as u32, slot.generation), v))
         })
     }
+
+    /// Compact the arena by removing empty (tombstone) slots and re-indexing live items.
+    ///
+    /// Returns a map from `old_id -> new_id` for all surviving items so callers can
+    /// update external references (e.g. selection sets).
+    ///
+    /// # Invariant
+    /// Must only be invoked when history/undo is empty, because re-indexing alters
+    /// slot indices which breaks past undo handles.
+    pub fn compact(&mut self) -> std::collections::BTreeMap<Id<T>, Id<T>> {
+        let mut new_slots = Vec::with_capacity(self.len());
+        let mut id_map = std::collections::BTreeMap::new();
+
+        for (old_idx, slot) in self.slots.drain(..).enumerate() {
+            if let Some(value) = slot.value {
+                let new_idx = new_slots.len() as u32;
+                let old_id = Id::new(old_idx as u32, slot.generation);
+                let new_id = Id::new(new_idx, slot.generation);
+                new_slots.push(Slot {
+                    generation: slot.generation,
+                    value: Some(value),
+                });
+                id_map.insert(old_id, new_id);
+            }
+        }
+        self.slots = new_slots;
+        id_map
+    }
 }

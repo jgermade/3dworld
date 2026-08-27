@@ -214,6 +214,27 @@ int32_t w3d_occt_boolean(W3dOcctContext *ctx, int32_t op, uint32_t a, uint32_t b
   });
 }
 
+static bool is_rigid_plus_uniform_scale(const double *m) {
+  // m is 12 doubles: m[0..3] is row 0, m[4..7] is row 1, m[8..11] is row 2
+  double c0[3] = {m[0], m[4], m[8]};
+  double c1[3] = {m[1], m[5], m[9]};
+  double c2[3] = {m[2], m[6], m[10]};
+
+  double l0_sq = c0[0] * c0[0] + c0[1] * c0[1] + c0[2] * c0[2];
+  double l1_sq = c1[0] * c1[0] + c1[1] * c1[1] + c1[2] * c1[2];
+  double l2_sq = c2[0] * c2[0] + c2[1] * c2[1] + c2[2] * c2[2];
+
+  constexpr double tol = 1e-5;
+  if (std::abs(l0_sq - l1_sq) > tol || std::abs(l1_sq - l2_sq) > tol) {
+    return false;
+  }
+  double dot01 = c0[0] * c1[0] + c0[1] * c1[1] + c0[2] * c1[2];
+  double dot12 = c1[0] * c2[0] + c1[1] * c2[1] + c1[2] * c2[2];
+  double dot20 = c2[0] * c0[0] + c2[1] * c0[1] + c2[2] * c0[2];
+
+  return std::abs(dot01) <= tol && std::abs(dot12) <= tol && std::abs(dot20) <= tol;
+}
+
 int32_t w3d_occt_transform(W3dOcctContext *ctx, uint32_t body, const double *m34,
                            uint32_t *out) {
   const TopoDS_Shape *s = ctx->find(body);
@@ -222,25 +243,28 @@ int32_t w3d_occt_transform(W3dOcctContext *ctx, uint32_t body, const double *m34
   }
   return guarded([&] {
     const TopoDS_Shape shape = *s;
-    // gp_Trsf is rigid-plus-uniform-scale and refuses anything else. Try it
-    // first because it keeps the geometry's type; fall back to gp_GTrsf, which
-    // accepts any affine at the cost of rebuilding surfaces as B-splines.
-    try {
-      gp_Trsf t;
-      t.SetValues(m34[0], m34[1], m34[2], m34[3], m34[4], m34[5], m34[6],
-                  m34[7], m34[8], m34[9], m34[10], m34[11]);
-      *out = ctx->store(BRepBuilderAPI_Transform(shape, t, Standard_True).Shape());
-      return W3D_OCCT_OK;
-    } catch (const Standard_Failure &) {
-      gp_GTrsf g;
-      for (int row = 0; row < 3; ++row) {
-        for (int col = 0; col < 4; ++col) {
-          g.SetValue(row + 1, col + 1, m34[row * 4 + col]);
-        }
+    // gp_Trsf is rigid-plus-uniform-scale and silently normalises non-uniform
+    // scales without throwing. Detect rigid-plus-uniform scale explicitly first;
+    // fall back to gp_GTrsf for non-uniform scaling or shear.
+    if (is_rigid_plus_uniform_scale(m34)) {
+      try {
+        gp_Trsf t;
+        t.SetValues(m34[0], m34[1], m34[2], m34[3], m34[4], m34[5], m34[6],
+                    m34[7], m34[8], m34[9], m34[10], m34[11]);
+        *out = ctx->store(BRepBuilderAPI_Transform(shape, t, Standard_True).Shape());
+        return W3D_OCCT_OK;
+      } catch (const Standard_Failure &) {
+        // Fall through to GTransform if gp_Trsf rejected construction
       }
-      *out = ctx->store(BRepBuilderAPI_GTransform(shape, g, Standard_True).Shape());
-      return W3D_OCCT_OK;
     }
+    gp_GTrsf g;
+    for (int row = 0; row < 3; ++row) {
+      for (int col = 0; col < 4; ++col) {
+        g.SetValue(row + 1, col + 1, m34[row * 4 + col]);
+      }
+    }
+    *out = ctx->store(BRepBuilderAPI_GTransform(shape, g, Standard_True).Shape());
+    return W3D_OCCT_OK;
   });
 }
 

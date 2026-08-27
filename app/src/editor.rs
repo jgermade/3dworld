@@ -15,7 +15,7 @@ use w3d_render::{Camera, Pick};
 
 /// A semantic action. The shell decides which key or button produces one; this
 /// crate decides what it means.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Command {
     AddBox,
     AddSphere,
@@ -28,19 +28,15 @@ pub enum Command {
     ClearSelection,
     SelectAll,
     ZoomToFit,
-    /// Writes to the path the document was last saved to or opened from.
-    /// Without one, the shell has to ask — which it does by treating this as
-    /// `SaveAs` with a default name.
     Save,
-    /// Writes the selection — or everything, when nothing is selected — as a
-    /// STEP file beside the document.
-    ///
-    /// There is deliberately no `ImportStep` here. Exporting can invent a
-    /// name from the document's own; importing needs a file that already
-    /// exists and there is no file dialogue to name one with, so import is a
-    /// command-line option until there is. A menu item that cannot be
-    /// clicked is worse than one that is not there.
+    SaveAs,
+    Open,
+    ImportStep,
     ExportStep,
+    OpenPath(PathBuf),
+    SaveAsPath(PathBuf),
+    ImportStepPath(PathBuf),
+    ExportStepPath(PathBuf),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -59,6 +55,7 @@ pub enum Input {
         y: f64,
         button: Button,
         additive: bool,
+        ctrl: bool,
     },
     Move {
         x: f64,
@@ -97,6 +94,7 @@ struct Drag {
     last: (f64, f64),
     moved: bool,
     additive: bool,
+    ctrl: bool,
 }
 
 pub struct Editor<K: GeometryKernel> {
@@ -157,6 +155,7 @@ impl<K: GeometryKernel> Editor<K> {
                 y,
                 button,
                 additive,
+                ctrl,
             } => {
                 self.drag = Some(Drag {
                     button,
@@ -164,6 +163,7 @@ impl<K: GeometryKernel> Editor<K> {
                     last: (x, y),
                     moved: false,
                     additive,
+                    ctrl,
                 });
                 Reaction::Nothing
             }
@@ -178,9 +178,18 @@ impl<K: GeometryKernel> Editor<K> {
                     drag.moved = true;
                 }
                 match drag.button {
-                    // Dragging right turns the model right, which means the
-                    // camera goes the other way.
-                    Button::Left => self.camera.orbit(-dx * 0.01, dy * 0.01),
+                    Button::Left => {
+                        if drag.additive {
+                            // Shift + Left Drag = Pan
+                            self.camera.pan(dx, dy, height);
+                        } else if drag.ctrl {
+                            // Ctrl/Cmd + Left Drag = Dolly/Zoom
+                            self.camera.dolly((dy * -0.01).exp());
+                        } else {
+                            // Plain Left Drag = Orbit
+                            self.camera.orbit(-dx * 0.01, dy * 0.01);
+                        }
+                    }
                     Button::Middle => self.camera.pan(dx, dy, height),
                 }
                 Reaction::Redraw
@@ -251,7 +260,10 @@ impl<K: GeometryKernel> Editor<K> {
 
     // ---- commands -----------------------------------------------------
 
-    pub fn run(&mut self, command: Command) {
+    pub fn run(&mut self, command: Command)
+    where
+        K: Default,
+    {
         let outcome = match command {
             Command::AddBox => self.add("Box", |doc, name| {
                 doc.add_box(name, Vec3::new(20.0, 20.0, 20.0))
@@ -283,7 +295,14 @@ impl<K: GeometryKernel> Editor<K> {
                 Ok(format!("selected {}", ids.len()))
             }
             Command::Save => self.save(None),
+            Command::SaveAs => Ok(String::from("save as requested")),
+            Command::Open => Ok(String::from("open requested")),
+            Command::ImportStep => Ok(String::from("import step requested")),
             Command::ExportStep => self.export_step(None),
+            Command::OpenPath(path) => self.open(path, K::default()),
+            Command::SaveAsPath(path) => self.save(Some(path)),
+            Command::ImportStepPath(path) => self.import_step(path),
+            Command::ExportStepPath(path) => self.export_step(Some(path)),
             Command::ZoomToFit => {
                 let bounds = self.doc.visible_bounds();
                 if bounds.is_empty() {
@@ -536,6 +555,7 @@ mod tests {
             y: 100.0,
             button: Button::Left,
             additive: false,
+            ctrl: false,
         });
         assert_eq!(
             e.input(Input::Move { x: 140.0, y: 130.0 }),
@@ -558,6 +578,7 @@ mod tests {
             y: 100.0,
             button: Button::Left,
             additive: false,
+            ctrl: false,
         });
         // Inside the slop: a hand shakes, and a click is still a click.
         e.input(Input::Move { x: 101.0, y: 101.0 });
@@ -583,6 +604,7 @@ mod tests {
             y: 10.0,
             button: Button::Middle,
             additive: false,
+            ctrl: false,
         });
         e.input(Input::Move { x: 60.0, y: 10.0 });
         assert_ne!(e.camera().target, before.target);
@@ -592,6 +614,50 @@ mod tests {
                 button: Button::Middle
             }),
             Reaction::Nothing
+        );
+    }
+
+    #[test]
+    fn shift_left_drag_pans_camera() {
+        let mut e = editor();
+        let before = *e.camera();
+        e.input(Input::Down {
+            x: 10.0,
+            y: 10.0,
+            button: Button::Left,
+            additive: true,
+            ctrl: false,
+        });
+        e.input(Input::Move { x: 60.0, y: 10.0 });
+        assert_ne!(e.camera().target, before.target);
+        assert_eq!(
+            e.camera().yaw,
+            before.yaw,
+            "shift drag pans and does not orbit"
+        );
+    }
+
+    #[test]
+    fn ctrl_left_drag_zooms_camera() {
+        let mut e = editor();
+        let before = *e.camera();
+        e.input(Input::Down {
+            x: 10.0,
+            y: 10.0,
+            button: Button::Left,
+            additive: false,
+            ctrl: true,
+        });
+        e.input(Input::Move { x: 10.0, y: 60.0 });
+        assert_ne!(
+            e.camera().distance,
+            before.distance,
+            "ctrl drag dollies camera"
+        );
+        assert_eq!(
+            e.camera().target,
+            before.target,
+            "ctrl drag does not pan target"
         );
     }
 

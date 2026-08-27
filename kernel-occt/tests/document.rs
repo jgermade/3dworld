@@ -122,3 +122,52 @@ fn the_document_releases_opencascade_shapes_it_no_longer_needs() {
     assert_eq!(d.collect_garbage(), 2);
     assert_eq!(d.kernel().live_bodies(), before + 1);
 }
+
+#[test]
+fn non_uniform_scaling_exercises_gtrsf_and_produces_correct_bounds_and_topology() {
+    let mut d = Document::new(OcctKernel::new());
+    let id = d.add_box("Box", Vec3::new(10.0, 10.0, 10.0)).unwrap();
+    let before_bounds = d.bounds(id).unwrap();
+
+    // Scale X by 2.0, Y by 0.5, Z by 3.0 (non-uniform affine scale matrix)
+    let non_uniform_scale = Mat4::from_scale(Vec3::new(2.0, 0.5, 3.0));
+
+    d.transform(id, &non_uniform_scale).unwrap();
+    let after_bounds = d.bounds(id).unwrap();
+
+    let expected_size = Vec3::new(
+        before_bounds.size().x * 2.0,
+        before_bounds.size().y * 0.5,
+        before_bounds.size().z * 3.0,
+    );
+
+    assert!(
+        (after_bounds.size().x - expected_size.x).abs() < 1e-4,
+        "x size expected {}, got {}",
+        expected_size.x,
+        after_bounds.size().x
+    );
+    assert!(
+        (after_bounds.size().y - expected_size.y).abs() < 1e-4,
+        "y size expected {}, got {}",
+        expected_size.y,
+        after_bounds.size().y
+    );
+    assert!(
+        (after_bounds.size().z - expected_size.z).abs() < 1e-4,
+        "z size expected {}, got {}",
+        expected_size.z,
+        after_bounds.size().z
+    );
+
+    // Topology must remain a valid box cuboid
+    let topo = d.topology(id).unwrap();
+    assert_eq!(
+        (topo.solids, topo.faces, topo.edges, topo.vertices),
+        (1, 6, 12, 8)
+    );
+
+    // Tessellation must work cleanly
+    let mesh = d.mesh(id).unwrap();
+    assert!(mesh.triangle_count() > 0);
+}

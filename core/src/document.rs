@@ -26,6 +26,7 @@ pub struct Node {
 #[derive(Debug, Clone, PartialEq)]
 pub enum DocumentError {
     UnknownNode(NodeId),
+    HistoryNotEmpty,
     Kernel(KernelError),
 }
 
@@ -33,6 +34,7 @@ impl core::fmt::Display for DocumentError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::UnknownNode(id) => write!(f, "no such node: {id:?}"),
+            Self::HistoryNotEmpty => write!(f, "cannot compact arena while history is non-empty"),
             Self::Kernel(e) => write!(f, "{e}"),
         }
     }
@@ -415,6 +417,36 @@ impl<K: GeometryKernel> Document<K> {
     /// back.
     pub fn clear_history(&mut self) {
         self.history.clear();
+    }
+
+    /// Compacts the document's node arena by removing dead tombstone slots and
+    /// re-indexing live nodes.
+    ///
+    /// # Errors
+    /// Returns [`DocumentError::HistoryNotEmpty`] if history is not empty.
+    /// History must be cleared via [`Document::clear_history`] prior to compaction,
+    /// because re-indexing slot handles invalidates history undo handles.
+    ///
+    /// Returns the number of freed slots.
+    pub fn compact(&mut self) -> Result<usize> {
+        if self.history.can_undo() || self.history.can_redo() {
+            return Err(DocumentError::HistoryNotEmpty);
+        }
+        let freed_slots = self.nodes.slot_count() - self.nodes.len();
+        let id_map = self.nodes.compact();
+
+        // Remap selection set
+        let mut new_selection = Vec::with_capacity(self.selection.len());
+        for old_id in &self.selection {
+            if let Some(new_id) = id_map.get(old_id) {
+                new_selection.push(*new_id);
+            }
+        }
+        new_selection.sort_unstable();
+        new_selection.dedup();
+        self.selection = new_selection;
+
+        Ok(freed_slots)
     }
 
     // ---- selection ----------------------------------------------------

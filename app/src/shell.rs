@@ -49,7 +49,7 @@ pub struct Options {
     pub save_as: Option<std::path::PathBuf>,
 }
 
-struct Live<K: GeometryKernel> {
+struct Live<K: GeometryKernel + Default> {
     window: Arc<Window>,
     gpu: Gpu,
     surface: wgpu::Surface<'static>,
@@ -71,14 +71,14 @@ struct Live<K: GeometryKernel> {
     frames: u32,
 }
 
-pub struct Shell<K: GeometryKernel> {
+pub struct Shell<K: GeometryKernel + Default> {
     options: Options,
     kernel: Option<K>,
     live: Option<Live<K>>,
     pub exit_code: i32,
 }
 
-impl<K: GeometryKernel> Shell<K> {
+impl<K: GeometryKernel + Default> Shell<K> {
     pub fn new(kernel: K, options: Options) -> Self {
         Self {
             options,
@@ -211,7 +211,7 @@ impl<K: GeometryKernel + Default> ApplicationHandler for Shell<K> {
             }
         }
         for command in &self.options.startup {
-            editor.run(*command);
+            execute_command(&mut editor, command.clone());
         }
         if let Some(path) = self.options.save_as.clone() {
             match editor.save(Some(path)) {
@@ -306,6 +306,7 @@ impl<K: GeometryKernel + Default> ApplicationHandler for Shell<K> {
                             y,
                             button,
                             additive: live.modifiers.shift_key(),
+                            ctrl: live.modifiers.control_key() || live.modifiers.super_key(),
                         })
                     }
                     ElementState::Released => live.editor.input(Input::Up { button }),
@@ -330,12 +331,60 @@ impl<K: GeometryKernel + Default> ApplicationHandler for Shell<K> {
             }
             WindowEvent::KeyboardInput { event, .. } if event.state.is_pressed() => {
                 if let Some(command) = map_key(&event.logical_key, live.modifiers) {
-                    live.editor.run(command);
+                    execute_command(&mut live.editor, command);
                     live.window.request_redraw();
                 }
             }
             _ => {}
         }
+    }
+}
+
+fn execute_command<K: GeometryKernel + Default>(editor: &mut Editor<K>, command: Command) {
+    match command {
+        Command::Open => {
+            if let Some(path) = rfd::FileDialog::new()
+                .add_filter("3D World Document (*.w3d)", &["w3d"])
+                .pick_file()
+            {
+                editor.run(Command::OpenPath(path));
+            }
+        }
+        Command::SaveAs => {
+            if let Some(path) = rfd::FileDialog::new()
+                .add_filter("3D World Document (*.w3d)", &["w3d"])
+                .save_file()
+            {
+                editor.run(Command::SaveAsPath(path));
+            }
+        }
+        Command::Save => {
+            if editor.path().is_some() {
+                editor.run(Command::Save);
+            } else if let Some(path) = rfd::FileDialog::new()
+                .add_filter("3D World Document (*.w3d)", &["w3d"])
+                .save_file()
+            {
+                editor.run(Command::SaveAsPath(path));
+            }
+        }
+        Command::ImportStep => {
+            if let Some(path) = rfd::FileDialog::new()
+                .add_filter("STEP File (*.step, *.stp)", &["step", "stp"])
+                .pick_file()
+            {
+                editor.run(Command::ImportStepPath(path));
+            }
+        }
+        Command::ExportStep => {
+            if let Some(path) = rfd::FileDialog::new()
+                .add_filter("STEP File (*.step, *.stp)", &["step", "stp"])
+                .save_file()
+            {
+                editor.run(Command::ExportStepPath(path));
+            }
+        }
+        cmd => editor.run(cmd),
     }
 }
 
@@ -348,17 +397,22 @@ fn map_button(button: MouseButton) -> Option<Button> {
 }
 
 fn map_key(key: &Key, modifiers: ModifiersState) -> Option<Command> {
+    let ctrl_or_cmd = modifiers.control_key() || modifiers.super_key();
+    let shift = modifiers.shift_key();
     match key {
-        Key::Character(c) => match (c.as_str(), modifiers.control_key(), modifiers.shift_key()) {
+        Key::Character(c) => match (c.as_str().to_lowercase().as_str(), ctrl_or_cmd, shift) {
             ("z", true, false) => Some(Command::Undo),
             ("z", true, true) | ("y", true, _) => Some(Command::Redo),
+            ("o", true, _) => Some(Command::Open),
+            ("s", true, true) => Some(Command::SaveAs),
+            ("s", true, false) => Some(Command::Save),
+            ("i", true, _) => Some(Command::ImportStep),
+            ("e", true, _) => Some(Command::ExportStep),
             ("b", false, _) => Some(Command::AddBox),
             ("s", false, _) => Some(Command::AddSphere),
             ("c", false, _) => Some(Command::AddCylinder),
             ("f", false, _) => Some(Command::ZoomToFit),
             ("a", true, _) => Some(Command::SelectAll),
-            ("s", true, _) => Some(Command::Save),
-            ("e", true, _) => Some(Command::ExportStep),
             ("u", false, _) => Some(Command::Boolean(BooleanOp::Union)),
             ("d", false, _) => Some(Command::Boolean(BooleanOp::Difference)),
             ("i", false, _) => Some(Command::Boolean(BooleanOp::Intersection)),
@@ -373,7 +427,7 @@ fn map_key(key: &Key, modifiers: ModifiersState) -> Option<Command> {
     }
 }
 
-impl<K: GeometryKernel> Live<K> {
+impl<K: GeometryKernel + Default> Live<K> {
     fn resize(&mut self, width: u32, height: u32) {
         let (width, height) = (width.max(1), height.max(1));
         if (width, height) == (self.config.width, self.config.height) {
@@ -438,7 +492,13 @@ impl<K: GeometryKernel> Live<K> {
         let raw = self.egui.take_egui_input(&self.window);
         let context = self.egui.egui_ctx().clone();
         let output = context.run_ui(raw, |ui| {
-            chrome(ui, &mut self.editor, &self.scene, &mut self.renderer)
+            chrome(
+                ui,
+                &mut self.editor,
+                &self.scene,
+                &mut self.renderer,
+                self.modifiers,
+            )
         });
         self.egui
             .handle_platform_output(&self.window, output.platform_output);
@@ -616,11 +676,12 @@ impl<K: GeometryKernel> Live<K> {
 
 /// The chrome. Deliberately plain — it is a list, some buttons and a status
 /// line, and the viewport is the product.
-fn chrome<K: GeometryKernel>(
+fn chrome<K: GeometryKernel + Default>(
     root: &mut egui::Ui,
     editor: &mut Editor<K>,
     scene: &Scene,
     renderer: &mut Renderer,
+    modifiers: ModifiersState,
 ) {
     egui::Panel::left("tree")
         .default_size(240.0)
@@ -629,14 +690,14 @@ fn chrome<K: GeometryKernel>(
             ui.separator();
 
             ui.horizontal_wrapped(|ui| {
-                if ui.button("Box").clicked() {
-                    editor.run(Command::AddBox);
+                if ui.button("Box [B]").clicked() {
+                    execute_command(editor, Command::AddBox);
                 }
-                if ui.button("Sphere").clicked() {
-                    editor.run(Command::AddSphere);
+                if ui.button("Sphere [S]").clicked() {
+                    execute_command(editor, Command::AddSphere);
                 }
-                if ui.button("Cylinder").clicked() {
-                    editor.run(Command::AddCylinder);
+                if ui.button("Cylinder [C]").clicked() {
+                    execute_command(editor, Command::AddCylinder);
                 }
             });
             // Words, not set-theory glyphs. `∪ − ∩` are not in egui's default
@@ -644,43 +705,72 @@ fn chrome<K: GeometryKernel>(
             // than verbose — it was only visible by looking at a screenshot.
             ui.horizontal_wrapped(|ui| {
                 let two = editor.selection().len() == 2;
-                if ui.add_enabled(two, egui::Button::new("Unite")).clicked() {
-                    editor.run(Command::Boolean(BooleanOp::Union));
-                }
-                if ui.add_enabled(two, egui::Button::new("Subtract")).clicked() {
-                    editor.run(Command::Boolean(BooleanOp::Difference));
-                }
                 if ui
-                    .add_enabled(two, egui::Button::new("Intersect"))
+                    .add_enabled(two, egui::Button::new("Unite [U]"))
                     .clicked()
                 {
-                    editor.run(Command::Boolean(BooleanOp::Intersection));
+                    execute_command(editor, Command::Boolean(BooleanOp::Union));
+                }
+                if ui
+                    .add_enabled(two, egui::Button::new("Subtract [D]"))
+                    .clicked()
+                {
+                    execute_command(editor, Command::Boolean(BooleanOp::Difference));
+                }
+                if ui
+                    .add_enabled(two, egui::Button::new("Intersect [I]"))
+                    .clicked()
+                {
+                    execute_command(editor, Command::Boolean(BooleanOp::Intersection));
                 }
                 let one_or_more = !editor.selection().is_empty();
                 if ui
-                    .add_enabled(one_or_more, egui::Button::new("Fillet"))
+                    .add_enabled(one_or_more, egui::Button::new("Fillet [R]"))
                     .clicked()
                 {
-                    editor.run(Command::Fillet);
+                    execute_command(editor, Command::Fillet);
                 }
             });
             ui.horizontal_wrapped(|ui| {
+                if ui.button("Open...").clicked() {
+                    execute_command(editor, Command::Open);
+                }
                 if ui.button("Save").clicked() {
-                    editor.run(Command::Save);
+                    execute_command(editor, Command::Save);
                 }
-                if ui.button("Export STEP").clicked() {
-                    editor.run(Command::ExportStep);
+                if ui.button("Save As...").clicked() {
+                    execute_command(editor, Command::SaveAs);
                 }
+                if ui.button("Import STEP...").clicked() {
+                    execute_command(editor, Command::ImportStep);
+                }
+                if ui.button("Export STEP...").clicked() {
+                    execute_command(editor, Command::ExportStep);
+                }
+            });
+            ui.horizontal_wrapped(|ui| {
                 if ui.button("Undo").clicked() {
-                    editor.run(Command::Undo);
+                    execute_command(editor, Command::Undo);
                 }
                 if ui.button("Redo").clicked() {
-                    editor.run(Command::Redo);
+                    execute_command(editor, Command::Redo);
                 }
-                if ui.button("Fit").clicked() {
-                    editor.run(Command::ZoomToFit);
+                if ui.button("Fit [F]").clicked() {
+                    execute_command(editor, Command::ZoomToFit);
                 }
                 ui.checkbox(&mut renderer.show_grid, "Grid");
+            });
+
+            ui.collapsing("Shortcuts & Modifiers", |ui| {
+                ui.label("Left Drag: Orbit");
+                ui.label("Shift + Left Drag / Middle Drag: Pan");
+                ui.label("Ctrl/Cmd + Left Drag / Scroll: Zoom");
+                ui.label("Shift + Click: Toggle Selection");
+                ui.label("Ctrl + O: Open");
+                ui.label("Ctrl + S / Shift+S: Save / Save As");
+                ui.label("Ctrl + I / E: Import / Export STEP");
+                ui.label("B / S / C: Primitives");
+                ui.label("U / D / I / R: Boolean / Fillet");
             });
 
             ui.separator();
@@ -708,7 +798,26 @@ fn chrome<K: GeometryKernel>(
 
     egui::Panel::bottom("status").show(root, |ui| {
         ui.horizontal(|ui| {
-            ui.label(editor.status());
+            let shift = modifiers.shift_key();
+            let ctrl = modifiers.control_key() || modifiers.super_key();
+            let alt = modifiers.alt_key();
+
+            let mod_str = if shift || ctrl || alt {
+                format!(
+                    " · [{}{}{}]",
+                    if shift {
+                        "SHIFT: Pan/Multi-Select "
+                    } else {
+                        ""
+                    },
+                    if ctrl { "CTRL: Zoom " } else { "" },
+                    if alt { "ALT " } else { "" }
+                )
+            } else {
+                String::new()
+            };
+
+            ui.label(format!("{}{mod_str}", editor.status()));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let bodies = editor.document().len();
                 ui.label(format!(

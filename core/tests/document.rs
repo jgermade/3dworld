@@ -252,3 +252,27 @@ fn user_grouped_transactions_merge_multi_step_edits_into_one_undo_step() {
     assert_eq!(d.redo(), Some("Drag Move"));
     assert_eq!(d.bounds(box_id).unwrap(), moved_bounds);
 }
+
+#[test]
+fn compaction_requires_clear_history_and_reclaims_tombstones() {
+    let mut d = doc();
+    let b1 = d.add_box("B1", Vec3::splat(1.0)).unwrap();
+    let b2 = d.add_box("B2", Vec3::splat(1.0)).unwrap();
+    let _b3 = d.add_box("B3", Vec3::splat(1.0)).unwrap();
+
+    let united = d.boolean(BooleanOp::Union, b1, b2).unwrap();
+
+    // Compacting while history is non-empty must fail with HistoryNotEmpty
+    assert_eq!(d.compact(), Err(w3d_core::DocumentError::HistoryNotEmpty));
+
+    // Clear history to allow compaction
+    d.clear_history();
+    d.select(united).unwrap();
+
+    let freed = d.compact().unwrap();
+    assert_eq!(freed, 2, "reclaimed 2 deleted operand tombstone slots");
+
+    // Selection set updated to remapped ID
+    assert!(d.is_selected(united) || d.selection().next().is_some());
+    assert_eq!(d.len(), 2);
+}

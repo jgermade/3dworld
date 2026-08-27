@@ -6,7 +6,7 @@ WASM_TARGET := wasm32-unknown-unknown
 
 ## Everything CI runs, and everything a contributor should run before pushing.
 ## Needs no setup: the OpenCASCADE backend is not a default workspace member.
-test: check clippy fmt-check licences
+test: check clippy fmt-check licences notice-check
 	$(CARGO) test
 
 ## The implementation compiles, and so does every crate on its own.
@@ -50,9 +50,18 @@ occt-headers:
 ## AGENTS.md has required since the licence was settled and nothing checked
 ## until there was a check. Reads both targets, because the dependency sets
 ## differ. Carries its own negative controls and runs them first.
-.PHONY: licences
+.PHONY: licences notice notice-check benchmark-step
 licences:
 	python3 tools/licences.py
+
+notice:
+	python3 tools/notice.py
+
+notice-check:
+	python3 tools/notice.py --check
+
+benchmark-step:
+	python3 tools/benchmark_step.py
 
 clippy:
 	$(CARGO) clippy --all-targets -- -D warnings
@@ -93,13 +102,23 @@ tree. Check render/Cargo.toml's wgpu features."; exit 1)
 ## Output goes to web/dist/, which is gitignored. Nothing built is committed.
 WASM_OUT := web/dist
 
-.PHONY: web web-serve web-test app app-test
+.PHONY: web web-opt web-serve web-test app app-test
 web:
 	rustup target add $(WASM_TARGET)
 	$(CARGO) build -p w3d-web --release --target $(WASM_TARGET)
 	wasm-bindgen --target web --no-typescript --out-dir $(WASM_OUT) \
 	    target/$(WASM_TARGET)/release/w3d_web.wasm
-	@ls -l $(WASM_OUT)/w3d_web_bg.wasm | awk '{printf "wasm: %.2f MiB\n", $$5/1048576}'
+	@ls -l $(WASM_OUT)/w3d_web_bg.wasm | awk '{printf "wasm:     %.2f MiB\n", $$5/1048576}'
+	@gzip -9 -c $(WASM_OUT)/w3d_web_bg.wasm | wc -c | awk '{printf "wasm.gz:  %.2f MiB\n", $$1/1048576}'
+	@brotli -9 -c $(WASM_OUT)/w3d_web_bg.wasm 2>/dev/null | wc -c | awk '{printf "wasm.br:  %.2f MiB\n", $$1/1048576}' || true
+
+web-opt: web
+	@which wasm-opt >/dev/null 2>&1 && ( \
+	    wasm-opt -O3 $(WASM_OUT)/w3d_web_bg.wasm -o $(WASM_OUT)/w3d_web_bg.opt.wasm && \
+	    ls -l $(WASM_OUT)/w3d_web_bg.opt.wasm | awk '{printf "wasm.opt:    %.2f MiB\n", $$5/1048576}' && \
+	    gzip -9 -c $(WASM_OUT)/w3d_web_bg.opt.wasm | wc -c | awk '{printf "wasm.opt.gz: %.2f MiB\n", $$1/1048576}' && \
+	    (brotli -9 -c $(WASM_OUT)/w3d_web_bg.opt.wasm 2>/dev/null | wc -c | awk '{printf "wasm.opt.br: %.2f MiB\n", $$1/1048576}' || true) \
+	) || echo "wasm-opt not installed on host; reported raw & compressed wasm metrics above"
 
 ## Serves web/ with COOP/COEP. `--no-isolation` omits them, which is the case
 ## worth seeing: the loader must degrade visibly rather than fail obscurely.

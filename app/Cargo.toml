@@ -27,6 +27,7 @@ egui-wgpu = "0.36"
 egui-winit = { version = "0.36", default-features = false, features = ["wayland", "x11"] }
 winit = "0.30"
 pollster = "0.4"
+rfd = "0.15"
 wgpu = { version = "30", default-features = false, features = [
     "std",
     "wgsl",
