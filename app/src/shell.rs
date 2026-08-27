@@ -465,7 +465,10 @@ impl<K: GeometryKernel + Default> Live<K> {
             Reaction::Redraw => self.window.request_redraw(),
             Reaction::Pick { x, y, additive } => {
                 let selected = self.editor.selection();
-                let objects = self.scene.objects(self.editor.document(), &selected);
+                let selected_face = self.editor.selected_face();
+                let objects = self
+                    .scene
+                    .objects(self.editor.document(), &selected, selected_face);
                 let vp = viewport(&self.gpu, &self.config);
                 let pending = self
                     .renderer
@@ -547,7 +550,10 @@ impl<K: GeometryKernel + Default> Live<K> {
         let depth_view = self.depth.create_view(&Default::default());
 
         let selected = self.editor.selection();
-        let objects = self.scene.objects(self.editor.document(), &selected);
+        let selected_face = self.editor.selected_face();
+        let objects = self
+            .scene
+            .objects(self.editor.document(), &selected, selected_face);
         let vp = viewport(&self.gpu, &self.config);
         self.renderer.prepare(&vp, self.editor.camera(), &objects);
 
@@ -1069,6 +1075,64 @@ fn chrome<K: GeometryKernel + Default>(
                             Command::TranslateSelection(w3d_core::kernel::Vec3::new(0.0, 0.0, 5.0)),
                         );
                     }
+                });
+            });
+    }
+
+    // 6. Floating Sub-object Inspector Overlay (Left Viewport)
+    if let Some((node_id, face_id)) = editor.selected_face()
+        && let Some(metrics) = editor.face_metrics(node_id, face_id)
+    {
+        egui::Window::new(format!("Sub-object Inspector [Face #{face_id}]"))
+            .anchor(egui::Align2::LEFT_BOTTOM, egui::vec2(240.0, -40.0))
+            .resizable(false)
+            .collapsible(true)
+            .show(root, |ui| {
+                ui.vertical(|ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("Face ID:");
+                        ui.label(format!("#{face_id}"));
+                        ui.separator();
+                        ui.label("Mode:");
+                        ui.colored_label(
+                            egui::Color32::from_rgb(50, 180, 255),
+                            format!("{:?}", editor.selection_mode()),
+                        );
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Surface Area:");
+                        ui.label(format!("{:.3} mm²", metrics.area));
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Face Normal:");
+                        ui.label(format!(
+                            "[{:.3}, {:.3}, {:.3}]",
+                            metrics.normal.x, metrics.normal.y, metrics.normal.z
+                        ));
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Centroid:");
+                        ui.label(format!(
+                            "[{:.2}, {:.2}, {:.2}]",
+                            metrics.centroid.x, metrics.centroid.y, metrics.centroid.z
+                        ));
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Triangles:");
+                        ui.label(format!("{}", metrics.triangle_count));
+                    });
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        if ui.button("Deselect Sub-object").clicked() {
+                            editor.clear_selected_face();
+                        }
+                        if ui.button("Fillet [R]").clicked() {
+                            execute_command(editor, Command::Fillet);
+                        }
+                        if ui.button("Chamfer [C]").clicked() {
+                            execute_command(editor, Command::Chamfer);
+                        }
+                    });
                 });
             });
     }

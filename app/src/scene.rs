@@ -78,15 +78,19 @@ impl Scene {
         &'a self,
         doc: &Document<K>,
         selected: &[NodeId],
+        selected_face: Option<(NodeId, u32)>,
     ) -> Vec<Object<'a>> {
         doc.nodes()
             .filter(|(_, node)| node.visible)
             .filter_map(|(id, node)| {
+                let face =
+                    selected_face.and_then(|(sel_id, f)| if sel_id == id { Some(f) } else { None });
                 self.meshes.get(&node.body.raw()).map(|mesh| Object {
                     mesh,
                     id: id.index(),
                     material: Material {
                         selected: selected.contains(&id),
+                        selected_face: face,
                         ..Material::default()
                     },
                 })

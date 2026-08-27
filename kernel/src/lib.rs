@@ -135,6 +135,16 @@ pub struct Mesh {
     pub line_indices: Vec<u32>,
 }
 
+/// Calculated geometry metrics for a specific topological face on a mesh.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FaceMetrics {
+    pub face_id: u32,
+    pub area: f64,
+    pub normal: Vec3,
+    pub centroid: Vec3,
+    pub triangle_count: usize,
+}
+
 impl Mesh {
     pub fn triangle_count(&self) -> usize {
         self.indices.len() / 3
@@ -142,6 +152,84 @@ impl Mesh {
 
     pub fn line_count(&self) -> usize {
         self.line_indices.len() / 2
+    }
+
+    /// Computes area, average unit normal, centroid, and triangle count for a
+    /// specific face id. Returns `None` if no triangles correspond to the face id.
+    pub fn face_metrics(&self, face_id: u32) -> Option<FaceMetrics> {
+        let n_triangles = self.triangle_count();
+        if self.face_of_triangle.len() < n_triangles {
+            return None;
+        }
+
+        let mut total_area = 0.0;
+        let mut normal_sum = Vec3::ZERO;
+        let mut centroid_sum = Vec3::ZERO;
+        let mut count = 0;
+
+        for i in 0..n_triangles {
+            if self.face_of_triangle[i] != face_id {
+                continue;
+            }
+            let idx0 = self.indices[3 * i] as usize;
+            let idx1 = self.indices[3 * i + 1] as usize;
+            let idx2 = self.indices[3 * i + 2] as usize;
+            if idx0 >= self.positions.len()
+                || idx1 >= self.positions.len()
+                || idx2 >= self.positions.len()
+            {
+                continue;
+            }
+
+            let p0 = Vec3::new(
+                f64::from(self.positions[idx0][0]),
+                f64::from(self.positions[idx0][1]),
+                f64::from(self.positions[idx0][2]),
+            );
+            let p1 = Vec3::new(
+                f64::from(self.positions[idx1][0]),
+                f64::from(self.positions[idx1][1]),
+                f64::from(self.positions[idx1][2]),
+            );
+            let p2 = Vec3::new(
+                f64::from(self.positions[idx2][0]),
+                f64::from(self.positions[idx2][1]),
+                f64::from(self.positions[idx2][2]),
+            );
+
+            let cross = (p1 - p0).cross(p2 - p0);
+            let triangle_area = 0.5 * cross.length();
+            total_area += triangle_area;
+
+            let tri_centroid = (p0 + p1 + p2) * (1.0 / 3.0);
+            centroid_sum = centroid_sum + tri_centroid * triangle_area;
+
+            if let Some(norm) = cross.normalize(1e-12) {
+                normal_sum = normal_sum + norm * triangle_area;
+            }
+            count += 1;
+        }
+
+        if count == 0 {
+            return None;
+        }
+
+        let normal = normal_sum
+            .normalize(1e-12)
+            .unwrap_or(Vec3::new(0.0, 0.0, 1.0));
+        let centroid = if total_area > 1e-12 {
+            centroid_sum * (1.0 / total_area)
+        } else {
+            Vec3::ZERO
+        };
+
+        Some(FaceMetrics {
+            face_id,
+            area: total_area,
+            normal,
+            centroid,
+            triangle_count: count,
+        })
     }
 }
 
@@ -341,4 +429,43 @@ pub trait GeometryKernel {
 pub struct ImportedBody {
     pub body: Body,
     pub name: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mesh_face_metrics_calculation() {
+        let mesh = Mesh {
+            positions: vec![
+                [0.0, 0.0, 0.0],
+                [10.0, 0.0, 0.0],
+                [10.0, 10.0, 0.0],
+                [0.0, 10.0, 0.0],
+            ],
+            normals: vec![
+                [0.0, 0.0, 1.0],
+                [0.0, 0.0, 1.0],
+                [0.0, 0.0, 1.0],
+                [0.0, 0.0, 1.0],
+            ],
+            indices: vec![0, 1, 2, 0, 2, 3],
+            face_of_triangle: vec![1, 1],
+            line_positions: vec![],
+            line_indices: vec![],
+        };
+
+        let metrics = mesh.face_metrics(1).expect("face metrics for face 1");
+        assert_eq!(metrics.face_id, 1);
+        assert!((metrics.area - 100.0).abs() < 1e-6);
+        assert!((metrics.normal.x - 0.0).abs() < 1e-6);
+        assert!((metrics.normal.y - 0.0).abs() < 1e-6);
+        assert!((metrics.normal.z - 1.0).abs() < 1e-6);
+        assert!((metrics.centroid.x - 5.0).abs() < 1e-6);
+        assert!((metrics.centroid.y - 5.0).abs() < 1e-6);
+        assert_eq!(metrics.triangle_count, 2);
+
+        assert_eq!(mesh.face_metrics(99), None);
+    }
 }

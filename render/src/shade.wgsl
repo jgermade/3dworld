@@ -12,8 +12,8 @@ struct Object {
     color: vec4<f32>,
     id: u32,
     selected: u32,
+    selected_face: u32,
     _pad0: u32,
-    _pad1: u32,
 };
 
 @group(0) @binding(0) var<uniform> globals: Globals;
@@ -62,6 +62,9 @@ fn fs_shade(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<
     var base = object.color.rgb;
     if (object.selected != 0u) {
         base = mix(base, vec3<f32>(1.0, 0.62, 0.16), 0.65);
+    }
+    if (object.selected_face != 0xFFFFFFFFu && in.face == object.selected_face) {
+        base = mix(base, vec3<f32>(0.15, 0.75, 1.0), 0.75);
     }
     let lit = base * (0.18 + 0.72 * key + 0.22 * fill);
     return vec4<f32>(lit, object.color.a);

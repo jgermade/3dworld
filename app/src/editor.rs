@@ -131,6 +131,7 @@ pub struct Editor<K: GeometryKernel> {
     /// refuses an operation silently is a modeller people think is broken.
     status: String,
     selection_mode: SelectionMode,
+    selected_face: Option<(NodeId, u32)>,
 }
 
 impl<K: GeometryKernel> Editor<K> {
@@ -143,7 +144,25 @@ impl<K: GeometryKernel> Editor<K> {
             viewport: (1, 1),
             status: String::from("ready"),
             selection_mode: SelectionMode::Body,
+            selected_face: None,
         }
+    }
+
+    pub fn selected_face(&self) -> Option<(NodeId, u32)> {
+        self.selected_face
+    }
+
+    pub fn clear_selected_face(&mut self) {
+        self.selected_face = None;
+    }
+
+    pub fn face_metrics(
+        &mut self,
+        node_id: NodeId,
+        face_id: u32,
+    ) -> Option<w3d_core::kernel::FaceMetrics> {
+        let mesh = self.doc.mesh(node_id).ok()?;
+        mesh.face_metrics(face_id)
     }
 
     pub fn selection_mode(&self) -> SelectionMode {
@@ -282,6 +301,7 @@ impl<K: GeometryKernel> Editor<K> {
         let Some((object, face)) = pick.hit() else {
             if !additive {
                 self.doc.clear_selection();
+                self.selected_face = None;
                 self.status = String::from("nothing");
             }
             return;
@@ -293,12 +313,28 @@ impl<K: GeometryKernel> Editor<K> {
         if !additive {
             self.doc.clear_selection();
         }
-        if self.doc.is_selected(id) {
+
+        let is_same_face = self.selected_face == Some((id, face));
+        if self.doc.is_selected(id) && is_same_face {
             self.doc.deselect(id);
+            self.selected_face = None;
             self.status = format!("deselected {}", self.name_of(id));
         } else {
             let _ = self.doc.select(id);
-            self.status = format!("{} · face {face}", self.name_of(id));
+            self.selected_face = Some((id, face));
+            let name = self.name_of(id);
+            if let Ok(mesh) = self.doc.mesh(id) {
+                if let Some(metrics) = mesh.face_metrics(face) {
+                    self.status = format!(
+                        "{} · Face #{face} (Area: {:.2} mm², Normal: [{:.2}, {:.2}, {:.2}])",
+                        name, metrics.area, metrics.normal.x, metrics.normal.y, metrics.normal.z
+                    );
+                } else {
+                    self.status = format!("{name} · face {face}");
+                }
+            } else {
+                self.status = format!("{name} · face {face}");
+            }
         }
     }
 
@@ -352,6 +388,7 @@ impl<K: GeometryKernel> Editor<K> {
             }),
             Command::ClearSelection => {
                 self.doc.clear_selection();
+                self.selected_face = None;
                 Ok(String::from("selection cleared"))
             }
             Command::SelectAll => {
@@ -1127,5 +1164,38 @@ mod tests {
             1,
             "a failed import changed the document"
         );
+    }
+
+    #[test]
+    fn subobject_face_selection_mode_and_metric_inspection() {
+        let mut e = editor();
+        assert_eq!(e.selection_mode(), SelectionMode::Body);
+        assert_eq!(e.selected_face(), None);
+
+        e.run(Command::SetSelectionMode(SelectionMode::Face));
+        assert_eq!(e.selection_mode(), SelectionMode::Face);
+
+        e.run(Command::AddBox);
+        let id = e.selection()[0];
+
+        // Simulate picking face #1 on the box node
+        e.picked(
+            Pick {
+                object: id.index(),
+                face: 1,
+            },
+            false,
+        );
+        assert_eq!(e.selected_face(), Some((id, 1)));
+        assert!(e.status().contains("Face #1"));
+
+        // Inspect face metrics
+        let metrics = e.face_metrics(id, 1).expect("face 1 metrics");
+        assert_eq!(metrics.face_id, 1);
+        assert!(metrics.area > 0.0);
+
+        // Clear selection clears face selection as well
+        e.run(Command::ClearSelection);
+        assert_eq!(e.selected_face(), None);
     }
 }
