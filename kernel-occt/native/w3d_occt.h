@@ -95,6 +95,7 @@ int32_t w3d_occt_transform(W3dOcctContext *ctx, uint32_t body, const double *m34
 int32_t w3d_occt_copy(W3dOcctContext *ctx, uint32_t body, uint32_t *out);
 int32_t w3d_occt_delete(W3dOcctContext *ctx, uint32_t body);
 int32_t w3d_occt_fillet(W3dOcctContext *ctx, uint32_t body, double radius, uint32_t *out);
+int32_t w3d_occt_chamfer(W3dOcctContext *ctx, uint32_t body, double distance, uint32_t *out);
 
 /* out4: solids, faces, edges, vertices — unique, not per-face duplicates. */
 int32_t w3d_occt_topology(W3dOcctContext *ctx, uint32_t body, uint32_t *out4);

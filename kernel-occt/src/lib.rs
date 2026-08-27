@@ -115,6 +115,7 @@ unsafe extern "C" {
     fn w3d_occt_copy(ctx: *mut Context, body: u32, out: *mut u32) -> i32;
     fn w3d_occt_delete(ctx: *mut Context, body: u32) -> i32;
     fn w3d_occt_fillet(ctx: *mut Context, body: u32, radius: f64, out: *mut u32) -> i32;
+    fn w3d_occt_chamfer(ctx: *mut Context, body: u32, distance: f64, out: *mut u32) -> i32;
     fn w3d_occt_topology(ctx: *mut Context, body: u32, out4: *mut u32) -> i32;
     fn w3d_occt_bounds(ctx: *mut Context, body: u32, out6: *mut f64) -> i32;
     fn w3d_occt_tessellate(
@@ -281,6 +282,15 @@ impl GeometryKernel for OcctKernel {
         let mut id = 0u32;
         check(
             unsafe { w3d_occt_fillet(self.ctx, body.raw(), radius, &mut id) },
+            body,
+        )?;
+        Ok(Body::from_raw(id))
+    }
+
+    fn chamfer(&mut self, body: Body, distance: f64) -> Result<Body> {
+        let mut id = 0u32;
+        check(
+            unsafe { w3d_occt_chamfer(self.ctx, body.raw(), distance, &mut id) },
             body,
         )?;
         Ok(Body::from_raw(id))

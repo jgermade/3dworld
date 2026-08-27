@@ -430,6 +430,31 @@ pub fn run<K: GeometryKernel>(k: &mut K, tol: Tolerance, quality: Quality) -> Re
 
     check!(
         checks,
+        "filleting and chamfering work on valid primitives and refuse zero or excessive distance",
+        {
+            let b = k
+                .create_box(Vec3::new(10.0, 10.0, 10.0))
+                .map_err(|e| e.to_string())?;
+            require(k.fillet(b, 0.0).is_err(), "zero radius fillet accepted")?;
+            require(k.chamfer(b, 0.0).is_err(), "zero distance chamfer accepted")?;
+            require(
+                k.fillet(b, 100.0).is_err(),
+                "excessive radius fillet accepted",
+            )?;
+            require(
+                k.chamfer(b, 100.0).is_err(),
+                "excessive distance chamfer accepted",
+            )?;
+
+            let f = k.fillet(b, 1.0).map_err(|e| e.to_string())?;
+            require(f != b, "fillet returned same handle")?;
+            let c = k.chamfer(b, 1.0).map_err(|e| e.to_string())?;
+            require(c != b, "chamfer returned same handle")
+        }
+    );
+
+    check!(
+        checks,
         "bytes from another kernel are refused, not guessed at",
         {
             // A file written by a different backend must fail loudly. The

@@ -297,6 +297,18 @@ impl<K: GeometryKernel> Document<K> {
         Ok(())
     }
 
+    pub fn chamfer(&mut self, id: NodeId, distance: f64) -> Result<()> {
+        let before = self.node(id)?.clone();
+        let body = self.kernel.chamfer(before.body, distance)?;
+        let body = self.track(body);
+        let after = Node {
+            body,
+            ..before.clone()
+        };
+        self.replace(id, "Chamfer", before, after);
+        Ok(())
+    }
+
     pub fn rename(&mut self, id: NodeId, name: impl Into<String>) -> Result<()> {
         let before = self.node(id)?.clone();
         let after = Node {

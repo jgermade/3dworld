@@ -263,6 +263,28 @@ impl GeometryKernel for FakeKernel {
         if radius <= 0.0 {
             return Err(KernelError::Degenerate("fillet radius must be positive"));
         }
+        let bounds = self.bounds(body)?;
+        let max_dim = bounds.size().x.max(bounds.size().y).max(bounds.size().z);
+        if radius >= max_dim {
+            return Err(KernelError::Degenerate(
+                "fillet radius exceeds solid dimensions",
+            ));
+        }
+        let shape = self.get(body)?.clone();
+        Ok(self.insert(shape))
+    }
+
+    fn chamfer(&mut self, body: Body, distance: f64) -> Result<Body> {
+        if distance <= 0.0 {
+            return Err(KernelError::Degenerate("chamfer distance must be positive"));
+        }
+        let bounds = self.bounds(body)?;
+        let max_dim = bounds.size().x.max(bounds.size().y).max(bounds.size().z);
+        if distance >= max_dim {
+            return Err(KernelError::Degenerate(
+                "chamfer distance exceeds solid dimensions",
+            ));
+        }
         let shape = self.get(body)?.clone();
         Ok(self.insert(shape))
     }

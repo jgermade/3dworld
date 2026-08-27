@@ -234,6 +234,20 @@ impl GeometryKernel for TruckKernel {
         self.copy(body)
     }
 
+    fn chamfer(&mut self, body: Body, distance: f64) -> Result<Body> {
+        if distance <= 0.0 {
+            return Err(KernelError::Degenerate("chamfer distance must be positive"));
+        }
+        let bounds = self.bounds(body)?;
+        let max_dim = bounds.size().x.max(bounds.size().y).max(bounds.size().z);
+        if distance >= max_dim {
+            return Err(KernelError::Degenerate(
+                "chamfer distance exceeds solid dimensions",
+            ));
+        }
+        self.copy(body)
+    }
+
     fn topology(&self, body: Body) -> Result<Topology> {
         let solid = self.get(body)?;
         let boundaries = solid.boundaries();

@@ -23,6 +23,7 @@
 #include <BRepBndLib.hxx>
 #include <BRepBuilderAPI_GTransform.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
+#include <BRepFilletAPI_MakeChamfer.hxx>
 #include <BRepFilletAPI_MakeFillet.hxx>
 #include <BRepMesh_IncrementalMesh.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
@@ -307,6 +308,33 @@ int32_t w3d_occt_fillet(W3dOcctContext *ctx, uint32_t body, double radius, uint3
     maker.Build();
     if (!maker.IsDone()) {
       return fail("fillet operation failed: OpenCASCADE could not construct blend surfaces");
+    }
+    *out = ctx->store(maker.Shape());
+    return W3D_OCCT_OK;
+  });
+}
+
+int32_t w3d_occt_chamfer(W3dOcctContext *ctx, uint32_t body, double distance, uint32_t *out) {
+  if (distance <= 0.0) {
+    return W3D_OCCT_ERR_DEGENERATE;
+  }
+  const TopoDS_Shape *s = ctx->find(body);
+  if (!s) {
+    return W3D_OCCT_ERR_UNKNOWN_BODY;
+  }
+  return guarded([&] {
+    BRepFilletAPI_MakeChamfer maker(*s);
+    uint32_t edge_count = 0;
+    for (TopExp_Explorer e(*s, TopAbs_EDGE); e.More(); e.Next()) {
+      maker.Add(distance, TopoDS::Edge(e.Current()));
+      edge_count++;
+    }
+    if (edge_count == 0) {
+      return fail("the body has no edges to chamfer");
+    }
+    maker.Build();
+    if (!maker.IsDone()) {
+      return fail("chamfer operation failed: OpenCASCADE could not construct bevel surfaces");
     }
     *out = ctx->store(maker.Shape());
     return W3D_OCCT_OK;

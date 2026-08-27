@@ -203,6 +203,13 @@ pub trait GeometryKernel {
     /// returns `KernelError::Degenerate`.
     fn fillet(&mut self, body: Body, radius: f64) -> Result<Body>;
 
+    /// Chamfers / bevels all sharp edges of a solid with the specified distance.
+    ///
+    /// The input `body` is unmodified; a new handle is returned for the
+    /// resulting solid. If `distance <= 0.0` or exceeds the solid's bounds,
+    /// returns `KernelError::Degenerate`.
+    fn chamfer(&mut self, body: Body, distance: f64) -> Result<Body>;
+
     fn topology(&self, body: Body) -> Result<Topology>;
 
     fn bounds(&self, body: Body) -> Result<Aabb>;

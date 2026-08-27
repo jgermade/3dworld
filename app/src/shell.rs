@@ -773,6 +773,12 @@ fn chrome<K: GeometryKernel + Default>(
                         {
                             execute_command(editor, Command::Fillet);
                         }
+                        if ui
+                            .add_enabled(one_or_more, egui::Button::new("Chamfer [C]"))
+                            .clicked()
+                        {
+                            execute_command(editor, Command::Chamfer);
+                        }
                     });
                 });
                 ui.group(|ui| {
@@ -788,6 +794,7 @@ fn chrome<K: GeometryKernel + Default>(
                 });
             }
             RibbonTab::View => {
+                let two_or_more = editor.selection().len() >= 2;
                 ui.group(|ui| {
                     ui.label("Selection Mode");
                     ui.horizontal(|ui| {
@@ -851,11 +858,17 @@ fn chrome<K: GeometryKernel + Default>(
                     });
                 });
                 ui.group(|ui| {
-                    ui.label("Viewport Options");
+                    ui.label("Viewport & Inspection");
                     ui.horizontal(|ui| {
                         ui.checkbox(&mut renderer.show_grid, "Ground Grid");
                         if ui.button("Zoom to Fit [F]").clicked() {
                             execute_command(editor, Command::ZoomToFit);
+                        }
+                        if ui
+                            .add_enabled(two_or_more, egui::Button::new("Measure Distance [M]"))
+                            .clicked()
+                        {
+                            execute_command(editor, Command::MeasureDistance);
                         }
                     });
                 });

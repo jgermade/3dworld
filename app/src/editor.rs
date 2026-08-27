@@ -21,6 +21,8 @@ pub enum Command {
     AddSphere,
     AddCylinder,
     Fillet,
+    Chamfer,
+    MeasureDistance,
     Boolean(BooleanOp),
     DeleteSelected,
     Undo,
@@ -328,6 +330,8 @@ impl<K: GeometryKernel> Editor<K> {
                 self.add("Cylinder", |doc, name| doc.add_cylinder(name, 8.0, 24.0))
             }
             Command::Fillet => self.fillet(1.0),
+            Command::Chamfer => self.chamfer(1.0),
+            Command::MeasureDistance => self.measure_distance(),
             Command::Boolean(op) => self.boolean(op),
             Command::DeleteSelected => self.delete_selected(),
             Command::Undo => Ok(match self.doc.undo() {
@@ -463,6 +467,47 @@ impl<K: GeometryKernel> Editor<K> {
         } else {
             Ok(format!("filleted {count} object(s)"))
         }
+    }
+
+    fn chamfer(&mut self, distance: f64) -> Result<String, String> {
+        let selected = self.selection();
+        if selected.is_empty() {
+            return Err(String::from("chamfer needs a selected object"));
+        }
+        self.doc.begin_transaction("Chamfer");
+        let mut count = 0;
+        for id in selected {
+            if self.doc.chamfer(id, distance).is_ok() {
+                count += 1;
+            }
+        }
+        self.doc.commit_transaction();
+        if count == 0 {
+            Err(String::from("chamfer failed on selected objects"))
+        } else {
+            Ok(format!("chamfered {count} object(s)"))
+        }
+    }
+
+    pub fn measure_distance(&mut self) -> Result<String, String> {
+        let selected = self.selection();
+        if selected.len() < 2 {
+            return Err(String::from(
+                "distance measurement requires at least two selected objects",
+            ));
+        }
+        let b1 = self.doc.bounds(selected[0]).map_err(|e| e.to_string())?;
+        let b2 = self.doc.bounds(selected[1]).map_err(|e| e.to_string())?;
+        let c1 = b1.center();
+        let c2 = b2.center();
+        let dx = c2.x - c1.x;
+        let dy = c2.y - c1.y;
+        let dz = c2.z - c1.z;
+        let dist = (dx * dx + dy * dy + dz * dz).sqrt();
+        Ok(format!(
+            "distance: {:.3} mm (ΔX: {:.3}, ΔY: {:.3}, ΔZ: {:.3})",
+            dist, dx, dy, dz
+        ))
     }
 
     /// Writes STEP to `path`, or beside the document, or to `untitled.step`.
@@ -798,6 +843,28 @@ mod tests {
         e.run(Command::AddBox);
         e.picked(hit(NOTHING - 1), false);
         assert!(e.status().contains("no longer there"), "{}", e.status());
+    }
+
+    #[test]
+    fn chamfer_command_bevels_selected_object() {
+        let mut e = editor();
+        e.run(Command::AddBox);
+        e.run(Command::Chamfer);
+        assert!(e.status().contains("chamfered"), "{}", e.status());
+    }
+
+    #[test]
+    fn measure_distance_calculates_distance_between_two_bodies() {
+        let mut e = editor();
+        e.run(Command::AddBox);
+        e.run(Command::AddSphere);
+        let ids: Vec<_> = e.document().nodes().map(|(id, _)| id).collect();
+        e.document_mut().clear_selection();
+        for id in &ids {
+            e.document_mut().select(*id).unwrap();
+        }
+        e.run(Command::MeasureDistance);
+        assert!(e.status().contains("distance:"), "{}", e.status());
     }
 
     #[test]
