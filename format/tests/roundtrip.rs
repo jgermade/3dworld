@@ -205,3 +205,25 @@ fn a_missing_blob_fails_the_whole_load() {
         Err(FormatError::Malformed(_))
     ));
 }
+
+#[test]
+fn camera_pose_and_thumbnail_survive_w3d_round_trip() {
+    let doc = drilled_plate();
+    let camera = w3d_format::CameraPose {
+        eye: [10.0, 20.0, 30.0],
+        target: [0.0, 0.0, 0.0],
+        up: [0.0, 0.0, 1.0],
+    };
+    let dummy_png = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+
+    let options = w3d_format::SaveOptions {
+        camera: Some(camera.clone()),
+        thumbnail_png: Some(&dummy_png),
+    };
+
+    let bytes = w3d_format::save_with_options(&doc, &options).unwrap();
+    let loaded = w3d_format::load_with_metadata(FakeKernel::default(), &bytes).unwrap();
+
+    assert_eq!(loaded.camera, Some(camera));
+    assert_eq!(loaded.thumbnail_png, Some(dummy_png));
+}

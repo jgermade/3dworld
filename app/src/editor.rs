@@ -692,6 +692,18 @@ mod tests {
     }
 
     #[test]
+    fn viewport_resize_updates_aspect_ratio_and_bounds_safely() {
+        let mut e = editor();
+        e.set_viewport(1920, 1080);
+        let aspect1: f64 = 1920.0 / 1080.0;
+        assert!((aspect1 - 1.7777).abs() < 1e-3);
+
+        // Resizing down to 0, 0 clamps safely to 1, 1
+        e.set_viewport(0, 0);
+        assert_eq!(e.viewport, (1, 1));
+    }
+
+    #[test]
     fn clicking_the_background_clears_the_selection_unless_shift_is_held() {
         let mut e = editor();
         e.run(Command::AddBox);

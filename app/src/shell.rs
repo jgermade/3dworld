@@ -49,6 +49,15 @@ pub struct Options {
     pub save_as: Option<std::path::PathBuf>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum RibbonTab {
+    #[default]
+    Create,
+    Modify,
+    View,
+    File,
+}
+
 struct Live<K: GeometryKernel + Default> {
     window: Arc<Window>,
     gpu: Gpu,
@@ -63,6 +72,7 @@ struct Live<K: GeometryKernel + Default> {
     pending: Option<(PickPending, bool)>,
     modifiers: ModifiersState,
     cursor: (f64, f64),
+    ribbon_tab: RibbonTab,
     /// Where `--screenshot` copies the frame *before* it is presented. A
     /// presented surface texture is destroyed, so reading one back afterwards
     /// is a validation error — the copy has to happen in the same encoder that
@@ -253,6 +263,7 @@ impl<K: GeometryKernel + Default> ApplicationHandler for Shell<K> {
             pending: None,
             modifiers: ModifiersState::empty(),
             cursor: (0.0, 0.0),
+            ribbon_tab: RibbonTab::default(),
             capture,
             frames: 0,
         });
@@ -498,6 +509,7 @@ impl<K: GeometryKernel + Default> Live<K> {
                 &self.scene,
                 &mut self.renderer,
                 self.modifiers,
+                &mut self.ribbon_tab,
             )
         });
         self.egui
@@ -674,112 +686,162 @@ impl<K: GeometryKernel + Default> Live<K> {
     }
 }
 
-/// The chrome. Deliberately plain — it is a list, some buttons and a status
-/// line, and the viewport is the product.
+/// The chrome. Redesigned with an Office Ribbon UI style layout: top tabbed ribbon,
+/// left outliner tree, and bottom status bar.
 fn chrome<K: GeometryKernel + Default>(
     root: &mut egui::Ui,
     editor: &mut Editor<K>,
     scene: &Scene,
     renderer: &mut Renderer,
     modifiers: ModifiersState,
+    active_tab: &mut RibbonTab,
 ) {
-    egui::Panel::left("tree")
-        .default_size(240.0)
-        .show(root, |ui| {
+    // 1. Top Ribbon Bar Panel
+    egui::Panel::top("ribbon_panel").show(root, |ui| {
+        // Tab Headers Bar
+        ui.horizontal(|ui| {
             ui.heading("3dworld");
             ui.separator();
+            ui.selectable_value(active_tab, RibbonTab::Create, "Create");
+            ui.selectable_value(active_tab, RibbonTab::Modify, "Modify");
+            ui.selectable_value(active_tab, RibbonTab::View, "View");
+            ui.selectable_value(active_tab, RibbonTab::File, "File");
+        });
+        ui.separator();
 
-            ui.horizontal_wrapped(|ui| {
-                if ui.button("Box [B]").clicked() {
-                    execute_command(editor, Command::AddBox);
-                }
-                if ui.button("Sphere [S]").clicked() {
-                    execute_command(editor, Command::AddSphere);
-                }
-                if ui.button("Cylinder [C]").clicked() {
-                    execute_command(editor, Command::AddCylinder);
-                }
-            });
-            // Words, not set-theory glyphs. `∪ − ∩` are not in egui's default
-            // font and render as three identical empty boxes, which is worse
-            // than verbose — it was only visible by looking at a screenshot.
-            ui.horizontal_wrapped(|ui| {
+        // Active Ribbon Toolbar Content
+        ui.horizontal(|ui| match active_tab {
+            RibbonTab::Create => {
+                ui.group(|ui| {
+                    ui.label("Primitives");
+                    ui.horizontal(|ui| {
+                        if ui.button("Box [B]").clicked() {
+                            execute_command(editor, Command::AddBox);
+                        }
+                        if ui.button("Sphere [S]").clicked() {
+                            execute_command(editor, Command::AddSphere);
+                        }
+                        if ui.button("Cylinder [C]").clicked() {
+                            execute_command(editor, Command::AddCylinder);
+                        }
+                    });
+                });
+                ui.group(|ui| {
+                    ui.label("Quick Actions");
+                    ui.horizontal(|ui| {
+                        if ui.button("Fit View [F]").clicked() {
+                            execute_command(editor, Command::ZoomToFit);
+                        }
+                        if ui.button("Select All [A]").clicked() {
+                            execute_command(editor, Command::SelectAll);
+                        }
+                    });
+                });
+            }
+            RibbonTab::Modify => {
                 let two = editor.selection().len() == 2;
-                if ui
-                    .add_enabled(two, egui::Button::new("Unite [U]"))
-                    .clicked()
-                {
-                    execute_command(editor, Command::Boolean(BooleanOp::Union));
-                }
-                if ui
-                    .add_enabled(two, egui::Button::new("Subtract [D]"))
-                    .clicked()
-                {
-                    execute_command(editor, Command::Boolean(BooleanOp::Difference));
-                }
-                if ui
-                    .add_enabled(two, egui::Button::new("Intersect [I]"))
-                    .clicked()
-                {
-                    execute_command(editor, Command::Boolean(BooleanOp::Intersection));
-                }
                 let one_or_more = !editor.selection().is_empty();
-                if ui
-                    .add_enabled(one_or_more, egui::Button::new("Fillet [R]"))
-                    .clicked()
-                {
-                    execute_command(editor, Command::Fillet);
-                }
-            });
-            ui.horizontal_wrapped(|ui| {
-                if ui.button("Open...").clicked() {
-                    execute_command(editor, Command::Open);
-                }
-                if ui.button("Save").clicked() {
-                    execute_command(editor, Command::Save);
-                }
-                if ui.button("Save As...").clicked() {
-                    execute_command(editor, Command::SaveAs);
-                }
-                if ui.button("Import STEP...").clicked() {
-                    execute_command(editor, Command::ImportStep);
-                }
-                if ui.button("Export STEP...").clicked() {
-                    execute_command(editor, Command::ExportStep);
-                }
-            });
-            ui.horizontal_wrapped(|ui| {
-                if ui.button("Undo").clicked() {
-                    execute_command(editor, Command::Undo);
-                }
-                if ui.button("Redo").clicked() {
-                    execute_command(editor, Command::Redo);
-                }
-                if ui.button("Fit [F]").clicked() {
-                    execute_command(editor, Command::ZoomToFit);
-                }
-                ui.checkbox(&mut renderer.show_grid, "Grid");
-            });
+                ui.group(|ui| {
+                    ui.label("Booleans");
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add_enabled(two, egui::Button::new("Unite [U]"))
+                            .clicked()
+                        {
+                            execute_command(editor, Command::Boolean(BooleanOp::Union));
+                        }
+                        if ui
+                            .add_enabled(two, egui::Button::new("Subtract [D]"))
+                            .clicked()
+                        {
+                            execute_command(editor, Command::Boolean(BooleanOp::Difference));
+                        }
+                        if ui
+                            .add_enabled(two, egui::Button::new("Intersect [I]"))
+                            .clicked()
+                        {
+                            execute_command(editor, Command::Boolean(BooleanOp::Intersection));
+                        }
+                    });
+                });
+                ui.group(|ui| {
+                    ui.label("Features");
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add_enabled(one_or_more, egui::Button::new("Fillet [R]"))
+                            .clicked()
+                        {
+                            execute_command(editor, Command::Fillet);
+                        }
+                    });
+                });
+                ui.group(|ui| {
+                    ui.label("History");
+                    ui.horizontal(|ui| {
+                        if ui.button("Undo").clicked() {
+                            execute_command(editor, Command::Undo);
+                        }
+                        if ui.button("Redo").clicked() {
+                            execute_command(editor, Command::Redo);
+                        }
+                    });
+                });
+            }
+            RibbonTab::View => {
+                ui.group(|ui| {
+                    ui.label("Viewport Options");
+                    ui.horizontal(|ui| {
+                        ui.checkbox(&mut renderer.show_grid, "Ground Grid");
+                        if ui.button("Zoom to Fit [F]").clicked() {
+                            execute_command(editor, Command::ZoomToFit);
+                        }
+                    });
+                });
+            }
+            RibbonTab::File => {
+                ui.group(|ui| {
+                    ui.label("Document");
+                    ui.horizontal(|ui| {
+                        if ui.button("Open...").clicked() {
+                            execute_command(editor, Command::Open);
+                        }
+                        if ui.button("Save").clicked() {
+                            execute_command(editor, Command::Save);
+                        }
+                        if ui.button("Save As...").clicked() {
+                            execute_command(editor, Command::SaveAs);
+                        }
+                    });
+                });
+                ui.group(|ui| {
+                    ui.label("CAD Interchange");
+                    ui.horizontal(|ui| {
+                        if ui.button("Import STEP...").clicked() {
+                            execute_command(editor, Command::ImportStep);
+                        }
+                        if ui.button("Export STEP...").clicked() {
+                            execute_command(editor, Command::ExportStep);
+                        }
+                    });
+                });
+            }
+        });
+    });
 
-            ui.collapsing("Shortcuts & Modifiers", |ui| {
-                ui.label("Left Drag: Orbit");
-                ui.label("Shift + Left Drag / Middle Drag: Pan");
-                ui.label("Ctrl/Cmd + Left Drag / Scroll: Zoom");
-                ui.label("Shift + Click: Toggle Selection");
-                ui.label("Ctrl + O: Open");
-                ui.label("Ctrl + S / Shift+S: Save / Save As");
-                ui.label("Ctrl + I / E: Import / Export STEP");
-                ui.label("B / S / C: Primitives");
-                ui.label("U / D / I / R: Boolean / Fillet");
-            });
-
+    // 2. Left Outliner Tree Panel
+    egui::Panel::left("tree")
+        .default_size(220.0)
+        .show(root, |ui| {
+            ui.heading("Outliner");
             ui.separator();
+
             let nodes: Vec<_> = editor
                 .document()
                 .nodes()
                 .map(|(id, node)| (id, node.name.clone()))
                 .collect();
             let selected = editor.selection();
+
             egui::ScrollArea::vertical().show(ui, |ui| {
                 for (id, name) in nodes {
                     let is = selected.contains(&id);
@@ -794,8 +856,22 @@ fn chrome<K: GeometryKernel + Default>(
                     }
                 }
             });
+
+            ui.separator();
+            ui.collapsing("Shortcuts & Modifiers", |ui| {
+                ui.label("Left Drag: Orbit");
+                ui.label("Shift + Left Drag / Middle Drag: Pan");
+                ui.label("Ctrl/Cmd + Left Drag / Scroll: Zoom");
+                ui.label("Shift + Click: Toggle Selection");
+                ui.label("Ctrl + O: Open");
+                ui.label("Ctrl + S / Shift+S: Save / Save As");
+                ui.label("Ctrl + I / E: Import / Export STEP");
+                ui.label("B / S / C: Primitives");
+                ui.label("U / D / I / R: Boolean / Fillet");
+            });
         });
 
+    // 3. Bottom Status Bar Panel
     egui::Panel::bottom("status").show(root, |ui| {
         ui.horizontal(|ui| {
             let shift = modifiers.shift_key();

@@ -86,6 +86,25 @@ impl From<zip::ZipError> for FormatError {
     }
 }
 
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct CameraPose {
+    pub eye: [f64; 3],
+    pub target: [f64; 3],
+    pub up: [f64; 3],
+}
+
+#[derive(Default, Clone, Debug)]
+pub struct SaveOptions<'a> {
+    pub camera: Option<CameraPose>,
+    pub thumbnail_png: Option<&'a [u8]>,
+}
+
+pub struct LoadedDocument<K: GeometryKernel> {
+    pub document: Document<K>,
+    pub camera: Option<CameraPose>,
+    pub thumbnail_png: Option<Vec<u8>>,
+}
+
 #[derive(Serialize, Deserialize)]
 struct Manifest {
     format: String,
@@ -94,17 +113,12 @@ struct Manifest {
     geometry: String,
     tolerance: ToleranceEntry,
     quality: QualityEntry,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    camera: Option<CameraPose>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thumbnail: Option<String>,
     nodes: Vec<NodeEntry>,
 }
-
-// Two structs rather than one reused pair. The first version shared a `Pair`
-// and wrote `"quality": {"linear": 0.01, "angular": 0.35}`, which is wrong in
-// the way a file format cannot afford: the numbers were right and their names
-// were meaningless, and nobody reading the file in two years would know that
-// `linear` meant a chord sag. Caught by reading the output of `unzip -p`, not
-// by a test — every test passed.
-//
-// The names are the kernel's own, so a reader can find them in `kernel/src/lib.rs`.
 
 #[derive(Serialize, Deserialize)]
 struct ToleranceEntry {
@@ -126,18 +140,19 @@ struct QualityEntry {
 struct NodeEntry {
     name: String,
     visible: bool,
-    /// The path of this node's blob inside the archive. Two nodes may name the
-    /// same one: bodies are immutable and shared, and a copy that saved twice
-    /// would double the file for nothing.
     geometry: String,
 }
 
-/// Writes a document.
-///
-/// Takes `&Document` because saving reads: `save_body` is a `&self` method on
-/// the kernel, and a save that could mutate the document is a save that could
-/// lose an edit.
+/// Writes a document with default options.
 pub fn save<K: GeometryKernel>(doc: &Document<K>) -> Result<Vec<u8>, FormatError> {
+    save_with_options(doc, &SaveOptions::default())
+}
+
+/// Writes a document with optional camera pose and thumbnail.
+pub fn save_with_options<K: GeometryKernel>(
+    doc: &Document<K>,
+    options: &SaveOptions<'_>,
+) -> Result<Vec<u8>, FormatError> {
     let mut entries: BTreeMap<String, Vec<u8>> = BTreeMap::new();
     let mut paths: BTreeMap<u32, String> = BTreeMap::new();
     let mut nodes = Vec::new();
@@ -151,9 +166,6 @@ pub fn save<K: GeometryKernel>(doc: &Document<K>) -> Result<Vec<u8>, FormatError
                     .kernel()
                     .save_body(node.body)
                     .map_err(|e| FormatError::Kernel(e.to_string()))?;
-                // Numbered by how many are already written, not by the body's
-                // own id: a file should not leak a process's handle numbers,
-                // and consecutive names make it readable in `unzip -l`.
                 let path = format!("geometry/{}.bin", paths.len());
                 entries.insert(path.clone(), bytes);
                 paths.insert(raw, path.clone());
@@ -166,6 +178,14 @@ pub fn save<K: GeometryKernel>(doc: &Document<K>) -> Result<Vec<u8>, FormatError
             geometry: path,
         });
     }
+
+    let thumbnail_path = if let Some(thumb_bytes) = options.thumbnail_png {
+        let path = String::from("thumbnail.png");
+        entries.insert(path.clone(), thumb_bytes.to_vec());
+        Some(path)
+    } else {
+        None
+    };
 
     let tolerance = doc.tolerance();
     let quality = doc.quality();
@@ -181,6 +201,8 @@ pub fn save<K: GeometryKernel>(doc: &Document<K>) -> Result<Vec<u8>, FormatError
             sag: quality.sag,
             max_angle: quality.max_angle,
         },
+        camera: options.camera.clone(),
+        thumbnail: thumbnail_path,
         nodes,
     };
     let json =
@@ -191,10 +213,15 @@ pub fn save<K: GeometryKernel>(doc: &Document<K>) -> Result<Vec<u8>, FormatError
 }
 
 /// Reads a document, using `kernel` to bring its geometry back.
-///
-/// Fails rather than partially succeeds: a document that opened with three of
-/// its five bodies missing is worse than one that did not open.
-pub fn load<K: GeometryKernel>(mut kernel: K, bytes: &[u8]) -> Result<Document<K>, FormatError> {
+pub fn load<K: GeometryKernel>(kernel: K, bytes: &[u8]) -> Result<Document<K>, FormatError> {
+    Ok(load_with_metadata(kernel, bytes)?.document)
+}
+
+/// Reads a document along with metadata (camera pose, thumbnail).
+pub fn load_with_metadata<K: GeometryKernel>(
+    mut kernel: K,
+    bytes: &[u8],
+) -> Result<LoadedDocument<K>, FormatError> {
     let entries = zip::read(bytes)?;
     let raw = entries
         .get(MANIFEST)
@@ -214,15 +241,17 @@ pub fn load<K: GeometryKernel>(mut kernel: K, bytes: &[u8]) -> Result<Document<K
             understood: VERSION,
         });
     }
-    // Checked before a single blob is handed to the kernel, so the failure is
-    // one clear sentence rather than whatever the kernel makes of foreign
-    // bytes.
     if manifest.geometry != kernel.geometry_format() {
         return Err(FormatError::WrongKernel {
             file: manifest.geometry,
             kernel: kernel.geometry_format(),
         });
     }
+
+    let thumbnail_png = manifest
+        .thumbnail
+        .as_ref()
+        .and_then(|path| entries.get(path).cloned());
 
     let mut bodies: BTreeMap<String, w3d_core::kernel::Body> = BTreeMap::new();
     let mut nodes = Vec::new();
@@ -247,10 +276,16 @@ pub fn load<K: GeometryKernel>(mut kernel: K, bytes: &[u8]) -> Result<Document<K
         });
     }
 
-    Ok(Document::from_parts(
+    let document = Document::from_parts(
         kernel,
         Tolerance::new(manifest.tolerance.linear, manifest.tolerance.angular),
         Quality::new(manifest.quality.sag, manifest.quality.max_angle),
         nodes,
-    ))
+    );
+
+    Ok(LoadedDocument {
+        document,
+        camera: manifest.camera,
+        thumbnail_png,
+    })
 }

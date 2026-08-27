@@ -224,3 +224,41 @@ fn an_import_is_one_undo_step_and_names_what_it_added() {
     assert_eq!(doc.redo(), Some("Import STEP"));
     assert_eq!(doc.len(), 3);
 }
+
+#[test]
+fn step_file_in_inches_is_converted_to_millimetres_on_import() {
+    let mut k = OcctKernel::new();
+    let box_body = k.create_box(Vec3::new(1.0, 2.0, 3.0)).unwrap();
+    let step_bytes = k.export_step(&[box_body]).unwrap();
+    let step_str = String::from_utf8(step_bytes).unwrap();
+
+    // Replace #346 with a CONVERSION_BASED_UNIT defining INCH (25.4 mm)
+    let inch_step_str = step_str.replace(
+        "#346 = ( LENGTH_UNIT() NAMED_UNIT(*) SI_UNIT(.MILLI.,.METRE.) );",
+        "#346 = ( CONVERSION_BASED_UNIT('INCH',#3470) LENGTH_UNIT() NAMED_UNIT(*) );\n#3470 = LENGTH_MEASURE_WITH_UNIT(LENGTH_MEASURE(25.4),#3461);\n#3461 = ( LENGTH_UNIT() NAMED_UNIT(*) SI_UNIT(.MILLI.,.METRE.) );",
+    );
+
+    let mut reader = OcctKernel::new();
+    let imported = reader.import_step(inch_step_str.as_bytes()).unwrap();
+    assert_eq!(imported.len(), 1);
+
+    let bounds = reader.bounds(imported[0].body).unwrap();
+    let size = bounds.size();
+
+    // 1 in x 2 in x 3 in converted to millimetres: 25.4 mm x 50.8 mm x 76.2 mm
+    assert!(
+        (size.x - 25.4).abs() < 1e-2,
+        "x size expected 25.4, got {}",
+        size.x
+    );
+    assert!(
+        (size.y - 50.8).abs() < 1e-2,
+        "y size expected 50.8, got {}",
+        size.y
+    );
+    assert!(
+        (size.z - 76.2).abs() < 1e-2,
+        "z size expected 76.2, got {}",
+        size.z
+    );
+}

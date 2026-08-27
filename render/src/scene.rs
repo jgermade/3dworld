@@ -53,6 +53,77 @@ pub const LINE_VERTEX_LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBu
     }],
 };
 
+/// 28-byte packed vertex attribute layout for zero-copy Transferable ArrayBuffer
+/// serialization across Web Worker boundaries and direct GPU buffer upload.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct PackedVertex {
+    pub position: [f32; 3],
+    pub normal: [f32; 3],
+    pub face_id: u32,
+}
+
+/// A serialized mesh representation designed for Transferable ArrayBuffer messaging
+/// between kernel worker threads and the main GPU render thread.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PackedMesh {
+    pub vertices: Vec<PackedVertex>,
+    pub indices: Option<Vec<u32>>,
+    pub line_positions: Vec<[f32; 3]>,
+    pub line_indices: Option<Vec<u32>>,
+    pub deindexed: bool,
+    pub triangle_count: u32,
+    pub line_count: u32,
+}
+
+impl PackedMesh {
+    /// Serializes a kernel [`Mesh`] into a zero-copy 28-byte aligned [`PackedMesh`].
+    pub fn pack(mesh: &Mesh) -> Result<Self, MeshError> {
+        validate(mesh)?;
+
+        let (vertex_bytes, index_bytes, _count, deindexed) = match per_vertex_faces(mesh) {
+            Some(faces) => (
+                pack_vertices(mesh, |v| faces[v]),
+                Some(pack_indices(&mesh.indices)),
+                mesh.indices.len() as u32,
+                false,
+            ),
+            None => {
+                let expanded = expand(mesh);
+                let n = expanded.len() as u32;
+                (pack_expanded(&expanded), None, n, true)
+            }
+        };
+
+        let vertices: Vec<PackedVertex> = bytemuck::cast_slice(&vertex_bytes).to_vec();
+        let indices = index_bytes.map(|b| bytemuck::cast_slice(&b).to_vec());
+
+        let line_positions = mesh.line_positions.clone();
+
+        let line_indices = if !mesh.line_indices.is_empty() {
+            Some(mesh.line_indices.clone())
+        } else {
+            None
+        };
+
+        let line_count = (if line_indices.is_some() {
+            mesh.line_indices.len() / 2
+        } else {
+            line_positions.len() / 2
+        }) as u32;
+
+        Ok(Self {
+            vertices,
+            indices,
+            line_positions,
+            line_indices,
+            deindexed,
+            triangle_count: mesh.triangle_count() as u32,
+            line_count,
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MeshError {
     /// The backend produced something the contract forbids. The conformance
@@ -167,6 +238,74 @@ impl GpuMesh {
             deindexed,
             triangles: mesh.triangle_count() as u32,
             lines: mesh.line_count() as u32,
+        })
+    }
+
+    pub fn from_packed(
+        device: &wgpu::Device,
+        max_buffer_size: u64,
+        label: &str,
+        packed: &PackedMesh,
+    ) -> Result<Self, MeshError> {
+        let vertex_bytes = bytemuck::cast_slice(&packed.vertices);
+        let bytes = vertex_bytes.len() as u64;
+        if bytes > max_buffer_size {
+            return Err(MeshError::TooLarge {
+                bytes,
+                max: max_buffer_size,
+            });
+        }
+
+        let vertices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some(label),
+            contents: vertex_bytes,
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+
+        let indices = packed.indices.as_ref().map(|idx| {
+            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some(label),
+                contents: bytemuck::cast_slice(idx),
+                usage: wgpu::BufferUsages::INDEX,
+            })
+        });
+
+        let count = if let Some(idx) = &packed.indices {
+            idx.len() as u32
+        } else {
+            packed.vertices.len() as u32
+        };
+
+        let (line_vertices, line_indices, line_count) = if let (Some(indices_vec), false) =
+            (&packed.line_indices, packed.line_positions.is_empty())
+        {
+            let line_v_bytes = bytemuck::cast_slice(&packed.line_positions);
+            let line_i_bytes = bytemuck::cast_slice(indices_vec);
+            let v_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some(&format!("{label} lines v")),
+                contents: line_v_bytes,
+                usage: wgpu::BufferUsages::VERTEX,
+            });
+            let i_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some(&format!("{label} lines i")),
+                contents: line_i_bytes,
+                usage: wgpu::BufferUsages::INDEX,
+            });
+            (Some(v_buf), Some(i_buf), indices_vec.len() as u32)
+        } else {
+            (None, None, 0)
+        };
+
+        Ok(Self {
+            vertices,
+            indices,
+            count,
+            line_vertices,
+            line_indices,
+            line_count,
+            deindexed: packed.deindexed,
+            triangles: packed.triangle_count,
+            lines: packed.line_count,
         })
     }
 
@@ -350,5 +489,19 @@ mod tests {
         mesh.line_positions = vec![[0.0, 0.0, 0.0]];
         mesh.line_indices = vec![0, 5]; // out of bounds
         assert!(matches!(validate(&mesh), Err(MeshError::Malformed(_))));
+    }
+
+    #[test]
+    fn packed_mesh_serializes_and_preserves_28_byte_alignment() {
+        let mesh = tri(&[7, 7], &[0, 1, 2, 1, 2, 3], 4);
+        let packed = PackedMesh::pack(&mesh).unwrap();
+        assert_eq!(packed.vertices.len(), 4);
+        assert_eq!(std::mem::size_of::<PackedVertex>(), 28);
+        assert_eq!(packed.vertices[0].face_id, 7);
+        assert!(!packed.deindexed);
+
+        // Verify zero-copy cast to bytes
+        let bytes: &[u8] = bytemuck::cast_slice(&packed.vertices);
+        assert_eq!(bytes.len(), 4 * 28);
     }
 }
