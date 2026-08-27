@@ -12,7 +12,9 @@
 //! the way set operations require, tessellation is well-formed and lies inside
 //! the body it came from, and errors happen where they are promised.
 
-use crate::{Aabb, BooleanOp, GeometryKernel, KernelError, Mat4, Mesh, Quality, Tolerance, Vec3};
+use crate::{
+    Aabb, BooleanOp, GeometryKernel, KernelError, Mat4, Mesh, Profile, Quality, Tolerance, Vec3,
+};
 
 pub struct Check {
     pub name: &'static str,
@@ -450,6 +452,36 @@ pub fn run<K: GeometryKernel>(k: &mut K, tol: Tolerance, quality: Quality) -> Re
             require(f != b, "fillet returned same handle")?;
             let c = k.chamfer(b, 1.0).map_err(|e| e.to_string())?;
             require(c != b, "chamfer returned same handle")
+        }
+    );
+
+    check!(
+        checks,
+        "extruding 2D profiles produces valid solids and refuses zero or negative distances",
+        {
+            let rect = Profile::Rectangle {
+                width: 10.0,
+                height: 10.0,
+            };
+            require(
+                k.extrude(&rect, 0.0).is_err(),
+                "zero distance extrusion accepted",
+            )?;
+            require(
+                k.extrude(&rect, -5.0).is_err(),
+                "negative distance extrusion accepted",
+            )?;
+
+            let b = k.extrude(&rect, 20.0).map_err(|e| e.to_string())?;
+            let bounds = k.bounds(b).map_err(|e| e.to_string())?;
+            require(
+                boxes_close(
+                    &bounds,
+                    &Aabb::centered(Vec3::new(10.0, 10.0, 20.0)),
+                    tol.linear,
+                ),
+                format!("extrusion bounds mismatch: got {bounds:?}"),
+            )
         }
     );
 

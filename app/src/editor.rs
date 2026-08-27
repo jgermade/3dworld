@@ -9,7 +9,7 @@
 
 use std::path::{Path, PathBuf};
 
-use w3d_core::kernel::{BooleanOp, GeometryKernel, Vec3};
+use w3d_core::kernel::{BooleanOp, GeometryKernel, Profile, Vec3};
 use w3d_core::{Document, NodeId};
 use w3d_render::{Camera, Pick};
 
@@ -20,6 +20,7 @@ pub enum Command {
     AddBox,
     AddSphere,
     AddCylinder,
+    AddExtrude,
     Fillet,
     Chamfer,
     MeasureDistance,
@@ -329,6 +330,13 @@ impl<K: GeometryKernel> Editor<K> {
             Command::AddCylinder => {
                 self.add("Cylinder", |doc, name| doc.add_cylinder(name, 8.0, 24.0))
             }
+            Command::AddExtrude => self.add("Extrude", |doc, name| {
+                let profile = Profile::Rectangle {
+                    width: 15.0,
+                    height: 25.0,
+                };
+                doc.add_extrude(name, &profile, 30.0)
+            }),
             Command::Fillet => self.fillet(1.0),
             Command::Chamfer => self.chamfer(1.0),
             Command::MeasureDistance => self.measure_distance(),
@@ -851,6 +859,14 @@ mod tests {
         e.run(Command::AddBox);
         e.run(Command::Chamfer);
         assert!(e.status().contains("chamfered"), "{}", e.status());
+    }
+
+    #[test]
+    fn add_extrude_command_creates_extruded_solid() {
+        let mut e = editor();
+        e.run(Command::AddExtrude);
+        assert_eq!(e.document().len(), 1);
+        assert!(e.status().contains("added Extrude"), "{}", e.status());
     }
 
     #[test]

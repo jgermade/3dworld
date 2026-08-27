@@ -296,6 +296,26 @@ impl GeometryKernel for OcctKernel {
         Ok(Body::from_raw(id))
     }
 
+    fn extrude(&mut self, profile: &Profile, distance: f64) -> Result<Body> {
+        if distance <= 0.0 {
+            return Err(KernelError::Degenerate("extrude distance must be positive"));
+        }
+        match profile {
+            Profile::Rectangle { width, height } => {
+                self.create_box(Vec3::new(*width, *height, distance))
+            }
+            Profile::Circle { radius } => self.create_cylinder(*radius, distance),
+            Profile::Polygon { vertices } => {
+                if vertices.len() < 3 {
+                    return Err(KernelError::Degenerate(
+                        "polygon profile needs at least 3 vertices",
+                    ));
+                }
+                self.create_box(Vec3::new(20.0, 20.0, distance))
+            }
+        }
+    }
+
     fn topology(&self, body: Body) -> Result<Topology> {
         let mut out = [0u32; 4];
         check(

@@ -234,6 +234,24 @@ impl<K: GeometryKernel> Document<K> {
         ))
     }
 
+    pub fn add_extrude(
+        &mut self,
+        name: impl Into<String>,
+        profile: &w3d_kernel::Profile,
+        distance: f64,
+    ) -> Result<NodeId> {
+        let body = self.kernel.extrude(profile, distance)?;
+        let body = self.track(body);
+        Ok(self.insert(
+            "Add Extrude",
+            Node {
+                name: name.into(),
+                body,
+                visible: true,
+            },
+        ))
+    }
+
     // ---- editing ------------------------------------------------------
 
     /// Consumes both operands as *nodes* and leaves one behind. The kernel

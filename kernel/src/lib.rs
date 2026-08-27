@@ -101,6 +101,14 @@ pub enum BooleanOp {
     Intersection,
 }
 
+/// A 2D planar profile on the XY plane centred at origin, suitable for linear extrusion.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Profile {
+    Rectangle { width: f64, height: f64 },
+    Circle { radius: f64 },
+    Polygon { vertices: Vec<(f64, f64)> },
+}
+
 /// Counts only. Anything richer belongs behind a method on the trait, so that
 /// no caller starts pattern-matching on a backend's own topology types.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -209,6 +217,9 @@ pub trait GeometryKernel {
     /// resulting solid. If `distance <= 0.0` or exceeds the solid's bounds,
     /// returns `KernelError::Degenerate`.
     fn chamfer(&mut self, body: Body, distance: f64) -> Result<Body>;
+
+    /// Extrudes a 2D planar profile linearly along +Z by `distance`.
+    fn extrude(&mut self, profile: &Profile, distance: f64) -> Result<Body>;
 
     fn topology(&self, body: Body) -> Result<Topology>;
 

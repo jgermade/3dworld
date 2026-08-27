@@ -713,7 +713,7 @@ fn chrome<K: GeometryKernel + Default>(
         ui.horizontal(|ui| match active_tab {
             RibbonTab::Create => {
                 ui.group(|ui| {
-                    ui.label("Primitives");
+                    ui.label("Primitives & Sketches");
                     ui.horizontal(|ui| {
                         if ui.button("Box [B]").clicked() {
                             execute_command(editor, Command::AddBox);
@@ -723,6 +723,9 @@ fn chrome<K: GeometryKernel + Default>(
                         }
                         if ui.button("Cylinder [C]").clicked() {
                             execute_command(editor, Command::AddCylinder);
+                        }
+                        if ui.button("Extrude [E]").clicked() {
+                            execute_command(editor, Command::AddExtrude);
                         }
                     });
                 });
