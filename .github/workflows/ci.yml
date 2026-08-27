@@ -91,7 +91,8 @@ jobs:
           sudo apt-get install -y \
             build-essential pkg-config \
             libocct-foundation-dev libocct-modeling-data-dev \
-            libocct-modeling-algorithms-dev libocct-data-exchange-dev
+            libocct-modeling-algorithms-dev libocct-data-exchange-dev \
+            libocct-ocaf-dev
       - name: The header Ubuntu Noble forgot to ship, if this image forgot it too
         # Conditional rather than unconditional: the packaging bug is real and
         # is also fixed in some images, and fetching a header nobody needs is a
@@ -144,7 +145,8 @@ jobs:
             xvfb mesa-vulkan-drivers libxkbcommon-x11-0 \
             build-essential pkg-config \
             libocct-foundation-dev libocct-modeling-data-dev \
-            libocct-modeling-algorithms-dev libocct-data-exchange-dev
+            libocct-modeling-algorithms-dev libocct-data-exchange-dev \
+            libocct-ocaf-dev
       - name: The header Ubuntu Noble forgot to ship, if this image forgot it too
         run: |
           if [ ! -f /usr/include/opencascade/NCollection_AliasedArray.hxx ]; then
