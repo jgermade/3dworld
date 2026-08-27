@@ -584,9 +584,7 @@ impl<K: GeometryKernel + Default> Live<K> {
         }
 
         let hover = self.editor.hovered_edge();
-        let hover_edge = hover
-            .hit()
-            .map(|(_, _, p0, p1)| (p0, p1, hover.is_near()));
+        let hover_edge = hover.hit().map(|(_, _, p0, p1)| (p0, p1, hover.is_near()));
         let sel_pts = self.editor.selected_edge().map(|(_, _, p0, p1)| (p0, p1));
         self.scene.update_edge_highlight(
             &self.gpu.device,

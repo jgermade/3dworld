@@ -177,3 +177,57 @@ jobs:
           name: ours.step
       - name: Weigh it
         run: make freecad-check FREECAD_STEP=ours.step
+
+  # Deploy the WebAssembly app to GitHub Pages.
+  # Builds `make web` using `wasm-bindgen-cli` matching the pinned version in
+  # Cargo.lock, then uploads and deploys `web/` using official actions/*.
+  pages:
+    name: Deploy to GitHub Pages
+    needs: test
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/feat/antigravity' || github.event_name == 'workflow_dispatch'
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    concurrency:
+      group: "pages"
+      cancel-in-progress: false
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Rust, and the wasm target
+        id: rust
+        run: |
+          rustup update stable
+          rustup default stable
+          rustup target add wasm32-unknown-unknown
+          echo "version=$(rustc --version | tr ' ()/' '____')" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin/wasm-bindgen
+            target
+          key: cargo-web-${{ steps.rust.outputs.version }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: cargo-web-${{ steps.rust.outputs.version }}-
+      - name: wasm-bindgen-cli at pinned lockfile version
+        run: |
+          version=$(grep -A1 '^name = "wasm-bindgen"$' Cargo.lock | grep '^version' | head -1 | cut -d'"' -f2)
+          echo "wasm-bindgen $version"
+          if [ "$(wasm-bindgen --version 2>/dev/null | awk '{print $2}')" != "$version" ]; then
+            cargo install wasm-bindgen-cli --version "$version" --force
+          fi
+      - name: Build WebAssembly assets
+        run: make web
+      - name: Upload artifact for GitHub Pages
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: web
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
+

@@ -271,7 +271,11 @@ fn build_edge_tube_mesh(p0: [f32; 3], p1: [f32; 3], radius: f32) -> Mesh {
         let nx = u.x * cos_a + w.x * sin_a;
         let ny = u.y * cos_a + w.y * sin_a;
         let nz = u.z * cos_a + w.z * sin_a;
-        positions.push([(v0.x + r * nx) as f32, (v0.y + r * ny) as f32, (v0.z + r * nz) as f32]);
+        positions.push([
+            (v0.x + r * nx) as f32,
+            (v0.y + r * ny) as f32,
+            (v0.z + r * nz) as f32,
+        ]);
         normals.push(bottom_norm);
     }
     for i in 0..SEGMENTS {
@@ -294,7 +298,11 @@ fn build_edge_tube_mesh(p0: [f32; 3], p1: [f32; 3], radius: f32) -> Mesh {
         let nx = u.x * cos_a + w.x * sin_a;
         let ny = u.y * cos_a + w.y * sin_a;
         let nz = u.z * cos_a + w.z * sin_a;
-        positions.push([(v1.x + r * nx) as f32, (v1.y + r * ny) as f32, (v1.z + r * nz) as f32]);
+        positions.push([
+            (v1.x + r * nx) as f32,
+            (v1.y + r * ny) as f32,
+            (v1.z + r * nz) as f32,
+        ]);
         normals.push(top_norm);
     }
     for i in 0..SEGMENTS {
@@ -316,4 +324,3 @@ fn build_edge_tube_mesh(p0: [f32; 3], p1: [f32; 3], radius: f32) -> Mesh {
         line_indices: vec![0, 1],
     }
 }
-

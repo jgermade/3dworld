@@ -354,7 +354,8 @@ impl<K: GeometryKernel> Editor<K> {
                     if let Some((face_node_id, face_id)) = closest_face {
                         if self.doc.is_selected(face_node_id) {
                             // Body is selected -> Face Mask applies (Object mask does NOT apply)
-                            self.hovered_edge = closest_edge.map_or(EdgeHover::None, |(_, hit)| EdgeHover::Near(hit));
+                            self.hovered_edge = closest_edge
+                                .map_or(EdgeHover::None, |(_, hit)| EdgeHover::Near(hit));
                             self.hovered_body = None;
                             self.hovered_face = Some((face_node_id, face_id));
                         } else {
@@ -365,7 +366,8 @@ impl<K: GeometryKernel> Editor<K> {
                         }
                     } else {
                         // Background
-                        self.hovered_edge = closest_edge.map_or(EdgeHover::None, |(_, hit)| EdgeHover::Near(hit));
+                        self.hovered_edge =
+                            closest_edge.map_or(EdgeHover::None, |(_, hit)| EdgeHover::Near(hit));
                         self.hovered_body = None;
                         self.hovered_face = None;
                     }
@@ -526,7 +528,11 @@ impl<K: GeometryKernel> Editor<K> {
                     if let Some(metrics) = mesh.face_metrics(face) {
                         self.status = format!(
                             "{} · Face #{face} (Area: {:.2} mm², Normal: [{:.2}, {:.2}, {:.2}])",
-                            name, metrics.area, metrics.normal.x, metrics.normal.y, metrics.normal.z
+                            name,
+                            metrics.area,
+                            metrics.normal.x,
+                            metrics.normal.y,
+                            metrics.normal.z
                         );
                     } else {
                         self.status = format!("{name} · face {face}");
@@ -807,7 +813,13 @@ impl<K: GeometryKernel> Editor<K> {
         let node_ids: Vec<NodeId> = self
             .doc
             .nodes()
-            .filter_map(|(id, node)| if node.visible && self.doc.is_selected(id) { Some(id) } else { None })
+            .filter_map(|(id, node)| {
+                if node.visible && self.doc.is_selected(id) {
+                    Some(id)
+                } else {
+                    None
+                }
+            })
             .collect();
 
         for id in node_ids {
@@ -885,7 +897,8 @@ impl<K: GeometryKernel> Editor<K> {
         let ndc_x = (2.0 * cursor_x / width) - 1.0;
         let ndc_y = 1.0 - (2.0 * cursor_y / height);
 
-        let ray_dir = (forward + right * (ndc_x * w_tan) + up * (ndc_y * h_tan)).normalize(1.0e-12)?;
+        let ray_dir =
+            (forward + right * (ndc_x * w_tan) + up * (ndc_y * h_tan)).normalize(1.0e-12)?;
 
         let mut closest: Option<(f64, NodeId, u32)> = None;
 
@@ -969,14 +982,21 @@ impl<K: GeometryKernel> Editor<K> {
         let ndc_x = (2.0 * cursor_x / width) - 1.0;
         let ndc_y = 1.0 - (2.0 * cursor_y / height);
 
-        let ray_dir = (forward + right * (ndc_x * w_tan) + up * (ndc_y * h_tan)).normalize(1.0e-12)?;
+        let ray_dir =
+            (forward + right * (ndc_x * w_tan) + up * (ndc_y * h_tan)).normalize(1.0e-12)?;
 
         let mut closest_t: Option<f64> = None;
 
         let node_ids: Vec<NodeId> = self
             .doc
             .nodes()
-            .filter_map(|(id, node)| if node.visible && id != exclude_id { Some(id) } else { None })
+            .filter_map(|(id, node)| {
+                if node.visible && id != exclude_id {
+                    Some(id)
+                } else {
+                    None
+                }
+            })
             .collect();
 
         for id in node_ids {
@@ -1264,11 +1284,7 @@ fn ray_triangle_intersect(
         return None;
     }
     let t = f * edge2.dot(q);
-    if t > 1e-6 {
-        Some(t)
-    } else {
-        None
-    }
+    if t > 1e-6 { Some(t) } else { None }
 }
 
 #[cfg(test)]
@@ -1920,4 +1936,3 @@ mod tests {
         ));
     }
 }
-
