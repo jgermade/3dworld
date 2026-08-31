@@ -276,3 +276,25 @@ fn compaction_requires_clear_history_and_reclaims_tombstones() {
     assert!(d.is_selected(united) || d.selection().next().is_some());
     assert_eq!(d.len(), 2);
 }
+
+#[test]
+fn assembly_hierarchy_groups_and_reparenting() {
+    let mut d = doc();
+    let group = d.add_group("Engine Assembly");
+    let part1 = d.add_box("Piston", Vec3::splat(1.0)).unwrap();
+    let part2 = d.add_box("Crankshaft", Vec3::splat(2.0)).unwrap();
+
+    assert_eq!(d.parent_of(part1), None);
+    assert_eq!(d.children_of(group), &[]);
+
+    d.reparent(part1, Some(group)).unwrap();
+    d.reparent(part2, Some(group)).unwrap();
+
+    assert_eq!(d.parent_of(part1), Some(group));
+    assert_eq!(d.parent_of(part2), Some(group));
+    assert_eq!(d.children_of(group), &[part1, part2]);
+
+    d.reparent(part1, None).unwrap();
+    assert_eq!(d.parent_of(part1), None);
+    assert_eq!(d.children_of(group), &[part2]);
+}

@@ -9,7 +9,7 @@
 
 use std::path::{Path, PathBuf};
 
-use w3d_core::kernel::{BooleanOp, GeometryKernel, Profile, Vec3};
+use w3d_core::kernel::{BooleanOp, GeometryKernel, Profile, SketchPlane, Vec3};
 use w3d_core::{Document, NodeId};
 use w3d_render::{Camera, Pick};
 
@@ -24,6 +24,15 @@ pub enum Command {
     AddRevolve,
     AddSweep,
     AddLoft,
+    AddGroup,
+    ReparentNode {
+        node: NodeId,
+        new_parent: Option<NodeId>,
+    },
+    EnterSketchMode,
+    FinishSketch,
+    CancelSketch,
+    AddSketchPoint(f64, f64),
     Fillet,
     Chamfer,
     PushPullFace(f64),
@@ -160,6 +169,13 @@ struct Drag {
     alt: bool,
 }
 
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct SketchState {
+    pub active: bool,
+    pub plane: SketchPlane,
+    pub points: Vec<(f64, f64)>,
+}
+
 pub struct Editor<K: GeometryKernel> {
     doc: Document<K>,
     /// Where this document came from and where `Save` writes. `None` for one
@@ -177,6 +193,7 @@ pub struct Editor<K: GeometryKernel> {
     hovered_body: Option<NodeId>,
     selected_edge: Option<(NodeId, u32, [f32; 3], [f32; 3])>,
     hovered_edge: EdgeHover,
+    sketch_state: SketchState,
 }
 
 impl<K: GeometryKernel> Editor<K> {
@@ -194,7 +211,12 @@ impl<K: GeometryKernel> Editor<K> {
             hovered_body: None,
             selected_edge: None,
             hovered_edge: EdgeHover::None,
+            sketch_state: SketchState::default(),
         }
+    }
+
+    pub fn sketch_state(&self) -> &SketchState {
+        &self.sketch_state
     }
 
     pub fn selected_face(&self) -> Option<(NodeId, u32)> {
@@ -625,6 +647,76 @@ impl<K: GeometryKernel> Editor<K> {
                 ];
                 doc.add_loft(name, &profiles, &planes)
             }),
+            Command::AddGroup => {
+                let id = self.doc.add_group("New Group");
+                Ok(format!("added group node #{id:?}"))
+            }
+            Command::ReparentNode { node, new_parent } => {
+                match self.doc.reparent(node, new_parent) {
+                    Ok(()) => Ok(format!("reparented node #{node:?}")),
+                    Err(e) => Err(e.to_string()),
+                }
+            }
+            Command::EnterSketchMode => {
+                let plane = if let Some((id, face_id)) = self.selected_face {
+                    if let Ok(mesh) = self.doc.mesh(id) {
+                        if let Some(metrics) = mesh.face_metrics(face_id) {
+                            let origin = metrics.centroid;
+                            let z = metrics.normal;
+                            let x_axis = if z.x.abs() < 0.9 {
+                                Vec3::X.cross(z)
+                            } else {
+                                Vec3::Y.cross(z)
+                            };
+                            let y_axis = z.cross(x_axis);
+                            SketchPlane {
+                                origin,
+                                x_axis,
+                                y_axis,
+                            }
+                        } else {
+                            SketchPlane::default()
+                        }
+                    } else {
+                        SketchPlane::default()
+                    }
+                } else {
+                    SketchPlane::default()
+                };
+                self.sketch_state.active = true;
+                self.sketch_state.plane = plane;
+                self.sketch_state.points.clear();
+                Ok(String::from("entered 2D sketch mode"))
+            }
+            Command::FinishSketch => {
+                if !self.sketch_state.active {
+                    Ok(String::from("not in sketch mode"))
+                } else if self.sketch_state.points.len() < 3 {
+                    self.sketch_state.active = false;
+                    Ok(String::from("sketch cancelled (fewer than 3 points)"))
+                } else {
+                    let profile = Profile::Polygon {
+                        vertices: self.sketch_state.points.clone(),
+                    };
+                    self.sketch_state.active = false;
+                    self.add("Sketched Solid", |doc, name| {
+                        doc.add_extrude(name, &profile, 20.0)
+                    })
+                }
+            }
+            Command::CancelSketch => {
+                self.sketch_state.active = false;
+                self.sketch_state.points.clear();
+                Ok(String::from("sketch mode cancelled"))
+            }
+            Command::AddSketchPoint(x, y) => {
+                if self.sketch_state.active {
+                    self.sketch_state.points.push((x, y));
+                    Ok(format!("added sketch point ({x:.1}, {y:.1})"))
+                } else {
+                    Ok(String::from("not in sketch mode"))
+                }
+            }
             Command::Fillet => self.fillet(1.0),
             Command::Chamfer => self.chamfer(1.0),
             Command::PushPullFace(d) => self.push_pull_face(d),
@@ -1974,5 +2066,24 @@ mod tests {
             reaction,
             Reaction::PickHover { .. } | Reaction::Redraw
         ));
+    }
+
+    #[test]
+    fn sketch_mode_commands_and_polygon_extrusion() {
+        let mut e = editor();
+        assert!(!e.sketch_state().active);
+
+        e.run(Command::EnterSketchMode);
+        assert!(e.sketch_state().active);
+
+        e.run(Command::AddSketchPoint(0.0, 0.0));
+        e.run(Command::AddSketchPoint(20.0, 0.0));
+        e.run(Command::AddSketchPoint(10.0, 20.0));
+
+        assert_eq!(e.sketch_state().points.len(), 3);
+
+        e.run(Command::FinishSketch);
+        assert!(!e.sketch_state().active);
+        assert_eq!(e.doc.len(), 1, "sketched solid extruded into document");
     }
 }

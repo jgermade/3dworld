@@ -877,6 +877,12 @@ fn chrome<K: GeometryKernel + Default>(
                         if ui.button("Loft").clicked() {
                             execute_command(editor, Command::AddLoft);
                         }
+                        if ui.button("Sketch 2D").clicked() {
+                            execute_command(editor, Command::EnterSketchMode);
+                        }
+                        if ui.button("New Group").clicked() {
+                            execute_command(editor, Command::AddGroup);
+                        }
                     });
                 });
                 ui.group(|ui| {
@@ -1073,20 +1079,54 @@ fn chrome<K: GeometryKernel + Default>(
     egui::Panel::left("tree")
         .default_size(220.0)
         .show(root, |ui| {
-            ui.heading("Outliner");
+            ui.horizontal(|ui| {
+                ui.heading("Outliner");
+                if ui.button("+ Group").clicked() {
+                    execute_command(editor, Command::AddGroup);
+                }
+            });
             ui.separator();
+
+            let sketch_active = editor.sketch_state().active;
+            if sketch_active {
+                ui.group(|ui| {
+                    ui.label("✏️ 2D Sketch Mode Active");
+                    let pt_count = editor.sketch_state().points.len();
+                    ui.label(format!("Points: {pt_count}"));
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add_enabled(pt_count >= 3, egui::Button::new("Finish [Extrude]"))
+                            .clicked()
+                        {
+                            execute_command(editor, Command::FinishSketch);
+                        }
+                        if ui.button("Cancel").clicked() {
+                            execute_command(editor, Command::CancelSketch);
+                        }
+                    });
+                });
+                ui.separator();
+            }
 
             let nodes: Vec<_> = editor
                 .document()
                 .nodes()
-                .map(|(id, node)| (id, node.name.clone()))
+                .map(|(id, node)| (id, node.name.clone(), node.parent, node.children.len()))
                 .collect();
             let selected = editor.selection();
 
             egui::ScrollArea::vertical().show(ui, |ui| {
-                for (id, name) in nodes {
+                for (id, name, parent, child_count) in nodes {
                     let is = selected.contains(&id);
-                    if ui.selectable_label(is, &name).clicked() {
+                    let prefix = if parent.is_some() {
+                        "  ↳ "
+                    } else if child_count > 0 {
+                        "📁 "
+                    } else {
+                        "📦 "
+                    };
+                    let label = format!("{prefix}{name}");
+                    if ui.selectable_label(is, &label).clicked() {
                         let doc = editor.document_mut();
                         if is {
                             doc.deselect(id);

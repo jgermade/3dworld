@@ -269,11 +269,9 @@ pub fn load_with_metadata<K: GeometryKernel>(
                 body
             }
         };
-        nodes.push(Node {
-            name: entry.name.clone(),
-            body,
-            visible: entry.visible,
-        });
+        let mut node = Node::new(entry.name.clone(), body);
+        node.visible = entry.visible;
+        nodes.push(node);
     }
 
     let document = Document::from_parts(

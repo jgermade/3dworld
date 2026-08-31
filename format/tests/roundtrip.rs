@@ -104,11 +104,7 @@ fn a_shared_body_is_stored_once() {
     // produce — only a file, or a future `copy` that does not deep-copy.
     let mut kernel = FakeKernel::default();
     let body = kernel.create_box(Vec3::new(1.0, 1.0, 1.0)).unwrap();
-    let node = |name: &str| w3d_core::Node {
-        name: String::from(name),
-        body,
-        visible: true,
-    };
+    let node = |name: &str| w3d_core::Node::new(name, body);
     let doc = Document::from_parts(
         kernel,
         Tolerance::document_default(),

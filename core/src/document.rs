@@ -21,6 +21,20 @@ pub struct Node {
     pub name: String,
     pub body: Body,
     pub visible: bool,
+    pub parent: Option<NodeId>,
+    pub children: Vec<NodeId>,
+}
+
+impl Node {
+    pub fn new(name: impl Into<String>, body: Body) -> Self {
+        Self {
+            name: name.into(),
+            body,
+            visible: true,
+            parent: None,
+            children: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -190,30 +204,67 @@ impl<K: GeometryKernel> Document<K> {
 
     // ---- construction -------------------------------------------------
 
+    pub fn add_group(&mut self, name: impl Into<String>) -> NodeId {
+        let dummy_body = Body::from_raw(0);
+        self.insert("Add Group", Node::new(name, dummy_body))
+    }
+
+    pub fn reparent(&mut self, child_id: NodeId, new_parent_id: Option<NodeId>) -> Result<()> {
+        if !self.nodes.contains(child_id) {
+            return Err(DocumentError::UnknownNode(child_id));
+        }
+        if let Some(parent_id) = new_parent_id {
+            if !self.nodes.contains(parent_id) {
+                return Err(DocumentError::UnknownNode(parent_id));
+            }
+            if child_id == parent_id {
+                return Ok(());
+            }
+        }
+
+        let old_parent = self.nodes.get(child_id).and_then(|n| n.parent);
+        if old_parent == new_parent_id {
+            return Ok(());
+        }
+
+        if let Some(old_p) = old_parent
+            && let Some(p_node) = self.nodes.get_mut(old_p)
+        {
+            p_node.children.retain(|&id| id != child_id);
+        }
+
+        if let Some(c_node) = self.nodes.get_mut(child_id) {
+            c_node.parent = new_parent_id;
+        }
+
+        if let Some(new_p) = new_parent_id
+            && let Some(p_node) = self.nodes.get_mut(new_p)
+            && !p_node.children.contains(&child_id)
+        {
+            p_node.children.push(child_id);
+        }
+
+        Ok(())
+    }
+
+    pub fn parent_of(&self, id: NodeId) -> Option<NodeId> {
+        self.nodes.get(id).and_then(|n| n.parent)
+    }
+
+    pub fn children_of(&self, id: NodeId) -> &[NodeId] {
+        self.nodes.get(id).map_or(&[], |n| &n.children)
+    }
+
     pub fn add_box(&mut self, name: impl Into<String>, size: Vec3) -> Result<NodeId> {
         let body = self.kernel.create_box(size)?;
         let body = self.track(body);
-        Ok(self.insert(
-            "Add box",
-            Node {
-                name: name.into(),
-                body,
-                visible: true,
-            },
-        ))
+        Ok(self.insert("Add box", Node::new(name, body)))
     }
 
     pub fn add_sphere(&mut self, name: impl Into<String>, radius: f64) -> Result<NodeId> {
         let body = self.kernel.create_sphere(radius)?;
         let body = self.track(body);
-        Ok(self.insert(
-            "Add sphere",
-            Node {
-                name: name.into(),
-                body,
-                visible: true,
-            },
-        ))
+        Ok(self.insert("Add sphere", Node::new(name, body)))
     }
 
     pub fn add_cylinder(
@@ -224,14 +275,7 @@ impl<K: GeometryKernel> Document<K> {
     ) -> Result<NodeId> {
         let body = self.kernel.create_cylinder(radius, height)?;
         let body = self.track(body);
-        Ok(self.insert(
-            "Add cylinder",
-            Node {
-                name: name.into(),
-                body,
-                visible: true,
-            },
-        ))
+        Ok(self.insert("Add cylinder", Node::new(name, body)))
     }
 
     pub fn add_extrude(
@@ -242,14 +286,7 @@ impl<K: GeometryKernel> Document<K> {
     ) -> Result<NodeId> {
         let body = self.kernel.extrude(profile, distance)?;
         let body = self.track(body);
-        Ok(self.insert(
-            "Add Extrude",
-            Node {
-                name: name.into(),
-                body,
-                visible: true,
-            },
-        ))
+        Ok(self.insert("Add Extrude", Node::new(name, body)))
     }
 
     pub fn add_revolve(
@@ -264,14 +301,7 @@ impl<K: GeometryKernel> Document<K> {
             .kernel
             .revolve(profile, axis_origin, axis_dir, angle_rad)?;
         let body = self.track(body);
-        Ok(self.insert(
-            "Add Revolve",
-            Node {
-                name: name.into(),
-                body,
-                visible: true,
-            },
-        ))
+        Ok(self.insert("Add Revolve", Node::new(name, body)))
     }
 
     pub fn add_sweep(
@@ -282,14 +312,7 @@ impl<K: GeometryKernel> Document<K> {
     ) -> Result<NodeId> {
         let body = self.kernel.sweep(profile, path_points)?;
         let body = self.track(body);
-        Ok(self.insert(
-            "Add Sweep",
-            Node {
-                name: name.into(),
-                body,
-                visible: true,
-            },
-        ))
+        Ok(self.insert("Add Sweep", Node::new(name, body)))
     }
 
     pub fn add_loft(
@@ -300,14 +323,7 @@ impl<K: GeometryKernel> Document<K> {
     ) -> Result<NodeId> {
         let body = self.kernel.loft(profiles, planes)?;
         let body = self.track(body);
-        Ok(self.insert(
-            "Add Loft",
-            Node {
-                name: name.into(),
-                body,
-                visible: true,
-            },
-        ))
+        Ok(self.insert("Add Loft", Node::new(name, body)))
     }
 
     // ---- editing ------------------------------------------------------
@@ -338,11 +354,7 @@ impl<K: GeometryKernel> Document<K> {
         self.history.record(Edit::Remove { id: a, node: na });
         self.nodes.remove(b);
         self.history.record(Edit::Remove { id: b, node: nb });
-        let node = Node {
-            name,
-            body,
-            visible: true,
-        };
+        let node = Node::new(name, body);
         let id = self.nodes.insert(node.clone());
         self.history.record(Edit::Insert { id, node });
         self.history.commit();
@@ -498,11 +510,7 @@ impl<K: GeometryKernel> Document<K> {
                     }
                 }
             };
-            let node = Node {
-                name: node_name,
-                body: imp.body,
-                visible: true,
-            };
+            let node = Node::new(node_name, imp.body);
             let id = self.nodes.insert(node.clone());
             self.history.record(Edit::Insert { id, node });
             ids.push(id);
