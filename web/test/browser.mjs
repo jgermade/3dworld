@@ -22,6 +22,8 @@ import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
+import fs from 'node:fs';
+
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, '..', '..');
 const require = createRequire(import.meta.url);
@@ -39,7 +41,8 @@ try {
 
 /** The pre-installed browser, if there is one. Playwright otherwise looks for
  *  a build matching its own version, which is not necessarily what is here. */
-const EXECUTABLE = process.env.W3D_CHROME ?? '/opt/pw-browsers/chromium-1194/chrome-linux/chrome';
+const OPT_CHROME = '/opt/pw-browsers/chromium-1194/chrome-linux/chrome';
+const EXECUTABLE = process.env.W3D_CHROME ?? (fs.existsSync(OPT_CHROME) ? OPT_CHROME : undefined);
 
 const failures = [];
 
@@ -77,7 +80,11 @@ async function run({ isolated = true, webgpu = true } = {}) {
     args.push('--disable-features=WebGPU,WebGPUExperimentalFeatures');
   }
 
-  const browser = await chromium.launch({ executablePath: EXECUTABLE, args });
+  const launchOptions = { args };
+  if (EXECUTABLE) {
+    launchOptions.executablePath = EXECUTABLE;
+  }
+  const browser = await chromium.launch(launchOptions);
   try {
     const page = await browser.newPage({ viewport: { width: 960, height: 660 } });
     const consoleErrors = [];

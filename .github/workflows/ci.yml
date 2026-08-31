@@ -212,6 +212,7 @@ jobs:
           rustup update stable
           rustup default stable
           rustup target add wasm32-unknown-unknown
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
           echo "version=$(rustc --version | tr ' ()/' '____')" >> "$GITHUB_OUTPUT"
       - uses: actions/cache@v4
         with:
@@ -226,7 +227,7 @@ jobs:
         run: |
           version=$(grep -A1 '^name = "wasm-bindgen"$' Cargo.lock | grep '^version' | head -1 | cut -d'"' -f2)
           echo "wasm-bindgen $version"
-          if [ "$(wasm-bindgen --version 2>/dev/null | awk '{print $2}')" != "$version" ]; then
+          if [ "$($HOME/.cargo/bin/wasm-bindgen --version 2>/dev/null | awk '{print $2}')" != "$version" ]; then
             cargo install wasm-bindgen-cli --version "$version" --force
           fi
       - name: Build WebAssembly assets
