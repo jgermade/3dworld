@@ -1325,6 +1325,25 @@ fn chrome<K: GeometryKernel + Default>(
                         ui.label(format!("{}", metrics.triangle_count));
                     });
                     ui.separator();
+                    ui.label("↔ Direct Face Extrude Normal Gizmo:");
+                    ui.horizontal(|ui| {
+                        if ui.button("−10 mm").clicked() {
+                            execute_command(editor, Command::PushPullFace(-10.0));
+                        }
+                        if ui.button("−5 mm").clicked() {
+                            execute_command(editor, Command::PushPullFace(-5.0));
+                        }
+                        if ui.button("+5 mm").clicked() {
+                            execute_command(editor, Command::PushPullFace(5.0));
+                        }
+                        if ui.button("+10 mm").clicked() {
+                            execute_command(editor, Command::PushPullFace(10.0));
+                        }
+                        if ui.button("+25 mm").clicked() {
+                            execute_command(editor, Command::PushPullFace(25.0));
+                        }
+                    });
+                    ui.separator();
                     ui.horizontal(|ui| {
                         if ui.button("Deselect Sub-object").clicked() {
                             editor.clear_selected_face();
@@ -1334,9 +1353,6 @@ fn chrome<K: GeometryKernel + Default>(
                         }
                         if ui.button("Chamfer [C]").clicked() {
                             execute_command(editor, Command::Chamfer);
-                        }
-                        if ui.button("Push/Pull [P]").clicked() {
-                            execute_command(editor, Command::PushPullFace(5.0));
                         }
                         if ui.button("Shell [H]").clicked() {
                             execute_command(editor, Command::Shell(1.5));
