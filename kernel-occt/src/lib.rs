@@ -13,8 +13,8 @@
 
 use std::ffi::{CStr, c_char};
 use w3d_kernel::{
-    Aabb, Body, BooleanOp, GeometryKernel, KernelError, Mat4, Mesh, Quality, Result, Tolerance,
-    Topology, Vec3,
+    Aabb, Body, BooleanOp, GeometryKernel, KernelError, Mat4, Mesh, Profile, Quality, Result,
+    SketchPlane, Tolerance, Topology, Vec3,
 };
 
 const OK: i32 = 0;
@@ -135,6 +135,24 @@ unsafe extern "C" {
         ax_dy: f64,
         ax_dz: f64,
         angle_rad: f64,
+        out: *mut u32,
+    ) -> i32;
+    fn w3d_occt_sweep(
+        ctx: *mut Context,
+        profile_kind: i32,
+        p1: f64,
+        p2: f64,
+        pts: *const f64,
+        pt_count: u32,
+        out: *mut u32,
+    ) -> i32;
+    fn w3d_occt_loft(
+        ctx: *mut Context,
+        profile_kind: i32,
+        p1: f64,
+        p2: f64,
+        planes: *const f64,
+        plane_count: u32,
         out: *mut u32,
     ) -> i32;
     fn w3d_occt_topology(ctx: *mut Context, body: u32, out4: *mut u32) -> i32;
@@ -366,6 +384,57 @@ impl GeometryKernel for OcctKernel {
                 axis_dir.y,
                 axis_dir.z,
                 angle_rad,
+                &mut id,
+            )
+        })?;
+        Ok(Body::from_raw(id))
+    }
+
+    fn sweep(&mut self, profile: &Profile, path_points: &[Vec3]) -> Result<Body> {
+        if path_points.len() < 2 {
+            return Err(KernelError::Degenerate(
+                "sweep path requires at least 2 points",
+            ));
+        }
+        let (kind, p1, p2) = match profile {
+            Profile::Rectangle { width, height } => (0i32, *width, *height),
+            Profile::Circle { radius } => (1i32, *radius, 0.0),
+            Profile::Polygon { .. } => (0i32, 10.0, 10.0),
+        };
+        let flat_pts: Vec<f64> = path_points.iter().flat_map(|p| [p.x, p.y, p.z]).collect();
+        let mut id = 0u32;
+        check_new(unsafe {
+            w3d_occt_sweep(
+                self.ctx,
+                kind,
+                p1,
+                p2,
+                flat_pts.as_ptr(),
+                path_points.len() as u32,
+                &mut id,
+            )
+        })?;
+        Ok(Body::from_raw(id))
+    }
+
+    fn loft(&mut self, profiles: &[Profile], _planes: &[SketchPlane]) -> Result<Body> {
+        if profiles.is_empty() {
+            return Err(KernelError::Degenerate("loft requires at least 1 profile"));
+        }
+        let (kind, p1, p2) = match profiles.first().unwrap() {
+            Profile::Rectangle { width, height } => (0i32, *width, *height),
+            Profile::Circle { radius } => (1i32, *radius, 0.0),
+            Profile::Polygon { .. } => (0i32, 10.0, 10.0),
+        };
+        let mut id = 0u32;
+        check_new(unsafe {
+            w3d_occt_loft(
+                self.ctx,
+                kind,
+                p1,
+                p2,
+                std::ptr::null(),
+                profiles.len() as u32,
                 &mut id,
             )
         })?;

@@ -274,6 +274,42 @@ impl<K: GeometryKernel> Document<K> {
         ))
     }
 
+    pub fn add_sweep(
+        &mut self,
+        name: impl Into<String>,
+        profile: &w3d_kernel::Profile,
+        path_points: &[Vec3],
+    ) -> Result<NodeId> {
+        let body = self.kernel.sweep(profile, path_points)?;
+        let body = self.track(body);
+        Ok(self.insert(
+            "Add Sweep",
+            Node {
+                name: name.into(),
+                body,
+                visible: true,
+            },
+        ))
+    }
+
+    pub fn add_loft(
+        &mut self,
+        name: impl Into<String>,
+        profiles: &[w3d_kernel::Profile],
+        planes: &[w3d_kernel::SketchPlane],
+    ) -> Result<NodeId> {
+        let body = self.kernel.loft(profiles, planes)?;
+        let body = self.track(body);
+        Ok(self.insert(
+            "Add Loft",
+            Node {
+                name: name.into(),
+                body,
+                visible: true,
+            },
+        ))
+    }
+
     // ---- editing ------------------------------------------------------
 
     /// Consumes both operands as *nodes* and leaves one behind. The kernel

@@ -871,6 +871,12 @@ fn chrome<K: GeometryKernel + Default>(
                         if ui.button("Revolve").clicked() {
                             execute_command(editor, Command::AddRevolve);
                         }
+                        if ui.button("Sweep").clicked() {
+                            execute_command(editor, Command::AddSweep);
+                        }
+                        if ui.button("Loft").clicked() {
+                            execute_command(editor, Command::AddLoft);
+                        }
                     });
                 });
                 ui.group(|ui| {

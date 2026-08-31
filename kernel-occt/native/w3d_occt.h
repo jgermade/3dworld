@@ -101,6 +101,10 @@ int32_t w3d_occt_revolve(W3dOcctContext *ctx, int32_t profile_kind, double p1, d
                          double ax_ox, double ax_oy, double ax_oz,
                          double ax_dx, double ax_dy, double ax_dz,
                          double angle_rad, uint32_t *out);
+int32_t w3d_occt_sweep(W3dOcctContext *ctx, int32_t profile_kind, double p1, double p2,
+                       const double *pts, uint32_t pt_count, uint32_t *out);
+int32_t w3d_occt_loft(W3dOcctContext *ctx, int32_t profile_kind, double p1, double p2,
+                      const double *planes, uint32_t plane_count, uint32_t *out);
 
 /* out4: solids, faces, edges, vertices — unique, not per-face duplicates. */
 int32_t w3d_occt_topology(W3dOcctContext *ctx, uint32_t body, uint32_t *out4);

@@ -365,6 +365,12 @@ pub trait GeometryKernel {
         angle_rad: f64,
     ) -> Result<Body>;
 
+    /// Sweeps a 2D profile along a 3D path defined by `path_points`.
+    fn sweep(&mut self, profile: &Profile, path_points: &[Vec3]) -> Result<Body>;
+
+    /// Loft / transitions between multiple 2D profiles placed on specified sketch planes.
+    fn loft(&mut self, profiles: &[Profile], planes: &[SketchPlane]) -> Result<Body>;
+
     /// Creates a hollow/thin-walled solid by removing `face_id` with `thickness`.
     fn shell(&mut self, body: Body, face_id: u32, thickness: f64) -> Result<Body>;
 

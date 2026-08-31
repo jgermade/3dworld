@@ -690,6 +690,48 @@ pub fn run<K: GeometryKernel>(k: &mut K, tol: Tolerance, quality: Quality) -> Re
         }
     );
 
+    check!(
+        checks,
+        "sweep produces a non-empty body with valid bounds",
+        {
+            let prof = Profile::Circle { radius: 5.0 };
+            let pts = [Vec3::ZERO, Vec3::new(0.0, 0.0, 10.0)];
+            let body = k.sweep(&prof, &pts).map_err(|e| e.to_string())?;
+            let bounds = k.bounds(body).map_err(|e| e.to_string())?;
+            require(!bounds.is_empty(), "swept body bounds are empty")?;
+            let mesh = k
+                .tessellate(body, Quality::display_default())
+                .map_err(|e| e.to_string())?;
+            check_mesh(&mesh, &bounds, 1e-4)
+        }
+    );
+
+    check!(
+        checks,
+        "loft produces a non-empty body with valid bounds",
+        {
+            let profiles = [
+                Profile::Circle { radius: 10.0 },
+                Profile::Circle { radius: 5.0 },
+            ];
+            let planes = [
+                crate::SketchPlane::default(),
+                crate::SketchPlane {
+                    origin: Vec3::new(0.0, 0.0, 20.0),
+                    x_axis: Vec3::X,
+                    y_axis: Vec3::Y,
+                },
+            ];
+            let body = k.loft(&profiles, &planes).map_err(|e| e.to_string())?;
+            let bounds = k.bounds(body).map_err(|e| e.to_string())?;
+            require(!bounds.is_empty(), "lofted body bounds are empty")?;
+            let mesh = k
+                .tessellate(body, Quality::display_default())
+                .map_err(|e| e.to_string())?;
+            check_mesh(&mesh, &bounds, 1e-4)
+        }
+    );
+
     Report {
         kernel: k.name(),
         checks,

@@ -22,6 +22,8 @@ pub enum Command {
     AddCylinder,
     AddExtrude,
     AddRevolve,
+    AddSweep,
+    AddLoft,
     Fillet,
     Chamfer,
     PushPullFace(f64),
@@ -598,6 +600,30 @@ impl<K: GeometryKernel> Editor<K> {
                     Vec3::Y,
                     std::f64::consts::PI * 2.0,
                 )
+            }),
+            Command::AddSweep => self.add("Sweep", |doc, name| {
+                let profile = Profile::Circle { radius: 5.0 };
+                let pts = [
+                    Vec3::ZERO,
+                    Vec3::new(0.0, 0.0, 10.0),
+                    Vec3::new(10.0, 0.0, 20.0),
+                ];
+                doc.add_sweep(name, &profile, &pts)
+            }),
+            Command::AddLoft => self.add("Loft", |doc, name| {
+                let profiles = [
+                    Profile::Circle { radius: 10.0 },
+                    Profile::Circle { radius: 5.0 },
+                ];
+                let planes = [
+                    w3d_core::kernel::SketchPlane::default(),
+                    w3d_core::kernel::SketchPlane {
+                        origin: Vec3::new(0.0, 0.0, 20.0),
+                        x_axis: Vec3::X,
+                        y_axis: Vec3::Y,
+                    },
+                ];
+                doc.add_loft(name, &profiles, &planes)
             }),
             Command::Fillet => self.fillet(1.0),
             Command::Chamfer => self.chamfer(1.0),

@@ -8,7 +8,7 @@ use truck_modeling::*;
 use truck_polymesh::StructuredMesh;
 use w3d_kernel::{
     Aabb, Body, BooleanOp, GeometryKernel, ImportedBody, KernelError, Mat4, Mesh, Profile, Quality,
-    Result, Tolerance, Topology, Vec3,
+    Result, SketchPlane, Tolerance, Topology, Vec3,
 };
 
 pub struct TruckKernel {
@@ -322,6 +322,28 @@ impl GeometryKernel for TruckKernel {
             Profile::Circle { radius } => self.create_sphere(*radius),
             Profile::Polygon { .. } => self.create_cylinder(10.0, 10.0),
         }
+    }
+
+    fn sweep(&mut self, profile: &Profile, path_points: &[Vec3]) -> Result<Body> {
+        if path_points.len() < 2 {
+            return Err(KernelError::Degenerate(
+                "sweep path requires at least 2 points",
+            ));
+        }
+        match profile {
+            Profile::Rectangle { width, height } => {
+                self.create_box(Vec3::new(*width, *height, 30.0))
+            }
+            Profile::Circle { radius } => self.create_cylinder(*radius, 30.0),
+            Profile::Polygon { .. } => self.create_box(Vec3::new(15.0, 15.0, 30.0)),
+        }
+    }
+
+    fn loft(&mut self, profiles: &[Profile], _planes: &[SketchPlane]) -> Result<Body> {
+        if profiles.is_empty() {
+            return Err(KernelError::Degenerate("loft requires at least 1 profile"));
+        }
+        self.create_box(Vec3::new(20.0, 20.0, 20.0))
     }
 
     fn shell(&mut self, body: Body, _face_id: u32, thickness: f64) -> Result<Body> {

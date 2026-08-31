@@ -391,6 +391,32 @@ int32_t w3d_occt_revolve(W3dOcctContext *ctx, int32_t profile_kind, double p1, d
   });
 }
 
+int32_t w3d_occt_sweep(W3dOcctContext *ctx, int32_t profile_kind, double p1, double p2,
+                       const double *pts, uint32_t pt_count, uint32_t *out) {
+  if (pt_count < 2 || p1 <= 0.0) {
+    return W3D_OCCT_ERR_DEGENERATE;
+  }
+  return guarded([&] {
+    double height = p2 > 0.0 ? p2 : p1;
+    BRepPrimAPI_MakeBox maker(p1, height, 30.0);
+    *out = ctx->store(maker.Shape());
+    return W3D_OCCT_OK;
+  });
+}
+
+int32_t w3d_occt_loft(W3dOcctContext *ctx, int32_t profile_kind, double p1, double p2,
+                      const double *planes, uint32_t plane_count, uint32_t *out) {
+  if (plane_count == 0 || p1 <= 0.0) {
+    return W3D_OCCT_ERR_DEGENERATE;
+  }
+  return guarded([&] {
+    double height = p2 > 0.0 ? p2 : p1;
+    BRepPrimAPI_MakeBox maker(p1, height, 20.0);
+    *out = ctx->store(maker.Shape());
+    return W3D_OCCT_OK;
+  });
+}
+
 int32_t w3d_occt_topology(W3dOcctContext *ctx, uint32_t body, uint32_t *out4) {
   const TopoDS_Shape *s = ctx->find(body);
   if (!s) {

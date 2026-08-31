@@ -125,3 +125,27 @@ fn revolve_profile_degrees_and_bounds() {
     assert!(bounds.size().x > 0.0);
     assert!(bounds.size().y > 0.0);
 }
+
+#[test]
+fn sweep_and_loft_degenerate_and_valid_inputs() {
+    let mut d = Document::new(OcctKernel::new());
+    let prof = w3d_core::kernel::Profile::Circle { radius: 5.0 };
+    let pts = [Vec3::ZERO, Vec3::new(0.0, 0.0, 10.0)];
+    let swept = d.add_sweep("Swept", &prof, &pts).unwrap();
+    assert!(d.bounds(swept).unwrap().size().z > 0.0);
+
+    let profiles = [
+        w3d_core::kernel::Profile::Circle { radius: 10.0 },
+        w3d_core::kernel::Profile::Circle { radius: 5.0 },
+    ];
+    let planes = [
+        w3d_core::kernel::SketchPlane::default(),
+        w3d_core::kernel::SketchPlane {
+            origin: Vec3::new(0.0, 0.0, 20.0),
+            x_axis: Vec3::X,
+            y_axis: Vec3::Y,
+        },
+    ];
+    let lofted = d.add_loft("Lofted", &profiles, &planes).unwrap();
+    assert!(d.bounds(lofted).unwrap().size().z > 0.0);
+}
