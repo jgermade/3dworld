@@ -1223,6 +1223,73 @@ fn chrome<K: GeometryKernel + Default>(
             });
         });
 
+    // 4.5. Real-time 2D Sketch Overlay Painter
+    let sketch = editor.sketch_state();
+    if sketch.active && !sketch.points.is_empty() {
+        let (vw, vh) = editor.viewport();
+        if vw > 0 && vh > 0 {
+            let aspect = f64::from(vw) / f64::from(vh);
+            let vp = editor.camera().view_projection(aspect);
+            let col0 = vp[0];
+            let col1 = vp[1];
+            let col2 = vp[2];
+            let col3 = vp[3];
+
+            let project = |u: f64, v: f64| -> Option<egui::Pos2> {
+                let p = sketch.plane.origin + sketch.plane.x_axis * u + sketch.plane.y_axis * v;
+                let (px, py, pz) = (p.x, p.y, p.z);
+                let cx = f64::from(col0[0]) * px
+                    + f64::from(col1[0]) * py
+                    + f64::from(col2[0]) * pz
+                    + f64::from(col3[0]);
+                let cy = f64::from(col0[1]) * px
+                    + f64::from(col1[1]) * py
+                    + f64::from(col2[1]) * pz
+                    + f64::from(col3[1]);
+                let cw = f64::from(col0[3]) * px
+                    + f64::from(col1[3]) * py
+                    + f64::from(col2[3]) * pz
+                    + f64::from(col3[3]);
+                if cw <= 1.0e-5 {
+                    None
+                } else {
+                    let sx = ((cx / cw) * 0.5 + 0.5) * f64::from(vw);
+                    let sy = ((1.0 - cy / cw) * 0.5) * f64::from(vh);
+                    Some(egui::pos2(sx as f32, sy as f32))
+                }
+            };
+
+            let painter = root.painter();
+            let screen_points: Vec<_> = sketch
+                .points
+                .iter()
+                .filter_map(|&(u, v)| project(u, v))
+                .collect();
+
+            for i in 0..screen_points.len().saturating_sub(1) {
+                painter.line_segment(
+                    [screen_points[i], screen_points[i + 1]],
+                    egui::Stroke::new(2.5, egui::Color32::from_rgb(0, 220, 255)),
+                );
+            }
+            if screen_points.len() >= 3 {
+                painter.line_segment(
+                    [*screen_points.last().unwrap(), screen_points[0]],
+                    egui::Stroke::new(1.5, egui::Color32::from_rgb(255, 200, 0)),
+                );
+            }
+
+            for (idx, &pt) in screen_points.iter().enumerate() {
+                let color = if idx == 0 {
+                    egui::Color32::from_rgb(255, 200, 0)
+                } else {
+                    egui::Color32::from_rgb(0, 240, 255)
+                };
+                painter.circle_filled(pt, 5.0, color);
+            }
+        }
+    }
+
     // 5. Floating 3D Translate Gizmo Overlay (Bottom Right Viewport)
     if !editor.selection().is_empty() {
         egui::Window::new("3D Gizmo Translate")

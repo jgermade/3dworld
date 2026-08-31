@@ -329,6 +329,10 @@ impl<K: GeometryKernel> Editor<K> {
         &self.status
     }
 
+    pub fn viewport(&self) -> (u32, u32) {
+        self.viewport
+    }
+
     pub fn set_viewport(&mut self, width: u32, height: u32) {
         self.viewport = (width.max(1), height.max(1));
     }
