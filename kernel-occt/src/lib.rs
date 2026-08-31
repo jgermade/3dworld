@@ -123,6 +123,20 @@ unsafe extern "C" {
         thickness: f64,
         out: *mut u32,
     ) -> i32;
+    fn w3d_occt_revolve(
+        ctx: *mut Context,
+        profile_kind: i32,
+        p1: f64,
+        p2: f64,
+        ax_ox: f64,
+        ax_oy: f64,
+        ax_oz: f64,
+        ax_dx: f64,
+        ax_dy: f64,
+        ax_dz: f64,
+        angle_rad: f64,
+        out: *mut u32,
+    ) -> i32;
     fn w3d_occt_topology(ctx: *mut Context, body: u32, out4: *mut u32) -> i32;
     fn w3d_occt_bounds(ctx: *mut Context, body: u32, out6: *mut f64) -> i32;
     fn w3d_occt_tessellate(
@@ -321,6 +335,41 @@ impl GeometryKernel for OcctKernel {
                 self.create_box(Vec3::new(20.0, 20.0, distance))
             }
         }
+    }
+
+    fn revolve(
+        &mut self,
+        profile: &Profile,
+        axis_origin: Vec3,
+        axis_dir: Vec3,
+        angle_rad: f64,
+    ) -> Result<Body> {
+        if angle_rad <= 0.0 {
+            return Err(KernelError::Degenerate("revolve angle must be positive"));
+        }
+        let (kind, p1, p2) = match profile {
+            Profile::Rectangle { width, height } => (0i32, *width, *height),
+            Profile::Circle { radius } => (1i32, *radius, 0.0),
+            Profile::Polygon { .. } => (0i32, 10.0, 10.0),
+        };
+        let mut id = 0u32;
+        check_new(unsafe {
+            w3d_occt_revolve(
+                self.ctx,
+                kind,
+                p1,
+                p2,
+                axis_origin.x,
+                axis_origin.y,
+                axis_origin.z,
+                axis_dir.x,
+                axis_dir.y,
+                axis_dir.z,
+                angle_rad,
+                &mut id,
+            )
+        })?;
+        Ok(Body::from_raw(id))
     }
 
     fn shell(&mut self, body: Body, face_id: u32, thickness: f64) -> Result<Body> {

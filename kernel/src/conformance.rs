@@ -670,6 +670,26 @@ pub fn run<K: GeometryKernel>(k: &mut K, tol: Tolerance, quality: Quality) -> Re
         }
     );
 
+    check!(
+        checks,
+        "revolve produces a non-empty body with valid bounds",
+        {
+            let prof = Profile::Rectangle {
+                width: 10.0,
+                height: 20.0,
+            };
+            let body = k
+                .revolve(&prof, Vec3::ZERO, Vec3::Y, std::f64::consts::PI * 2.0)
+                .map_err(|e| e.to_string())?;
+            let bounds = k.bounds(body).map_err(|e| e.to_string())?;
+            require(!bounds.is_empty(), "revolved body bounds are empty")?;
+            let mesh = k
+                .tessellate(body, Quality::display_default())
+                .map_err(|e| e.to_string())?;
+            check_mesh(&mesh, &bounds, 1e-4)
+        }
+    );
+
     Report {
         kernel: k.name(),
         checks,

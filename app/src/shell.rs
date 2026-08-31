@@ -868,6 +868,9 @@ fn chrome<K: GeometryKernel + Default>(
                         if ui.button("Extrude [E]").clicked() {
                             execute_command(editor, Command::AddExtrude);
                         }
+                        if ui.button("Revolve").clicked() {
+                            execute_command(editor, Command::AddRevolve);
+                        }
                     });
                 });
                 ui.group(|ui| {

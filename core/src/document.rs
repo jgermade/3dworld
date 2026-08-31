@@ -252,6 +252,28 @@ impl<K: GeometryKernel> Document<K> {
         ))
     }
 
+    pub fn add_revolve(
+        &mut self,
+        name: impl Into<String>,
+        profile: &w3d_kernel::Profile,
+        axis_origin: Vec3,
+        axis_dir: Vec3,
+        angle_rad: f64,
+    ) -> Result<NodeId> {
+        let body = self
+            .kernel
+            .revolve(profile, axis_origin, axis_dir, angle_rad)?;
+        let body = self.track(body);
+        Ok(self.insert(
+            "Add Revolve",
+            Node {
+                name: name.into(),
+                body,
+                visible: true,
+            },
+        ))
+    }
+
     // ---- editing ------------------------------------------------------
 
     /// Consumes both operands as *nodes* and leaves one behind. The kernel

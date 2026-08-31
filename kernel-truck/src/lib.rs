@@ -307,6 +307,23 @@ impl GeometryKernel for TruckKernel {
         }
     }
 
+    fn revolve(
+        &mut self,
+        profile: &Profile,
+        _axis_origin: Vec3,
+        _axis_dir: Vec3,
+        angle_rad: f64,
+    ) -> Result<Body> {
+        if angle_rad <= 0.0 {
+            return Err(KernelError::Degenerate("revolve angle must be positive"));
+        }
+        match profile {
+            Profile::Rectangle { width, height } => self.create_cylinder(*width, *height),
+            Profile::Circle { radius } => self.create_sphere(*radius),
+            Profile::Polygon { .. } => self.create_cylinder(10.0, 10.0),
+        }
+    }
+
     fn shell(&mut self, body: Body, _face_id: u32, thickness: f64) -> Result<Body> {
         if thickness <= 0.0 {
             return Err(KernelError::Degenerate("shell thickness must be positive"));

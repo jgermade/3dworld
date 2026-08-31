@@ -21,6 +21,7 @@ pub enum Command {
     AddSphere,
     AddCylinder,
     AddExtrude,
+    AddRevolve,
     Fillet,
     Chamfer,
     PushPullFace(f64),
@@ -584,6 +585,19 @@ impl<K: GeometryKernel> Editor<K> {
                     height: 25.0,
                 };
                 doc.add_extrude(name, &profile, 30.0)
+            }),
+            Command::AddRevolve => self.add("Revolve", |doc, name| {
+                let profile = Profile::Rectangle {
+                    width: 15.0,
+                    height: 25.0,
+                };
+                doc.add_revolve(
+                    name,
+                    &profile,
+                    Vec3::ZERO,
+                    Vec3::Y,
+                    std::f64::consts::PI * 2.0,
+                )
             }),
             Command::Fillet => self.fillet(1.0),
             Command::Chamfer => self.chamfer(1.0),

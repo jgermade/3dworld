@@ -110,3 +110,18 @@ fn micro_radius_fillet() {
     let filleted = d.fillet(box_id, 0.01);
     assert!(filleted.is_ok(), "micro fillet on box edges succeeds");
 }
+
+#[test]
+fn revolve_profile_degrees_and_bounds() {
+    let mut d = Document::new(OcctKernel::new());
+    let prof = w3d_core::kernel::Profile::Rectangle {
+        width: 10.0,
+        height: 20.0,
+    };
+    let revolved = d
+        .add_revolve("Revolved", &prof, Vec3::ZERO, Vec3::Y, std::f64::consts::PI)
+        .unwrap();
+    let bounds = d.bounds(revolved).unwrap();
+    assert!(bounds.size().x > 0.0);
+    assert!(bounds.size().y > 0.0);
+}

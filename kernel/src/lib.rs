@@ -101,12 +101,30 @@ pub enum BooleanOp {
     Intersection,
 }
 
-/// A 2D planar profile on the XY plane centred at origin, suitable for linear extrusion.
+/// A 2D planar profile on the XY plane centred at origin, suitable for linear extrusion or revolution.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Profile {
     Rectangle { width: f64, height: f64 },
     Circle { radius: f64 },
     Polygon { vertices: Vec<(f64, f64)> },
+}
+
+/// A 3D sketch plane with an origin point and orthogonal X/Y basis vectors.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SketchPlane {
+    pub origin: Vec3,
+    pub x_axis: Vec3,
+    pub y_axis: Vec3,
+}
+
+impl Default for SketchPlane {
+    fn default() -> Self {
+        Self {
+            origin: Vec3::ZERO,
+            x_axis: Vec3::X,
+            y_axis: Vec3::Y,
+        }
+    }
 }
 
 /// Counts only. Anything richer belongs behind a method on the trait, so that
@@ -337,6 +355,15 @@ pub trait GeometryKernel {
 
     /// Extrudes a 2D planar profile linearly along +Z by `distance`.
     fn extrude(&mut self, profile: &Profile, distance: f64) -> Result<Body>;
+
+    /// Revolves a 2D profile around an axis passing through `axis_origin` along `axis_dir` by `angle_rad`.
+    fn revolve(
+        &mut self,
+        profile: &Profile,
+        axis_origin: Vec3,
+        axis_dir: Vec3,
+        angle_rad: f64,
+    ) -> Result<Body>;
 
     /// Creates a hollow/thin-walled solid by removing `face_id` with `thickness`.
     fn shell(&mut self, body: Body, face_id: u32, thickness: f64) -> Result<Body>;

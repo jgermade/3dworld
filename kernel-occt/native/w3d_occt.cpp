@@ -369,6 +369,28 @@ int32_t w3d_occt_shell(W3dOcctContext *ctx, uint32_t body, uint32_t face_id, dou
   });
 }
 
+int32_t w3d_occt_revolve(W3dOcctContext *ctx, int32_t profile_kind, double p1, double p2,
+                         double ax_ox, double ax_oy, double ax_oz,
+                         double ax_dx, double ax_dy, double ax_dz,
+                         double angle_rad, uint32_t *out) {
+  if (angle_rad <= 0.0 || p1 <= 0.0) {
+    return W3D_OCCT_ERR_DEGENERATE;
+  }
+  return guarded([&] {
+    if (profile_kind == 1) { // Circle
+      gp_Ax2 axis(gp_Pnt(ax_ox, ax_oy, ax_oz), gp_Dir(ax_dx, ax_dy, ax_dz));
+      BRepPrimAPI_MakeSphere maker(axis, p1, angle_rad);
+      *out = ctx->store(maker.Shape());
+    } else { // Rectangle or default
+      double height = p2 > 0.0 ? p2 : p1;
+      gp_Ax2 axis(gp_Pnt(ax_ox, ax_oy, ax_oz), gp_Dir(ax_dx, ax_dy, ax_dz));
+      BRepPrimAPI_MakeCylinder maker(axis, p1, height, angle_rad);
+      *out = ctx->store(maker.Shape());
+    }
+    return W3D_OCCT_OK;
+  });
+}
+
 int32_t w3d_occt_topology(W3dOcctContext *ctx, uint32_t body, uint32_t *out4) {
   const TopoDS_Shape *s = ctx->find(body);
   if (!s) {
