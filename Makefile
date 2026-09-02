@@ -8,10 +8,18 @@ WASM_TARGET := wasm32-unknown-unknown
 ## Needs no setup: the OpenCASCADE backend is not a default workspace member.
 test: check clippy fmt-check licences notice-check
 	$(CARGO) test
+	@# The same tests again with `parallel` on, which is the only way one
+	@# fingerprint can hold two builds to the same mesh. A feature nothing
+	@# runs is a feature that compiles.
+	$(CARGO) test -p w3d-kernel-truck --features parallel
 
 ## The implementation compiles, and so does every crate on its own.
 check:
 	$(CARGO) check --all-targets
+	@# Feature combinations are their own build: `parallel` swaps the body of
+	@# `tessellate`, so a `cargo check` of the default features says nothing
+	@# about it.
+	$(CARGO) check -p w3d-kernel-truck --features parallel --all-targets
 
 ## The OpenCASCADE backend, and the conformance suite run against real
 ## geometry. Needs OCCT headers and libraries:
@@ -65,6 +73,7 @@ benchmark-step:
 
 clippy:
 	$(CARGO) clippy --all-targets -- -D warnings
+	$(CARGO) clippy -p w3d-kernel-truck --features parallel --all-targets -- -D warnings
 
 fmt:
 	$(CARGO) fmt --all
@@ -102,7 +111,19 @@ tree. Check render/Cargo.toml's wgpu features."; exit 1)
 ## Output goes to web/dist/, which is gitignored. Nothing built is committed.
 WASM_OUT := web/dist
 
-.PHONY: web web-opt web-serve web-test app app-test
+## What the threaded variant needs, in one place because it is long and because
+## every flag in it is explained above `web-threaded` rather than in a comment
+## nobody reads at the end of a line.
+THREAD_RUSTFLAGS := -C target-feature=+atomics,+bulk-memory,+mutable-globals \
+  -C link-arg=--shared-memory \
+  -C link-arg=--import-memory \
+  -C link-arg=--max-memory=4294967296 \
+  -C link-arg=--export=__wasm_init_tls \
+  -C link-arg=--export=__tls_base \
+  -C link-arg=--export=__tls_size \
+  -C link-arg=--export=__tls_align
+
+.PHONY: web web-threaded web-both web-opt web-serve web-test app app-test
 web:
 	rustup target add $(WASM_TARGET)
 	$(CARGO) build -p w3d-web --release --target $(WASM_TARGET)
@@ -111,6 +132,60 @@ web:
 	@ls -l $(WASM_OUT)/w3d_web_bg.wasm | awk '{printf "wasm:     %.2f MiB\n", $$5/1048576}'
 	@gzip -9 -c $(WASM_OUT)/w3d_web_bg.wasm | wc -c | awk '{printf "wasm.gz:  %.2f MiB\n", $$1/1048576}'
 	@brotli -9 -c $(WASM_OUT)/w3d_web_bg.wasm 2>/dev/null | wc -c | awk '{printf "wasm.br:  %.2f MiB\n", $$1/1048576}' || true
+
+## The second entry in the build matrix: the same crate, compiled to a module
+## with a shared memory and atomic instructions, meshing a solid's faces across
+## a rayon pool. Into web/dist/threaded/, which is where `loader.js` looks.
+##
+## Four things about this command are load-bearing and none of them is obvious:
+##
+##   - **Nightly, and not by preference.** `-C target-feature=+atomics` is an
+##     unstable target feature and `-Z build-std` is unstable outright. The
+##     standard library has to be rebuilt because a prebuilt `std` was compiled
+##     without atomics, and mixing the two links but does not run.
+##   - **`--shared-memory` and `--import-memory` are linker flags, not target
+##     features.** Enabling atomics does not make the memory shared: without
+##     the first, the build succeeds and produces a module with a private
+##     memory, which is the failure `tools/wasm_threads.py` exists to catch —
+##     it caught it here, on the first build that got this far. Without the
+##     second, wasm-bindgen refuses, which is the kinder of the two.
+##   - **The TLS symbols are exported by name.** `wasm-bindgen` needs
+##     `__wasm_init_tls` to give each worker its own thread locals, and the
+##     linker garbage-collects it: it is synthetic, nothing in the module calls
+##     it, and only an explicit `--export` keeps it alive. Removing any of
+##     these four gets "failed to find `__wasm_init_tls`" from a tool that has
+##     already spent a minute linking.
+##   - **`--split-linked-modules`** puts wasm-bindgen-rayon's worker bootstrap
+##     in `snippets/` as a real file. Inlined, a worker would be started from a
+##     blob: URL, which is a different origin and so not cross-origin isolated,
+##     and the shared memory would be refused at the last possible moment.
+##     That file then needs one line rewritten before a web server can serve
+##     what it asks for; `tools/rayon_worker_entry.py` says why.
+##
+## Not part of `make web`, and not in `make test`: it needs a nightly
+## toolchain and rebuilds `std`, which is a minute of work and a setup
+## requirement. `make web-both` is the pair.
+web-threaded:
+	rustup target add --toolchain nightly $(WASM_TARGET)
+	RUSTFLAGS="$(THREAD_RUSTFLAGS)" $(CARGO) +nightly build -p w3d-web --release \
+	    --features threads --target $(WASM_TARGET) -Z build-std=std,panic_abort
+	wasm-bindgen --target web --no-typescript --split-linked-modules \
+	    --out-dir $(WASM_OUT)/threaded target/$(WASM_TARGET)/release/w3d_web.wasm
+	@# rayon's workers resolve the main module as a *directory*, which only a
+	@# bundler can serve. Left alone it is a page that hangs rather than one
+	@# that fails — see the file.
+	python3 tools/rayon_worker_entry.py $(WASM_OUT)/threaded w3d_web.js
+	@# The build said yes; this asks the artifact. See the file for why the
+	@# two are different questions.
+	python3 tools/wasm_threads.py $(WASM_OUT)/threaded/w3d_web_bg.wasm
+	@ls -l $(WASM_OUT)/threaded/w3d_web_bg.wasm \
+	    | awk '{printf "wasm.threaded:    %.2f MiB\n", $$5/1048576}'
+	@gzip -9 -c $(WASM_OUT)/threaded/w3d_web_bg.wasm | wc -c \
+	    | awk '{printf "wasm.threaded.gz: %.2f MiB\n", $$1/1048576}'
+
+## Both entries of the matrix, which is what the loader's dispatch needs before
+## it has two things to dispatch to.
+web-both: web web-threaded
 
 web-opt: web
 	@which wasm-opt >/dev/null 2>&1 && ( \
@@ -201,7 +276,10 @@ freecad-check:
 ## Drives the built page in headless Chromium and asserts it drew and picked.
 ## This is the only check in the repository that runs the viewport in a real
 ## browser; everything else is native.
-web-test: web
+## The browser. `web-both` rather than `web`, so the threaded variant is there
+## to be dispatched to: without it `browser.mjs` still runs and still asserts,
+## but what it asserts is that the build is missing.
+web-test: web-both
 	node web/test/browser.mjs
 
 doc:

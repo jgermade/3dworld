@@ -2,7 +2,15 @@
 //!
 //! Implements [`w3d_kernel::GeometryKernel`] using `truck-modeling` and related
 //! pure Rust CAD crates. Safe for native and WebAssembly builds.
+//!
+//! The `parallel` feature meshes a solid's faces at once rather than one after
+//! another. It changes no output — the merge is in the faces' sorted order on
+//! both paths, and a test pins the same fingerprint under both settings — so
+//! nothing above the seam can tell which was built, which is the only way a
+//! speed switch is allowed to work in a kernel.
 
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
 use std::collections::HashMap;
 use truck_modeling::*;
 use truck_polymesh::StructuredMesh;
@@ -54,17 +62,22 @@ fn get_range(b: (std::ops::Bound<f64>, std::ops::Bound<f64>)) -> (f64, f64) {
     (min, max)
 }
 
-fn convert_structured_mesh(structured: &StructuredMesh, out_mesh: &mut Mesh, face_idx: u32) {
+/// One face's triangles, in a mesh of its own with indices from zero.
+///
+/// Standalone rather than appended into a shared `Mesh`, and that is the whole
+/// point: a function that writes into somebody else's mesh cannot be handed to
+/// more than one thread, and one that returns its own can. [`append_face`] is
+/// the other half, and it is what puts the index offsets back.
+fn face_mesh(structured: &StructuredMesh, face_idx: u32) -> Mesh {
+    let mut out_mesh = Mesh::default();
     let row_count = structured.positions().len();
     if row_count == 0 {
-        return;
+        return out_mesh;
     }
     let col_count = structured.positions()[0].len();
     if col_count == 0 {
-        return;
+        return out_mesh;
     }
-
-    let base_idx = out_mesh.positions.len() as u32;
 
     let normals_opt = structured.normals();
     let has_normals = normals_opt.is_some_and(|norms| {
@@ -116,10 +129,10 @@ fn convert_structured_mesh(structured: &StructuredMesh, out_mesh: &mut Mesh, fac
 
     for r in 0..row_count - 1 {
         for c in 0..col_count - 1 {
-            let i0 = base_idx + (r * col_count + c) as u32;
-            let i1 = base_idx + (r * col_count + c + 1) as u32;
-            let i2 = base_idx + ((r + 1) * col_count + c + 1) as u32;
-            let i3 = base_idx + ((r + 1) * col_count + c) as u32;
+            let i0 = (r * col_count + c) as u32;
+            let i1 = (r * col_count + c + 1) as u32;
+            let i2 = ((r + 1) * col_count + c + 1) as u32;
+            let i3 = ((r + 1) * col_count + c) as u32;
 
             // First triangle
             out_mesh.indices.push(i0);
@@ -134,6 +147,38 @@ fn convert_structured_mesh(structured: &StructuredMesh, out_mesh: &mut Mesh, fac
             out_mesh.face_of_triangle.push(face_idx);
         }
     }
+    out_mesh
+}
+
+/// Meshes one surface at `sag`, tagging every triangle with `face_idx`.
+///
+/// Takes the surface rather than the face because the surface is all that is
+/// read, and a free function over a concrete type is what both the sequential
+/// and the parallel path can call.
+fn mesh_surface(surface: &Surface, sag: f64, face_idx: u32) -> Mesh {
+    let range_u = get_range(surface.parameter_range().0);
+    let range_v = get_range(surface.parameter_range().1);
+    let structured = StructuredMesh::from_surface(surface, (range_u, range_v), sag);
+    face_mesh(&structured, face_idx)
+}
+
+/// Merges a face's mesh into `out`, shifting its indices past what is there.
+///
+/// `face_of_triangle` is copied rather than recomputed: the face id belongs to
+/// the face, not to its position in the merge, and the two stop agreeing the
+/// moment a face meshes to nothing.
+fn append_face(out: &mut Mesh, face: Mesh) {
+    let base = out.positions.len() as u32;
+    out.positions.extend(face.positions);
+    out.normals.extend(face.normals);
+    out.indices
+        .extend(face.indices.into_iter().map(|i| i + base));
+    out.face_of_triangle.extend(face.face_of_triangle);
+
+    let line_base = out.line_positions.len() as u32;
+    out.line_positions.extend(face.line_positions);
+    out.line_indices
+        .extend(face.line_indices.into_iter().map(|i| i + line_base));
 }
 
 impl GeometryKernel for TruckKernel {
@@ -405,27 +450,40 @@ impl GeometryKernel for TruckKernel {
         Ok(aabb)
     }
 
+    /// Meshes every face and concatenates them, in an order that does not
+    /// depend on the thread count.
+    ///
+    /// The faces are sorted first — by parameter range, then by the point at
+    /// the middle of that range — and then meshed. Under `parallel` they are
+    /// meshed at once and merged in the sorted order afterwards, never in the
+    /// order they finish. That is not a nicety: `face_of_triangle` is face
+    /// *identity*, the thing a selection and a per-face fillet are stored
+    /// against, so a mesh whose face numbering depended on how many cores
+    /// happened to be free would move a user's selection between two runs of
+    /// the same build. Same rule as the SIMD one in `AGENTS.md`, for the same
+    /// reason: a result a machine is allowed to disagree about is not a result.
     fn tessellate(&self, body: Body, quality: Quality) -> Result<Mesh> {
         let solid = self.get(body)?;
         let compressed = solid.compress();
-        let mut out_mesh = Mesh::default();
-        let mut faces = Vec::new();
+        // Only the surface is read from here on, and a `Vec<&Surface>` is what
+        // both paths can iterate over without naming a compressed-face type.
+        let mut faces: Vec<&Surface> = Vec::new();
         for shell in &compressed.boundaries {
             for face in &shell.faces {
-                faces.push(face);
+                faces.push(&face.surface);
             }
         }
         faces.sort_by(|a, b| {
             let (u_a, v_a) = (
-                get_range(a.surface.parameter_range().0),
-                get_range(a.surface.parameter_range().1),
+                get_range(a.parameter_range().0),
+                get_range(a.parameter_range().1),
             );
             let (u_b, v_b) = (
-                get_range(b.surface.parameter_range().0),
-                get_range(b.surface.parameter_range().1),
+                get_range(b.parameter_range().0),
+                get_range(b.parameter_range().1),
             );
-            let p_a = a.surface.subs((u_a.0 + u_a.1) * 0.5, (v_a.0 + v_a.1) * 0.5);
-            let p_b = b.surface.subs((u_b.0 + u_b.1) * 0.5, (v_b.0 + v_b.1) * 0.5);
+            let p_a = a.subs((u_a.0 + u_a.1) * 0.5, (v_a.0 + v_a.1) * 0.5);
+            let p_b = b.subs((u_b.0 + u_b.1) * 0.5, (v_b.0 + v_b.1) * 0.5);
 
             u_a.0
                 .partial_cmp(&u_b.0)
@@ -461,12 +519,27 @@ impl GeometryKernel for TruckKernel {
                         .unwrap_or(std::cmp::Ordering::Equal)
                 })
         });
-        for (face_idx, face) in faces.into_iter().enumerate() {
-            let range_u = get_range(face.surface.parameter_range().0);
-            let range_v = get_range(face.surface.parameter_range().1);
-            let structured =
-                StructuredMesh::from_surface(&face.surface, (range_u, range_v), quality.sag);
-            convert_structured_mesh(&structured, &mut out_mesh, face_idx as u32);
+
+        let sag = quality.sag;
+        // `collect` on an indexed parallel iterator yields the sorted order,
+        // whatever order the work finished in. The two arms differ in where
+        // the surface evaluation runs and in nothing else.
+        #[cfg(feature = "parallel")]
+        let meshed: Vec<Mesh> = faces
+            .par_iter()
+            .enumerate()
+            .map(|(i, surface)| mesh_surface(surface, sag, i as u32))
+            .collect();
+        #[cfg(not(feature = "parallel"))]
+        let meshed: Vec<Mesh> = faces
+            .iter()
+            .enumerate()
+            .map(|(i, surface)| mesh_surface(surface, sag, i as u32))
+            .collect();
+
+        let mut out_mesh = Mesh::default();
+        for face in meshed {
+            append_face(&mut out_mesh, face);
         }
         if out_mesh.positions.is_empty() {
             return Err(KernelError::Failed("empty mesh".into()));

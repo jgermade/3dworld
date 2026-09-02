@@ -9,4 +9,4 @@ web/dist/
 web/test/node_modules/
 /samples
 
-.DS_Store
+.DS_Store__pycache__/

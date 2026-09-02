@@ -12,6 +12,17 @@ truck-geometry = "0.5.0"
 truck-polymesh = "0.6.0"
 truck-stepio = "0.3.0"
 truck-base = "0.5.0"
+# Only ever enabled through a feature. rayon on `wasm32-unknown-unknown` needs
+# a build with atomics and a pool somebody started — `web`'s `threads` feature
+# is the only thing that turns this on, and `make check` never sees it.
+rayon = { version = "1.10", optional = true }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 thiserror = "2.0"
+
+[features]
+## Meshes a solid's faces at once instead of one after another. The output is
+## identical either way — see `tessellate` — so this is a speed switch and not
+## a behaviour one, and `tessellation_is_independent_of_the_thread_count`
+## asserts exactly that by pinning the same fingerprint under both settings.
+parallel = ["dep:rayon"]

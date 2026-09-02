@@ -7,10 +7,21 @@
 //! out loud instead of degrading quietly.
 //!
 //! It is deliberately not the modeller. The scene is a fixed document on
-//! `FakeKernel`, because the point of this crate is to prove that the viewport
-//! reaches a browser at all — and `FakeKernel` tessellates a bounding box, so
-//! nothing here is a statement about geometry. `app/` replaces the scene; the
-//! surface, the format negotiation and the pick loop stay.
+//! `TruckKernel`, so the triangles on the screen are a real tessellation of a
+//! real B-rep — but a *fixed* one, and `app/` is what replaces it. The surface,
+//! the format negotiation and the pick loop stay.
+//!
+//! # The two variants
+//!
+//! This crate is built twice. Without `threads` it is a plain `wasm32` module.
+//! With it, the module has a shared memory and atomic instructions, exports
+//! `initThreadPool`, and tessellates a solid's faces across a rayon pool.
+//! They are different artifacts in different directories, because a module
+//! compiled for atomics will not instantiate on an engine without them and a
+//! page that is not cross-origin isolated cannot give it a shared memory.
+//! `loader.js` picks; `report().threads` says which one is actually running,
+//! as a number, because "threaded" claimed by the file it came from is not
+//! evidence that a pool ever started.
 
 // Everything below needs a browser. On the host this crate is empty, which is
 // what lets it be a default workspace member without `make test` growing a
@@ -24,6 +35,33 @@ use w3d_kernel_truck::TruckKernel;
 use w3d_render::{Camera, Gpu, GpuMesh, Material, Object as DrawObject, PickPending, Renderer};
 use wasm_bindgen::prelude::*;
 use web_sys::HtmlCanvasElement;
+
+/// The pool, and JS has to start it: a wasm module cannot spawn its own
+/// workers, so `initThreadPool(n)` is called from `loader.js` after the module
+/// is instantiated and before anything asks rayon to do work.
+///
+/// Re-exported rather than wrapped. A wrapper would have to reproduce the
+/// `#[wasm_bindgen]` signature, and getting it subtly wrong is a promise that
+/// resolves before the workers are up.
+#[cfg(feature = "threads")]
+pub use wasm_bindgen_rayon::init_thread_pool;
+
+/// How many threads rayon actually has, which is 1 when there is no pool.
+///
+/// A number rather than a boolean, and read from rayon rather than from the
+/// variant that was loaded. A threaded module whose `initThreadPool` was never
+/// awaited reports 1 here and would report "threaded" anywhere else — that gap
+/// is the whole reason this is not a `cfg!`.
+fn thread_count() -> u32 {
+    #[cfg(feature = "threads")]
+    {
+        rayon::current_num_threads() as u32
+    }
+    #[cfg(not(feature = "threads"))]
+    {
+        1
+    }
+}
 
 /// One node's mesh on the GPU, and the id the pick will answer with.
 struct Body {
@@ -42,6 +80,13 @@ pub struct Viewer {
     camera: Camera,
     pending: Option<PickPending>,
     selected: Option<u32>,
+    /// Wall-clock milliseconds spent tessellating the scene at startup.
+    ///
+    /// The only number in this repository measured on the platform it is a
+    /// claim about. It is one scene on one machine and it is not a benchmark —
+    /// but a threaded build that reports the same figure as a single-threaded
+    /// one is a pool that is not being used, and nothing else here would say so.
+    tessellate_ms: f64,
 }
 
 /// Opens a device against `canvas` and builds the scene.
@@ -97,14 +142,24 @@ pub async fn start(canvas: HtmlCanvasElement, force_webgl: bool) -> Result<Viewe
     let depth = depth_texture(&gpu.device, width, height);
 
     let mut doc = scene();
-    let mut bodies = Vec::new();
     let ids: Vec<_> = doc.nodes().map(|(id, _)| id).collect();
-    for id in ids {
-        let mesh = doc
-            .mesh(id)
-            .map_err(|e| JsError::new(&e.to_string()))?
-            .clone();
-        let mesh = GpuMesh::upload(&gpu.device, gpu.capabilities.max_buffer_size, "body", &mesh)
+
+    // Tessellation is timed on its own, with the GPU upload outside the clock:
+    // the upload is driver work and would drown the thing being measured.
+    let started = js_sys::Date::now();
+    let mut meshes = Vec::with_capacity(ids.len());
+    for id in &ids {
+        meshes.push(
+            doc.mesh(*id)
+                .map_err(|e| JsError::new(&e.to_string()))?
+                .clone(),
+        );
+    }
+    let tessellate_ms = js_sys::Date::now() - started;
+
+    let mut bodies = Vec::with_capacity(ids.len());
+    for (id, mesh) in ids.iter().zip(&meshes) {
+        let mesh = GpuMesh::upload(&gpu.device, gpu.capabilities.max_buffer_size, "body", mesh)
             .map_err(|e| JsError::new(&e.to_string()))?;
         bodies.push(Body {
             mesh,
@@ -125,6 +180,7 @@ pub async fn start(canvas: HtmlCanvasElement, force_webgl: bool) -> Result<Viewe
         camera,
         pending: None,
         selected: None,
+        tessellate_ms,
     })
 }
 
@@ -155,6 +211,9 @@ impl Viewer {
             },
         )?;
         set(&out, "triangles", &self.triangles().into())?;
+        // Read from rayon, not from which file was loaded — see `thread_count`.
+        set(&out, "threads", &thread_count().into())?;
+        set(&out, "tessellateMs", &self.tessellate_ms.into())?;
         set(
             &out,
             "deindexed",

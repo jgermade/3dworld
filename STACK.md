@@ -74,8 +74,10 @@ the parts wasm constrains.
   happens in JS before instantiation, via `WebAssembly.validate()` on probe modules —
   `web/loader.js` carries them inline rather than fetching `wasm-feature-detect` before it can
   decide anything. That means a build matrix and payload cost, which is why the matrix is kept to
-  two entries. **Only one of the two is built today**: the loader dispatches to the threaded
-  variant, finds it missing, and says so on the page.
+  two entries. **Both are built now** — `make web` and `make web-threaded` — and the loader
+  dispatches on the probe, starts the rayon pool, and reports the pool's actual size rather than
+  the name of the directory the module came from. A deployment that only builds one still works:
+  the loader finds the threaded bundle missing and says so on the page.
 - **A probe cannot certify a driver.** Validation answers what the *engine* accepts and
   `crossOriginIsolated` answers what the *page* was served, but neither can tell you whether the
   GPU will actually rasterise. Headless Chromium reports WebGPU, returns an adapter claiming
@@ -99,11 +101,11 @@ the parts wasm constrains.
 | Targets | `x86_64-unknown-linux-gnu` and `wasm32-unknown-unknown`, both checked; `+simd128` checked |
 | UI | `egui` 0.36 with `egui-wgpu` and `egui-winit`, `winit` 0.30. egui-wgpu 0.36 is built on wgpu 30, which is why the version had to be that one — egui 0.35 would have dragged in a second, incompatible wgpu. |
 | Dependencies | **`wgpu` 30** (MIT OR Apache-2.0) in `w3d-render`, plus `wasm-bindgen`/`js-sys`/`web-sys` in `w3d-web` — all declared per target with `default-features = false`. The kernel, the fake and the document still depend on each other and on nothing else. Playwright is a devDependency of `web/test/` and is not in the crate graph. |
-| Threads | `wasm-bindgen-rayon`, `+atomics,+bulk-memory,+mutable-globals`, nightly for `build-std`. **Not built.** The loader probes for them, reports them present, and runs the single-threaded variant because that is the only one that exists. |
+| Threads | `wasm-bindgen-rayon` 1.2 and `rayon` 1.10 behind `w3d-web`'s `threads` feature; `+atomics,+bulk-memory,+mutable-globals`, `--shared-memory`, `--import-memory` and four `--export`s for the TLS symbols, nightly for `build-std`. **Built** — `make web-threaded`. What the pool does today is mesh a solid's faces at once (`w3d-kernel-truck/parallel`); everything else is still on the one thread that asked. `tools/wasm_threads.py` reads the artifact for a shared memory, because every one of those flags can go missing and still produce a build. |
 | Graphics | `wgpu` 30 — WebGPU where present, WebGL2 fallback. Both compiled for wasm; only WebGPU-class backends have been *run*, and those under lavapipe. The wasm feature is `webgl`, **not** `gles`; `gles` is the native GL backend and silently does nothing on wasm32. |
 | Kernel | OpenCASCADE (LGPL-2.1-only, taken to GPL-3 via its §3) behind `GeometryKernel` |
 | Licence | GPL-3.0-or-later — see AGENTS.md § Licensing |
 | OpenCASCADE | 7.6.3 (Ubuntu Noble), recorded in `kernel-occt/native/UPSTREAM`. That file names a version; it does not enforce one — the build takes whatever the system has. A real pin arrives with the Emscripten build. Noble's `libocct-foundation-dev` is missing a header: `make occt-headers`. |
 | Emscripten | not yet — the OCCT wasm build does not exist, so the browser draws a `FakeKernel` bounding box |
-| Browser build | `wasm-bindgen` 0.2.127 and a matching `wasm-bindgen-cli`; `make web` → 3.34 MiB of wasm, 1.12 MiB gzipped. No `wasm-opt`, no brotli. |
-| Browser check | `make web-test` — Chromium via Playwright, three runs: WebGPU offered, WebGL2 forced, and no COOP/COEP |
+| Browser build | `wasm-bindgen` 0.2.127 and a matching `wasm-bindgen-cli`; `make web` → 3.62 MiB of wasm, and `make web-threaded` → 3.90 MiB into `web/dist/threaded/`. No `wasm-opt`, no brotli. |
+| Browser check | `make web-test` — Chromium via Playwright, four runs: WebGPU offered, WebGL2 forced, no COOP/COEP and no worker, and no COOP/COEP with the worker. The first and last also assert the variant, the pool size, and — when the threaded bundle is absent — that the page says so. |

@@ -150,6 +150,13 @@ capability, it is declared there first**, then implemented behind whichever back
   *permitted* to differ between machines, so one document would produce different topology on
   different hardware and the regression fixtures would stop meaning anything. The rule is
   per-crate, not per-call — `kernel/` is built without it.
+- **A tessellation may be parallel; its output may not depend on that.** `face_of_triangle` is
+  face identity — what a selection and a per-face fillet are stored against — so faces are meshed
+  in whatever order the threads manage and merged in the order they were *sorted*, never the order
+  they finished. The same argument as relaxed SIMD below, one level up: a result a machine is
+  allowed to disagree about is not a result. `w3d-kernel-truck`'s `parallel` feature is held to it
+  by a fingerprint pinned as a literal and asserted under both settings, which is the only way one
+  test can hold two builds to the same bytes.
 - **The kernel does not move to the GPU.** WGSL has no `f64` and no exact predicates. Booleans,
   intersections and anything whose correctness is numerical stay on the CPU, permanently, and no
   benchmark is an argument against this.
@@ -199,8 +206,9 @@ capability, it is declared there first**, then implemented behind whichever back
 | `make step-check` | STEP against something that is not us, in both directions: a file this program wrote, read by a pure-Python part-21 parser that shares no code with OCCT — every reference resolved, faces counted by surface type, so *the hole in the plate is asserted to be in the file* — and files from Pro/ENGINEER, Siemens NX and STEP Tools imported through the real reader, one of which must be refused because it is a surface model. Needs `make step-samples` first, which fetches them pinned by SHA-256 and commits nothing. **What it does not do is prove another program can open ours**; nothing that could is installable, and the register says so. |
 | `make freecad-check` | Another *program* opens a file this one wrote and weighs each solid against **arithmetic** — 16000 − π·6²·10 mm³ for the plate, because that is what a cylinder is. It is what separates "it imported" from "it imported the right thing, at the right size, in the right unit". It is **not** a second geometry kernel: FreeCAD's is OpenCASCADE, so what this covers is another application's import path — XDE, units, its document model. Needs FreeCAD, which is in Ubuntu 22.04 and absent from 24.04. |
 | `make app-test-step` | A STEP file written by one process and drawn by another, both of them the modeller. The kernel tests prove a kernel can read what a kernel wrote; this is the only place the claim is about the *program*. Needs OCCT **and** a display, so it is neither `make test` nor `make app-test`. |
-| `make web-test` | The viewport **in a real browser**: WebGPU offered, WebGL2 forced, and a run with no COOP/COEP that must degrade visibly. The only check here that is not native. Needs `npm install` in `web/test/`, so it is outside `make test`. |
+| `make web-test` | The viewport **in a real browser**: WebGPU offered, WebGL2 forced, a run with no COOP/COEP that must degrade visibly, and one where a service worker supplies the headers the host will not. It also decides the variant, and *both* answers assert: with the threaded bundle built, the page must come up threaded with a pool larger than one; without it, the page must say the build is missing. The only check here that is not native. Needs `npm install` in `web/test/`, so it is outside `make test`. |
 | `make web` | Not a check. Builds `web/dist/` — needs `wasm-bindgen-cli` at the `wasm-bindgen` dependency's version; a mismatch is a runtime error about an unknown import, not a build failure. |
+| `make web-threaded` | Not a check, but it carries one. Builds the threaded variant into `web/dist/threaded/` — nightly, `-Z build-std`, atomics, and a shared memory the linker only produces when asked separately — and then **reads the artifact back**: `tools/wasm_threads.py` fails unless the module's memory is really shared. Every flag in that command can go missing and still produce a build that boots, says "threaded" and runs on one core. `make web-both` is the pair. |
 | `make occt-headers` | Not a check. Fetches headers a distribution failed to ship, at the revision in `kernel-occt/native/UPSTREAM` — needed on Ubuntu Noble. Deliberately not run from `build.rs`: a build that reaches the network on its own is not reproducible. |
 
 **Where these run.** [`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs every row above

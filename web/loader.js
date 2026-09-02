@@ -113,14 +113,31 @@ const VARIANTS = {
 };
 
 /**
+ * How many workers to ask for.
+ *
+ * `hardwareConcurrency` is the machine's answer and the cap is ours. The cap
+ * is a **guess**, and it is written down as one: nobody has measured where
+ * more workers stop paying for themselves on this workload, and starting
+ * sixty-four wasm instances to mesh one solid on a machine that has sixty-four
+ * cores is a cost with no evidence behind it. Replace it with a number when
+ * there is a measurement — see the register's "measure something".
+ */
+export function poolSize(limit = 8) {
+  const cores = Number(globalThis.navigator?.hardwareConcurrency);
+  if (!Number.isFinite(cores) || cores < 1) return 1;
+  return Math.max(1, Math.min(Math.floor(cores), limit));
+}
+
+/**
  * Chooses a variant, instantiates it, and opens a viewer on a canvas inside
  * `container`.
  *
  * Two dispatches happen here and they are independent. **Threads** picks the
- * wasm variant, and the threaded one does not exist yet — which is stated
- * rather than hidden: `chosen` is what was picked, `wanted` is what the probe
- * asked for, and `note` says why they differ. A dispatch that silently has one
- * option is a dispatch nobody notices is broken.
+ * wasm variant: `chosen` is what was picked, `wanted` is what the probe asked
+ * for, and `note` says why they differ — because the threaded build is not
+ * always present, and because a pool can fail to start on a page that had
+ * every right to expect one. A dispatch that silently has one option is a
+ * dispatch nobody notices is broken.
  *
  * **Graphics** picks WebGPU or WebGL2, and that one is not decided by a probe
  * at all — it is decided by looking at the result. See `verify` below.
@@ -137,13 +154,40 @@ export async function boot(container) {
 
   if (chosen === 'threaded' && !(await exists(VARIANTS.threaded))) {
     chosen = 'single';
-    note = 'The threaded variant is not built yet; running single-threaded. ' +
+    note = 'The threaded variant is not built here; running single-threaded. ' +
       'This page is cross-origin isolated and the engine has threads, so the ' +
-      'variant is what is missing, not the platform.';
+      'variant is what is missing, not the platform. `make web-threaded` ' +
+      'builds it.';
   }
 
-  const module = await import(VARIANTS[chosen]);
+  let module = await import(VARIANTS[chosen]);
   await module.default();
+
+  // The pool is started here and not inside the module: a wasm instance cannot
+  // spawn its own workers, so `initThreadPool` is a promise JS has to await
+  // before rayon is asked for anything. Everything downstream — the first
+  // tessellation among it — runs after this line for that reason.
+  //
+  // It can still fail on a page that passed every probe: a Content-Security
+  // -Policy without `worker-src`, a `snippets/` directory that did not get
+  // deployed, an engine that runs out of memory starting instances. The
+  // module is then loaded and unusable, because rayon on wasm has no
+  // single-threaded fallback to panic its way into — so the single-threaded
+  // variant is loaded instead, and the reason is shown rather than logged.
+  if (chosen === 'threaded') {
+    try {
+      await module.initThreadPool(poolSize());
+    } catch (e) {
+      chosen = 'single';
+      note =
+        'The threaded variant loaded and its worker pool would not start ' +
+        `(${e && e.message ? e.message : e}); running single-threaded. This ` +
+        'is not a missing feature: the page is isolated and the build exists, ' +
+        'so something is stopping the workers.';
+      module = await import(VARIANTS.single);
+      await module.default();
+    }
+  }
 
   let graphics = null;
   let { canvas, viewer } = await open(container, module, false);

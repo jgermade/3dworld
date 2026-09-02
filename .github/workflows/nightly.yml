@@ -1,9 +1,15 @@
 # The viewport in a real browser, on a schedule rather than on every push.
 #
-# It is the slowest check by a distance — a wasm build, `wasm-bindgen-cli`
-# compiled from source at a version that must match the dependency exactly, and
-# a browser downloaded by Playwright — and it is checking a thing that changes
-# rarely. Nightly, and on demand.
+# It is the slowest check by a distance — two wasm builds, one of them
+# rebuilding the standard library, `wasm-bindgen-cli` compiled from source at a
+# version that must match the dependency exactly, and a browser downloaded by
+# Playwright — and it is checking a thing that changes rarely. Nightly, and on
+# demand.
+#
+# `make web-test` depends on `make web-both`, so both entries of the build
+# matrix are made here. Without the threaded one the browser checks still run
+# and still assert — but what they assert is that the build is missing, which
+# is a weaker claim than the one this job exists to make.
 #
 # A schedule only fires on the default branch. On a branch, run it by hand from
 # the Actions tab; that is not a limitation worth working around.
@@ -33,6 +39,12 @@ jobs:
           rustup update stable
           rustup default stable
           rustup target add wasm32-unknown-unknown
+          # Nightly as well, for `make web-threaded`: `+atomics` is an unstable
+          # target feature and `-Z build-std` is unstable outright, so the
+          # threaded variant cannot be built on stable at all. `rust-src` is
+          # what `build-std` recompiles the standard library from.
+          rustup toolchain install nightly --profile minimal --component rust-src
+          rustup target add --toolchain nightly wasm32-unknown-unknown
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
           echo "version=$(rustc --version | tr ' ()/' '____')" >> "$GITHUB_OUTPUT"
       - uses: actions/cache@v4

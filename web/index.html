@@ -127,10 +127,15 @@
         `${report.backend} · ${report.adapter}`,
         `compute ${report.compute ? 'yes' : 'NO'} · vertex storage ` +
           `${report.vertexStorageBuffers ? 'yes' : 'NO'} · ` +
-          `${report.triangles} triangles${report.deindexed ? ' (de-indexed)' : ''}`,
+          `${report.triangles} triangles${report.deindexed ? ' (de-indexed)' : ''}` +
+          ` · meshed in ${report.tessellateMs.toFixed(1)} ms`,
+        // `pool` is rayon's own count, not the variant's name. A threaded
+        // build whose workers never started says `pool 1` here and would say
+        // `variant threaded` on the same line — showing both is what makes
+        // that visible instead of flattering.
         `variant ${chosen}${chosen === wanted ? '' : ` (wanted ${wanted})`} · ` +
-          `threads ${caps.threads ? 'yes' : 'no'} · isolated ` +
-          `${caps.isolated ? `yes (${caps.isolatedBy})` : 'no'} · ` +
+          `threads ${caps.threads ? 'yes' : 'no'} (pool ${report.threads}) · ` +
+          `isolated ${caps.isolated ? `yes (${caps.isolatedBy})` : 'no'} · ` +
           `simd ${caps.simd ? 'yes' : 'no'}`,
       ];
       if (hit) {
