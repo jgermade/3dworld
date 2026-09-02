@@ -52,6 +52,11 @@ fn main() {
             .exists()
         {
             "/usr/include/opencascade".into()
+        } else if PathBuf::from("/opt/homebrew/include/opencascade")
+            .join("BRepPrimAPI_MakeBox.hxx")
+            .exists()
+        {
+            "/opt/homebrew/include/opencascade".into()
         } else if let Ok(entries) = std::fs::read_dir("/usr/include") {
             entries
                 .flatten()
@@ -141,6 +146,8 @@ fn main() {
             "/usr/lib/x86_64-linux-gnu".into()
         } else if PathBuf::from("/usr/lib/aarch64-linux-gnu").exists() {
             "/usr/lib/aarch64-linux-gnu".into()
+        } else if PathBuf::from("/opt/homebrew/lib").exists() {
+            "/opt/homebrew/lib".into()
         } else {
             "/usr/lib".into()
         }

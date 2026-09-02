@@ -49,6 +49,7 @@ jobs:
         run: |
           rustup update stable
           rustup default stable
+          rustup target add wasm32-unknown-unknown
           rustup component add clippy rustfmt
           rustc --version
           echo "version=$(rustc --version | tr ' ()/' '____')" >> "$GITHUB_OUTPUT"

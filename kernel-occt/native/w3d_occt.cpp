@@ -360,7 +360,7 @@ int32_t w3d_occt_shell(W3dOcctContext *ctx, uint32_t body, uint32_t face_id, dou
       current_face++;
     }
     BRepOffsetAPI_MakeThickSolid maker;
-    maker.MakeThickSolidBySimple(*s, closing_faces, -thickness);
+    maker.MakeThickSolidByJoin(*s, closing_faces, -thickness, 1e-3);
     if (!maker.IsDone()) {
       return fail("shell operation failed: OpenCASCADE could not construct hollow solid");
     }
@@ -868,7 +868,7 @@ int32_t w3d_occt_import_step(W3dOcctContext *ctx, const uint8_t *data,
     std::istringstream stream(
         std::string(reinterpret_cast<const char *>(data), len));
 
-    if (caf_reader.ReadStream("w3d", stream) == IFSelect_RetDone &&
+    if (caf_reader.ChangeReader().ReadStream("w3d", stream) == IFSelect_RetDone &&
         caf_reader.Transfer(doc)) {
       Handle(XCAFDoc_ShapeTool) shape_tool =
           XCAFDoc_DocumentTool::ShapeTool(doc->Main());

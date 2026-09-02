@@ -18,6 +18,7 @@ import os
 import pathlib
 import subprocess
 import sys
+import tarfile
 
 TARGETS = ("x86_64-unknown-linux-gnu", "wasm32-unknown-unknown")
 
@@ -71,7 +72,7 @@ def get_packages_for_target(target):
         name = p["name"]
         if name.startswith("w3d-"):
             continue
-        pkgs[name] = p
+        pkgs[(name, p["version"])] = p
     return pkgs
 
 
@@ -93,14 +94,44 @@ def find_license_file(manifest_path):
     return None
 
 
+def find_license_in_crate_archive(name, version):
+    home = pathlib.Path.home()
+    pattern = f".cargo/registry/cache/*/{name}-{version}.crate"
+    candidates = [
+        "LICENSE", "LICENSE-MIT", "LICENSE-APACHE", "LICENSE.txt",
+        "LICENSE.md", "COPYING", "OFL.txt", "NOTICE"
+    ]
+    for crate_file in home.glob(pattern):
+        try:
+            with tarfile.open(crate_file, "r:gz") as tar:
+                prefix = f"{name}-{version}/"
+                for c in candidates:
+                    try:
+                        member = tar.getmember(prefix + c)
+                        f = tar.extractfile(member)
+                        if f:
+                            return c, f.read().decode("utf-8", errors="replace").replace("\r\n", "\n").strip()
+                    except KeyError:
+                        pass
+                for member in tar.getmembers():
+                    rel = member.name[len(prefix):] if member.name.startswith(prefix) else member.name
+                    if "/" not in rel and (rel.upper().startswith("LICENSE") or rel.upper().startswith("COPYING")):
+                        f = tar.extractfile(member)
+                        if f:
+                            return rel, f.read().decode("utf-8", errors="replace").replace("\r\n", "\n").strip()
+        except Exception:
+            pass
+    return None, None
+
+
 def generate_notice():
-    subprocess.run(["cargo", "fetch"], capture_output=True, text=True)
+    subprocess.run(["cargo", "fetch", "--target", "x86_64-unknown-linux-gnu", "--target", "wasm32-unknown-unknown"], capture_output=True, text=True)
 
     all_packages = {}
     for target in TARGETS:
         pkgs = get_packages_for_target(target)
-        for name, pkg in pkgs.items():
-            all_packages[(name, pkg["version"])] = pkg
+        for (name, ver), pkg in pkgs.items():
+            all_packages[(name, ver)] = pkg
 
     sorted_pkgs = sorted(all_packages.values(), key=lambda p: (p["name"].lower(), p["version"]))
 
@@ -121,7 +152,11 @@ def generate_notice():
             except Exception as e:
                 sections.append(f"--- {name} v{version} ({license_str}) ---\n[Could not read license file: {e}]")
         else:
-            sections.append(f"--- {name} v{version} ({license_str}) ---\n[No license file found in crate package; License declared: {license_str}]")
+            arch_name, text = find_license_in_crate_archive(name, version)
+            if arch_name and text is not None:
+                sections.append(f"--- {name} v{version} ({license_str}) ---\nPath: {arch_name}\n\n{text}")
+            else:
+                sections.append(f"--- {name} v{version} ({license_str}) ---\n[No license file found in crate package; License declared: {license_str}]")
 
     return "\n\n".join(sections) + "\n"
 
