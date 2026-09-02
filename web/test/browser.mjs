@@ -5,15 +5,19 @@
 // renderable formats and its own idea of what a downlevel limit is. Until this
 // file existed, every claim in STACK.md about the fallback was an argument.
 //
-// It runs the page three times, and the three are different questions:
+// It runs the page four times, and the four are different questions:
 //
 //   1. WebGPU offered — whatever the page ends up on, it must draw and pick.
 //      Headless Chromium here reports WebGPU and then rasterises nothing, so
 //      this is also the test of the loader's fall back *from evidence*.
 //   2. WebGL2, by launching a browser with no `navigator.gpu` at all, so the
 //      fallback is exercised rather than described.
-//   3. No COOP/COEP — the loader must degrade *visibly*, which is a rule in
-//      STACK.md and otherwise nothing checks it.
+//   3. No COOP/COEP and no service worker — the loader must degrade *visibly*,
+//      which is a rule in STACK.md and otherwise nothing checks it.
+//   4. No COOP/COEP, service worker allowed — the case every GitHub Pages
+//      visitor is in. `coi-serviceworker.js` must supply the headers the host
+//      never sends, and the page must end up isolated and say where the
+//      isolation came from. Without this run the worker is a claim.
 //
 // Needs `npm install` in this directory, and `make web` to have run.
 
@@ -69,8 +73,13 @@ function serve({ isolated }) {
 
 /** Loads the page and returns everything it learned, plus a screenshot of the
  *  canvas. Nothing here inspects internals the page does not itself display. */
-async function run({ isolated = true, webgpu = true } = {}) {
+async function run({ isolated = true, webgpu = true, coi = true } = {}) {
   const { proc, url } = await serve({ isolated });
+  // `?coi=off` is the page's own hook for skipping service-worker registration.
+  // Run 3 needs it: with the worker in play a host that sends no headers is no
+  // longer a page that cannot be isolated, and the degradation it is there to
+  // check never happens.
+  const target = coi ? url : `${url}?coi=off`;
   const args = ['--no-sandbox', '--enable-unsafe-swiftshader'];
   if (webgpu) {
     args.push('--enable-unsafe-webgpu', '--enable-features=Vulkan');
@@ -89,7 +98,7 @@ async function run({ isolated = true, webgpu = true } = {}) {
     const page = await browser.newPage({ viewport: { width: 960, height: 660 } });
     const consoleErrors = [];
     page.on('pageerror', (e) => consoleErrors.push(String(e)));
-    await page.goto(url, { waitUntil: 'load' });
+    await page.goto(target, { waitUntil: 'load' });
 
     await page
       .waitForFunction(() => globalThis.__w3d?.ready || globalThis.__w3d?.error, null, {
@@ -198,7 +207,7 @@ console.log('\n— WebGL2, the fallback —');
 
 console.log('\n— no COOP/COEP: the degradation must be visible —');
 {
-  const r = await run({ isolated: false, webgpu: true });
+  const r = await run({ isolated: false, webgpu: true, coi: false });
   check('the page still starts', r.ready, r.error ?? '');
   if (r.ready) {
     check('the page is not isolated', r.caps.isolated === false);
@@ -213,6 +222,38 @@ console.log('\n— no COOP/COEP: the degradation must be visible —');
       r.status.includes('Cross-Origin-Embedder-Policy'),
       r.status.split('\n').find((l) => l.includes('Cross-Origin-Embedder-Policy')) ?? '',
     );
+  }
+}
+
+console.log('\n— no COOP/COEP, but a service worker: it must supply them —');
+{
+  // The GitHub Pages case. The first load is not isolated — a worker does not
+  // control the navigation that registered it — so the page registers, reloads
+  // itself, and comes back controlled. Everything asserted here is on the
+  // second load, which is the one a returning visitor always gets.
+  const r = await run({ isolated: false, webgpu: true, coi: true });
+  check('the page starts', r.ready, r.error ?? '');
+  if (r.ready) {
+    check('the service worker made the page isolated', r.caps.isolated === true);
+    check(
+      'and the page says the headers came from it, not from the host',
+      r.caps.isolatedBy === 'service worker',
+      String(r.caps.isolatedBy),
+    );
+    check(
+      'the user can see which',
+      r.status.includes('isolated yes (service worker)'),
+      r.status.split('\n').find((l) => l.includes('isolated')) ?? '',
+    );
+    // The point of the run that is easy to lose: isolation is now available
+    // and it still buys nothing, because the threaded variant is not built.
+    // When it is, this check is the one that has to change.
+    check(
+      'the variant is still single, and the reason is the missing build',
+      r.chosen === 'single' && (r.note ?? '').includes('not built yet'),
+      r.note ?? '(no note)',
+    );
+    check('nothing threw', r.consoleErrors.length === 0, r.consoleErrors.join(' | '));
   }
 }
 

@@ -61,6 +61,15 @@ the parts wasm constrains.
   `Cross-Origin-Opener-Policy: same-origin` and `Cross-Origin-Embedder-Policy: require-corp`,
   `SharedArrayBuffer` is unavailable. The loader must probe and fall back to the single-threaded
   variant with a named, visible degradation — not fail obscurely, and not pretend it is fine.
+- **A host that cannot send them is not the end of it.** GitHub Pages serves static files and has
+  no way to add a response header, which is where this is deployed. `web/coi-serviceworker.js`
+  supplies both headers from a service worker: once one controls the page, every response is
+  re-issued through it and can carry headers the server never sent. It costs one reload on a first
+  visit — a worker does not control the navigation that registered it — and it makes
+  `require-corp` a constraint on the whole page, so any cross-origin subresource added later needs
+  CORP or CORS from its own host or it is blocked. A host that *can* send the headers should send
+  them; Cloudflare Pages and Netlify take a `_headers` file, and a real header beats a worker that
+  can be off. The page says which of the two it got.
 - **There is no CPUID inside wasm.** A module cannot ask what the machine can do; detection
   happens in JS before instantiation, via `WebAssembly.validate()` on probe modules —
   `web/loader.js` carries them inline rather than fetching `wasm-feature-detect` before it can

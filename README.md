@@ -52,6 +52,12 @@ make app-test-step # a STEP file out of one process and drawn by another
 make freecad-check # FreeCAD opens ours and weighs it against arithmetic
 ```
 
+The deployed page is on [GitHub Pages](https://jgermade.github.io/3dworld/), which serves static
+files and cannot send a header. `web/coi-serviceworker.js` supplies `Cross-Origin-Opener-Policy`
+and `Cross-Origin-Embedder-Policy` from a service worker instead, at the cost of one reload on a
+first visit; the status line says whether isolation came from the host or from the worker. It buys
+nothing yet — the threaded variant is still not built — and it is what has to exist before it can.
+
 [CI](.github/workflows/ci.yml) runs all of those on every push, because each one needs something
 installed and a green run that skipped them would be worth nothing. The browser check is
 [nightly](.github/workflows/nightly.yml) and on demand: it is the slowest by a distance and checks

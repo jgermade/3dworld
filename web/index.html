@@ -18,6 +18,12 @@
   <div id="viewport"></div>
   <div id="status">starting…</div>
 </div>
+<!-- GitHub Pages cannot send COOP and COEP, so a service worker supplies
+     them and the page reloads once under it. This has to be a classic script,
+     loaded before the module below: it reads `document.currentScript` to find
+     its own URL, and module scripts are deferred, so a module here would run
+     after the boot it is meant to precede. See web/coi-serviceworker.js. -->
+<script src="./coi-serviceworker.js"></script>
 <script type="module">
   import { boot, distinctColours } from './loader.js';
 
@@ -32,6 +38,15 @@
   window.__w3d = state;
 
   try {
+    // Boot after the isolation question is settled, not before. On a first
+    // visit to a host that sends no headers the service worker is about to
+    // reload the page, and a wasm module fetched now is a megabyte thrown
+    // away. `ready` resolves when there is nothing left to wait for; on the
+    // reloading path it never resolves, and this line is where the page waits.
+    const coi = globalThis.__w3dCOI;
+    if (coi) await coi.ready;
+    state.coi = coi ? coi.note : null;
+
     const { viewer, canvas, caps, wanted, chosen, note, graphics, report } =
       await boot(container);
     Object.assign(state, { caps, wanted, chosen, note, graphics, report, viewer });
@@ -115,7 +130,8 @@
           `${report.triangles} triangles${report.deindexed ? ' (de-indexed)' : ''}`,
         `variant ${chosen}${chosen === wanted ? '' : ` (wanted ${wanted})`} · ` +
           `threads ${caps.threads ? 'yes' : 'no'} · isolated ` +
-          `${caps.isolated ? 'yes' : 'no'} · simd ${caps.simd ? 'yes' : 'no'}`,
+          `${caps.isolated ? `yes (${caps.isolatedBy})` : 'no'} · ` +
+          `simd ${caps.simd ? 'yes' : 'no'}`,
       ];
       if (hit) {
         lines.push(hit.object === null
@@ -124,7 +140,7 @@
       }
       status.textContent = lines.join('\n');
       status.className = '';
-      for (const text of [note, graphics, report.degradation]) {
+      for (const text of [note, graphics, report.degradation, state.coi]) {
         if (!text) continue;
         status.textContent += `\n${text}`;
         status.className = 'warn';
