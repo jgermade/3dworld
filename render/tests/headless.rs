@@ -13,7 +13,7 @@
 use w3d_core::Document;
 use w3d_kernel::{BooleanOp, Mat4, Vec3};
 use w3d_kernel_fake::FakeKernel;
-use w3d_render::{Camera, Gpu, GpuMesh, Material, Object, Renderer, Viewport};
+use w3d_render::{Acceleration, Camera, Gpu, GpuMesh, Material, Object, Renderer, Viewport};
 
 const W: u32 = 256;
 const H: u32 = 192;
@@ -42,6 +42,9 @@ fn harness() -> Option<Harness> {
             println!("adapter: {}", gpu.capabilities);
             if let Some(warning) = gpu.capabilities.degradation() {
                 println!("degraded: {warning}");
+            }
+            if let Some(warning) = gpu.capabilities.software_rendering() {
+                println!("no gpu: {warning}");
             }
             let renderer = Renderer::new(&gpu.device, w3d_render::COLOR_FORMAT);
             Some(Harness { gpu, renderer })
@@ -125,6 +128,22 @@ fn what_the_adapter_can_do_is_reported_not_assumed() {
     assert!(caps.max_buffer_size > 0);
     assert!(caps.max_texture_dimension_2d >= 2048);
     assert!(!caps.adapter.is_empty());
+
+    // The same invariant for the other half of the report: a *reported*
+    // software rasteriser is the only case that produces a note. `Unknown`
+    // must not, because a browser declines to answer and a warning on every
+    // browser is a warning nobody reads.
+    assert_eq!(
+        caps.acceleration() == Acceleration::Software,
+        caps.software_rendering().is_some(),
+    );
+
+    // What the upload guard promises must be something the device will
+    // actually accept. It is not the adapter's maximum: the device is created
+    // with `downlevel_webgl2_defaults`, so on any adapter more capable than
+    // that the two numbers differ and the adapter's would pass a mesh this
+    // device then refuses.
+    assert!(caps.max_buffer_size <= h.gpu.device.limits().max_buffer_size);
 }
 
 #[test]

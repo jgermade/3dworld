@@ -195,6 +195,19 @@ impl Viewer {
         let out = Object::new();
         set(&out, "backend", &format!("{}", caps.backend).into())?;
         set(&out, "adapter", &caps.adapter.as_str().into())?;
+        set(
+            &out,
+            "acceleration",
+            &format!("{}", caps.acceleration()).into(),
+        )?;
+        set(
+            &out,
+            "softwareRendering",
+            &match caps.software_rendering() {
+                Some(text) => text.into(),
+                None => JsValue::NULL,
+            },
+        )?;
         set(&out, "compute", &caps.compute.into())?;
         set(
             &out,

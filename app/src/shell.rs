@@ -151,6 +151,9 @@ impl<K: GeometryKernel + Default> ApplicationHandler for Shell<K> {
         if let Some(warning) = gpu.capabilities.degradation() {
             println!("{warning}");
         }
+        if let Some(warning) = gpu.capabilities.software_rendering() {
+            println!("{warning}");
+        }
 
         let caps = surface.get_capabilities(&gpu.adapter);
         let format = caps.formats[0];

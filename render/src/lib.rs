@@ -24,7 +24,7 @@ pub mod grid;
 pub mod scene;
 
 pub use camera::Camera;
-pub use gpu::{Capabilities, Gpu, GpuError};
+pub use gpu::{Acceleration, Capabilities, Gpu, GpuError};
 pub use grid::Grid;
 pub use scene::{GpuMesh, MeshError};
 

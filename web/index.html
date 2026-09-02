@@ -124,7 +124,7 @@
 
     function show(hit) {
       const lines = [
-        `${report.backend} · ${report.adapter}`,
+        `${report.backend} · ${report.adapter} · ${report.acceleration}`,
         `compute ${report.compute ? 'yes' : 'NO'} · vertex storage ` +
           `${report.vertexStorageBuffers ? 'yes' : 'NO'} · ` +
           `${report.triangles} triangles${report.deindexed ? ' (de-indexed)' : ''}` +
@@ -145,7 +145,13 @@
       }
       status.textContent = lines.join('\n');
       status.className = '';
-      for (const text of [note, graphics, report.degradation, state.coi]) {
+      for (const text of [
+        note,
+        graphics,
+        report.softwareRendering,
+        report.degradation,
+        state.coi,
+      ]) {
         if (!text) continue;
         status.textContent += `\n${text}`;
         status.className = 'warn';
