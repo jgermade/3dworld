@@ -225,6 +225,18 @@ console.log('\n— WebGPU offered, cross-origin isolated —');
       r.report.backend !== 'gl' || typeof r.graphics === 'string',
       r.graphics ?? '(no fallback)',
     );
+    // Not "and it is hardware", which would be a claim about the container.
+    // What must hold is that the answer is one of the three the enum has, and
+    // that the note appears for exactly the one that means no GPU — a browser
+    // that declines to say must not produce a warning, because on the web
+    // that is most of them.
+    check(
+      'it says what is behind the adapter, or that nobody would say',
+      ['hardware', 'software (CPU rasteriser)', 'unreported'].includes(r.report.acceleration) &&
+        (r.report.acceleration === 'software (CPU rasteriser)') ===
+          (typeof r.report.softwareRendering === 'string'),
+      `${r.report.acceleration}${r.report.softwareRendering ? ` — ${r.report.softwareRendering}` : ''}`,
+    );
     check('the page is cross-origin isolated', r.caps.isolated === true);
     checkVariant(r);
     // Not asserted against a threshold. It is one scene on one machine under a

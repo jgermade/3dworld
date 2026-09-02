@@ -83,6 +83,17 @@ the parts wasm constrains.
   GPU will actually rasterise. Headless Chromium reports WebGPU, returns an adapter claiming
   compute shaders and a gigabyte of buffer, and draws a black canvas with no error. The loader
   therefore renders a frame, samples the canvas, and falls back to WebGL2 from evidence.
+- **What an adapter advertises is not what a device is given.** The device is created with
+  `downlevel_webgl2_defaults`, so the weakest target in the matrix is the one every other target
+  also satisfies — and every limit stays at the downlevel value however generous the adapter was.
+  `using_resolution` raises the three texture-dimension limits and nothing else. Anything checked
+  against a limit must therefore read it from the **device**, not from the adapter: on lavapipe
+  here the two differ by 8× on `max_buffer_size`, and the adapter's number would pass a buffer the
+  device then refuses. `Capabilities` reads the device.
+- **`device_type` is a report, not an answer.** It separates a GPU from a CPU rasteriser where the
+  driver says so — lavapipe and SwiftShader do — and says `Other` on WebGPU in a browser, which
+  does not expose it. So it is a three-valued answer with an `unreported` in it, and the frame
+  check above remains the only thing that can catch an adapter that lied.
 - **4 GB is a per-heap ceiling and a design constraint.** Tessellation lives in GPU buffers, not
   in linear memory. Inactive bodies go out of core. If a document is approaching the ceiling in
   the *interactive* heap, the answer is sharding, not wasm64.

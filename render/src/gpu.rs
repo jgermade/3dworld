@@ -8,17 +8,63 @@
 
 use core::fmt;
 
+/// Whether a real GPU is behind the adapter, as far as it will say.
+///
+/// Read from `AdapterInfo::device_type`, which is a *report* and not always an
+/// answer, so `Unknown` is a third state rather than a polite word for
+/// hardware. Two cases produce it and neither is rare:
+///
+///   - **WebGPU in a browser.** The API does not tell a page what is behind
+///     its adapter, so wgpu has nothing to map and says `Other`. This is the
+///     case `web/`'s loader exists to cover: the last word there belongs to
+///     whether a frame came out, not to what was reported.
+///   - **A paravirtualised device.** `VirtualGpu` may have silicon behind it
+///     or a rasteriser on the host, and the adapter cannot tell which.
+///
+/// `Software` is therefore a claim only where the driver made one: wgpu's GL
+/// backend recognising llvmpipe or SwiftShader by name, or a Vulkan ICD saying
+/// `PHYSICAL_DEVICE_TYPE_CPU`, which is what lavapipe does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Acceleration {
+    /// A discrete or integrated GPU.
+    Hardware,
+    /// A CPU rasteriser, said so by the driver.
+    Software,
+    /// Nobody would say. Not evidence either way — see above.
+    Unknown,
+}
+
+impl fmt::Display for Acceleration {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Hardware => "hardware",
+            Self::Software => "software (CPU rasteriser)",
+            Self::Unknown => "unreported",
+        })
+    }
+}
+
 /// Which API actually answered, and what it is capable of.
 ///
-/// Constructed only by [`Gpu::open`]; every field is read from the adapter
-/// rather than inferred from `cfg!`. A build for the web can end up on WebGPU
-/// or on WebGL2 and the difference is not knowable until it has happened.
+/// Constructed only by [`Gpu::open`]; every field is read from the adapter or
+/// from the device it granted, rather than inferred from `cfg!`. A build for
+/// the web can end up on WebGPU or on WebGL2 and the difference is not
+/// knowable until it has happened.
+///
+/// Which of the two answered matters, and the fields say which: what the
+/// *adapter* advertises is not what the *device* was given, because
+/// [`Gpu::open`] asks for less than the adapter offers.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Capabilities {
     /// `Vulkan`, `Metal`, `Dx12`, `BrowserWebGpu` or `Gl`, in wgpu's words.
     pub backend: wgpu::Backend,
     /// What the adapter calls itself. For a log line, never for branching.
     pub adapter: String,
+    /// What kind of device the driver says it is. Branch through
+    /// [`Capabilities::acceleration`] rather than on this directly: the
+    /// mapping from wgpu's five variants onto three answers is where the
+    /// honesty about `Other` lives.
+    pub device_type: wgpu::DeviceType,
     /// Whether compute shaders exist at all.
     ///
     /// False on WebGL2, and that is the fallback the loader may land on. Every
@@ -33,12 +79,48 @@ pub struct Capabilities {
     /// Largest single buffer, in bytes. A tessellated import is checked
     /// against this before it is uploaded, because the failure mode otherwise
     /// is a device loss rather than an error.
+    ///
+    /// **Read from the device, not from the adapter**, and the difference is
+    /// the whole point: [`Gpu::open`] asks for `downlevel_webgl2_defaults`, so
+    /// a device on an adapter offering gigabytes is still granted the
+    /// downlevel maximum and rejects anything above it. Reporting the
+    /// adapter's number here would make the check pass a mesh the device then
+    /// refuses — the exact failure the check exists to prevent.
     pub max_buffer_size: u64,
-    /// Largest square viewport this device will render into.
+    /// Largest square viewport this device will render into. From the device
+    /// too, though `using_resolution` means it matches the adapter's.
     pub max_texture_dimension_2d: u32,
 }
 
 impl Capabilities {
+    /// Whether a GPU is doing the rasterising, as far as anyone will say.
+    pub fn acceleration(&self) -> Acceleration {
+        match self.device_type {
+            wgpu::DeviceType::DiscreteGpu | wgpu::DeviceType::IntegratedGpu => {
+                Acceleration::Hardware
+            }
+            wgpu::DeviceType::Cpu => Acceleration::Software,
+            wgpu::DeviceType::VirtualGpu | wgpu::DeviceType::Other => Acceleration::Unknown,
+        }
+    }
+
+    /// The line to show when the driver has admitted there is no GPU here.
+    ///
+    /// `None` covers both hardware and `Unknown`, because a warning shown on
+    /// every browser that declines to answer is a warning nobody reads. What
+    /// is not knowable is left to the loader's frame check, not guessed at
+    /// here.
+    pub fn software_rendering(&self) -> Option<String> {
+        (self.acceleration() == Acceleration::Software).then(|| {
+            format!(
+                "{} is a CPU rasteriser, not a GPU; every frame is drawn on \
+                 the processor and no timing here says anything about \
+                 hardware.",
+                self.adapter
+            )
+        })
+    }
+
     /// The one-line summary a loader should show a user when it degrades.
     ///
     /// Named after the rule in `STACK.md`: a fallback that is not announced is
@@ -58,9 +140,10 @@ impl fmt::Display for Capabilities {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "{} on {} — compute {}, vertex storage buffers {}, max buffer {} MiB",
+            "{} on {} ({}) — compute {}, vertex storage buffers {}, max buffer {} MiB",
             self.backend,
             self.adapter,
+            self.acceleration(),
             if self.compute { "yes" } else { "NO" },
             if self.vertex_storage_buffers {
                 "yes"
@@ -134,19 +217,6 @@ impl Gpu {
         let downlevel = adapter.get_downlevel_capabilities();
         let limits = adapter.limits();
 
-        let capabilities = Capabilities {
-            backend: info.backend,
-            adapter: info.name.clone(),
-            compute: downlevel
-                .flags
-                .contains(wgpu::DownlevelFlags::COMPUTE_SHADERS),
-            vertex_storage_buffers: downlevel
-                .flags
-                .contains(wgpu::DownlevelFlags::VERTEX_STORAGE),
-            max_buffer_size: limits.max_buffer_size,
-            max_texture_dimension_2d: limits.max_texture_dimension_2d,
-        };
-
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("w3d"),
@@ -158,6 +228,24 @@ impl Gpu {
             })
             .await
             .map_err(|e| GpuError::Device(e.to_string()))?;
+
+        // After `request_device`, not before: the limits that matter to a
+        // caller are the ones this device was *granted*, which are the ones
+        // asked for above and not the ones the adapter advertised.
+        let granted = device.limits();
+        let capabilities = Capabilities {
+            backend: info.backend,
+            adapter: info.name.clone(),
+            device_type: info.device_type,
+            compute: downlevel
+                .flags
+                .contains(wgpu::DownlevelFlags::COMPUTE_SHADERS),
+            vertex_storage_buffers: downlevel
+                .flags
+                .contains(wgpu::DownlevelFlags::VERTEX_STORAGE),
+            max_buffer_size: granted.max_buffer_size,
+            max_texture_dimension_2d: granted.max_texture_dimension_2d,
+        };
 
         Ok(Self {
             device,
