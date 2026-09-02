@@ -32,6 +32,7 @@ const BASE_TOOLKITS: &[&str] = &[
     "TKMesh",
     "TKShHealing",
     "TKFillet",
+    "TKOffset",
     "TKCDF",
     "TKLCAF",
     "TKCAF",
@@ -178,6 +179,7 @@ fn main() {
             "TKSTEPAttr",
             "TKSTEP209",
             "TKSTEP",
+            "TKXDESTEP",
         ] {
             println!("cargo:rustc-link-lib=dylib={tk}");
         }

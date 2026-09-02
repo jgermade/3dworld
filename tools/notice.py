@@ -94,14 +94,24 @@ def find_license_file(manifest_path):
     return None
 
 
-def find_license_in_crate_archive(name, version):
-    home = pathlib.Path.home()
-    pattern = f".cargo/registry/cache/*/{name}-{version}.crate"
+def find_license_in_crate_archive(name, version, manifest_path=None):
     candidates = [
         "LICENSE", "LICENSE-MIT", "LICENSE-APACHE", "LICENSE.txt",
         "LICENSE.md", "COPYING", "OFL.txt", "NOTICE"
     ]
-    for crate_file in home.glob(pattern):
+    crate_files = []
+    if manifest_path:
+        mp = pathlib.Path(manifest_path)
+        if len(mp.parents) >= 4 and mp.parents[2].name == "src":
+            crate_files.append(mp.parents[3] / "cache" / mp.parents[1].name / f"{name}-{version}.crate")
+    cargo_home = os.environ.get("CARGO_HOME")
+    if cargo_home:
+        crate_files.extend(pathlib.Path(cargo_home).glob(f"registry/cache/*/{name}-{version}.crate"))
+    crate_files.extend(pathlib.Path.home().glob(f".cargo/registry/cache/*/{name}-{version}.crate"))
+
+    for crate_file in crate_files:
+        if not crate_file.is_file():
+            continue
         try:
             with tarfile.open(crate_file, "r:gz") as tar:
                 prefix = f"{name}-{version}/"
@@ -152,7 +162,7 @@ def generate_notice():
             except Exception as e:
                 sections.append(f"--- {name} v{version} ({license_str}) ---\n[Could not read license file: {e}]")
         else:
-            arch_name, text = find_license_in_crate_archive(name, version)
+            arch_name, text = find_license_in_crate_archive(name, version, pkg["manifest_path"])
             if arch_name and text is not None:
                 sections.append(f"--- {name} v{version} ({license_str}) ---\nPath: {arch_name}\n\n{text}")
             else:
@@ -173,6 +183,9 @@ def main():
             sys.exit(1)
         existing = out_path.read_text(encoding="utf-8").replace("\r\n", "\n")
         if existing != content:
+            import difflib
+            diff = list(difflib.unified_diff(existing.splitlines(keepends=True), content.splitlines(keepends=True), fromfile="NOTICE", tofile="generated", n=3))
+            print("".join(diff[:100]), file=sys.stderr)
             print("ERROR: NOTICE file is outdated. Run `make notice` to regenerate.", file=sys.stderr)
             sys.exit(1)
         print("NOTICE file is up-to-date.")
