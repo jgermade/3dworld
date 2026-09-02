@@ -6,6 +6,12 @@ edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[features]
+## Off by default, and it must stay that way: the crate is a default workspace
+## member, so a default-on `threads` would put rayon into `make check` and into
+## a `make wasm` that builds without atomics, where a pool cannot be started.
+threads = ["dep:wasm-bindgen-rayon", "dep:rayon", "w3d-kernel-truck/parallel"]
+
 # `cdylib` is what wasm-bindgen needs; `rlib` keeps `cargo check` on the host
 # meaningful, where the crate compiles to nothing at all.
 [lib]
@@ -29,6 +35,19 @@ wgpu = { version = "30", default-features = false, features = [
     "webgpu",
     "webgl",
 ] }
+
+# The threaded variant, and it is a *build*, not a runtime switch: a module
+# with a shared memory and atomic instructions is a different artifact, which
+# is why `loader.js` chooses between two directories rather than calling a
+# function. `wasm-bindgen-rayon` is the pool; `w3d-kernel-truck/parallel` is
+# the only thing in this tree that has any use for it.
+[target.'cfg(target_arch = "wasm32")'.dependencies.wasm-bindgen-rayon]
+version = "1.2"
+optional = true
+
+[target.'cfg(target_arch = "wasm32")'.dependencies.rayon]
+version = "1.10"
+optional = true
 
 [target.'cfg(target_arch = "wasm32")'.dependencies.web-sys]
 version = "0.3"

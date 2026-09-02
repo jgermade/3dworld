@@ -6,9 +6,12 @@ checked it until this file existed. It is a check rather than an audit for the
 same reason `make wasm` greps for `glow`: a rule nobody can run is a rule that
 holds until the first person who does not know about it.
 
-It reads `cargo metadata` for **both** targets — the dependency sets differ, and
-a crate that only appears on wasm is exactly the one nobody looks at — and fails
-on any licence not on the allowlist below. Adding a dependency with an unlisted
+It reads `cargo metadata` once per *build* — see BUILDS. Two targets, because
+the dependency sets differ and a crate that only appears on wasm is exactly the
+one nobody looks at; and wasm a second time with the threaded variant's feature
+on, because `--filter-platform` prunes an optional dependency that is off and a
+crate nobody enabled is a crate nobody audited. It fails on any licence not on
+the allowlist below. Adding a dependency with an unlisted
 licence fails; the fix is to read the licence and either widen the list with an
 argument in a session file, or not take the dependency.
 
@@ -24,7 +27,17 @@ import re
 import subprocess
 import sys
 
-TARGETS = ("x86_64-unknown-linux-gnu", "wasm32-unknown-unknown")
+# Each entry is a *build*, not a platform: the same target with different
+# features is a different set of crates, and the one nobody looks at is the one
+# that only exists behind a feature flag. `--filter-platform` prunes optional
+# dependencies that are off, so a build that ships them has to be asked for by
+# name — `wasm-bindgen-rayon` and `wasm_sync` reach a user's browser in the
+# threaded variant and appeared in neither of the first two entries.
+BUILDS = (
+    ("x86_64-unknown-linux-gnu", ()),
+    ("wasm32-unknown-unknown", ()),
+    ("wasm32-unknown-unknown", ("--features", "w3d-web/threads")),
+)
 
 # Permissive licences that impose no condition GPL-3 cannot satisfy. Each entry
 # is here because someone read it, not because it looked familiar.
@@ -208,9 +221,17 @@ def leaves(node):
     return [leaf for part in node[1] for leaf in leaves(part)]
 
 
-def crates(target):
+def crates(target, extra=()):
     out = subprocess.run(
-        ["cargo", "metadata", "--format-version", "1", "--filter-platform", target],
+        [
+            "cargo",
+            "metadata",
+            "--format-version",
+            "1",
+            "--filter-platform",
+            target,
+            *extra,
+        ],
         capture_output=True,
         text=True,
         check=True,
@@ -277,8 +298,8 @@ def main():
     failures = []
     everything = {}
 
-    for target in TARGETS:
-        for name, version, licence in crates(target):
+    for target, extra in BUILDS:
+        for name, version, licence in crates(target, extra):
             everything.setdefault((name, version), (licence, set()))[1].add(target)
 
     for (name, version), (licence, targets) in sorted(everything.items()):
@@ -297,7 +318,7 @@ def main():
         )
         failures.append((name, version, licence, where, reason))
 
-    print(f"{len(everything)} third-party crates across {len(TARGETS)} targets\n")
+    print(f"{len(everything)} third-party crates across {len(BUILDS)} builds\n")
 
     print("Not visible to cargo, and part of the answer anyway:")
     for what, licence, how, why in NON_CARGO:

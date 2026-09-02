@@ -19,7 +19,13 @@
 //      never sends, and the page must end up isolated and say where the
 //      isolation came from. Without this run the worker is a claim.
 //
+// Runs 1 and 4 also decide the variant, and what they assert depends on
+// whether `make web-threaded` has run — see `THREADED_BUILT`. Both branches
+// assert something, because the interesting failure is a page that boots,
+// prints "threaded" and runs on one core.
+//
 // Needs `npm install` in this directory, and `make web` to have run.
+// `make web-threaded` as well, to exercise the threaded half.
 
 import { spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
@@ -48,11 +54,56 @@ try {
 const OPT_CHROME = '/opt/pw-browsers/chromium-1194/chrome-linux/chrome';
 const EXECUTABLE = process.env.W3D_CHROME ?? (fs.existsSync(OPT_CHROME) ? OPT_CHROME : undefined);
 
+/**
+ * Whether `make web-threaded` has run. The threaded build needs a nightly
+ * toolchain and a rebuilt `std`, so it is not a precondition of this file —
+ * but its absence must not read as a pass. Every assertion below that depends
+ * on it has *two* branches, and both of them assert: with the build, the page
+ * must end up threaded with a pool bigger than one; without it, the page must
+ * say so in the note the loader writes. A check that quietly evaporates when
+ * an artifact is missing is the failure mode this whole directory exists to
+ * avoid.
+ */
+const THREADED_BUILT = fs.existsSync(
+  path.join(root, 'web', 'dist', 'threaded', 'w3d_web.js'),
+);
+
 const failures = [];
 
 function check(name, ok, detail = '') {
   console.log(`${ok ? 'ok  ' : 'FAIL'}  ${name}${detail ? ` — ${detail}` : ''}`);
   if (!ok) failures.push(name);
+}
+
+/** What must be true of the variant on a page that is cross-origin isolated
+ *  and has threads in the engine — under either build. */
+function checkVariant(r) {
+  if (THREADED_BUILT) {
+    check('the threaded variant was chosen', r.chosen === 'threaded', r.chosen);
+    // The number rayon reports, not the directory the module came from. A pool
+    // that failed to start still loads a module called `threaded`.
+    check(
+      'and its worker pool really started',
+      r.report.threads > 1,
+      `pool of ${r.report.threads}`,
+    );
+    check(
+      'so nothing needed explaining',
+      r.note === null,
+      r.note ?? '(no note)',
+    );
+  } else {
+    check(
+      'the variant is single, and the reason is the missing build',
+      r.chosen === 'single' && (r.note ?? '').includes('not built here'),
+      r.note ?? '(no note)',
+    );
+    check(
+      'and the single-threaded build reports a pool of one',
+      r.report.threads === 1,
+      `pool of ${r.report.threads}`,
+    );
+  }
 }
 
 function serve({ isolated }) {
@@ -175,6 +226,15 @@ console.log('\n— WebGPU offered, cross-origin isolated —');
       r.graphics ?? '(no fallback)',
     );
     check('the page is cross-origin isolated', r.caps.isolated === true);
+    checkVariant(r);
+    // Not asserted against a threshold. It is one scene on one machine under a
+    // software rasteriser, so a number here is a fact and not a target — but a
+    // missing one would mean the timing never ran.
+    check(
+      'the tessellation was timed',
+      typeof r.report.tessellateMs === 'number' && r.report.tessellateMs >= 0,
+      `${r.report.tessellateMs} ms on a pool of ${r.report.threads}`,
+    );
     check('nothing threw', r.consoleErrors.length === 0, r.consoleErrors.join(' | '));
   }
 }
@@ -245,14 +305,13 @@ console.log('\n— no COOP/COEP, but a service worker: it must supply them —')
       r.status.includes('isolated yes (service worker)'),
       r.status.split('\n').find((l) => l.includes('isolated')) ?? '',
     );
-    // The point of the run that is easy to lose: isolation is now available
-    // and it still buys nothing, because the threaded variant is not built.
-    // When it is, this check is the one that has to change.
-    check(
-      'the variant is still single, and the reason is the missing build',
-      r.chosen === 'single' && (r.note ?? '').includes('not built yet'),
-      r.note ?? '(no note)',
-    );
+    // The point of the run that is easy to lose: what the worker bought. The
+    // headers it supplies are only worth having if a threaded module can then
+    // be given a shared memory — so this is where the service worker stops
+    // being a page that says "isolated" and becomes a page that is faster for
+    // it. Without the build it is the older assertion, that the platform is
+    // ready and the artifact is not.
+    checkVariant(r);
     check('nothing threw', r.consoleErrors.length === 0, r.consoleErrors.join(' | '));
   }
 }

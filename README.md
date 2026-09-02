@@ -42,6 +42,7 @@ make test       # check, clippy -D warnings, licences, and the tests
 make wasm       # the same code, built for wasm32-unknown-unknown
 make test-occt  # real geometry, and a click that names a face (needs OCCT)
 make web        # the browser bundle, into web/dist/ (needs wasm-bindgen-cli)
+make web-threaded # the same, with threads: shared memory and a rayon pool (nightly)
 make web-serve  # serve it with COOP/COEP; --no-isolation to watch it degrade
 make web-test   # drive it in headless Chromium (needs npm install in web/test/)
 make app-test   # open the modeller in a real window under Xvfb, and check it drew
@@ -55,8 +56,12 @@ make freecad-check # FreeCAD opens ours and weighs it against arithmetic
 The deployed page is on [GitHub Pages](https://jgermade.github.io/3dworld/), which serves static
 files and cannot send a header. `web/coi-serviceworker.js` supplies `Cross-Origin-Opener-Policy`
 and `Cross-Origin-Embedder-Policy` from a service worker instead, at the cost of one reload on a
-first visit; the status line says whether isolation came from the host or from the worker. It buys
-nothing yet — the threaded variant is still not built — and it is what has to exist before it can.
+first visit; the status line says whether isolation came from the host or from the worker.
+
+What it buys is the threaded variant, which `make web-threaded` now builds: a module with a shared
+memory and a rayon pool that meshes a solid's faces at once. The status line shows the pool's size
+next to the variant's name, because a threaded build whose workers never started looks identical
+from the outside otherwise.
 
 [CI](.github/workflows/ci.yml) runs all of those on every push, because each one needs something
 installed and a green run that skipped them would be worth nothing. The browser check is

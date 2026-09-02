@@ -6,7 +6,9 @@ This tool collects license texts and notices for:
 1. The primary project (`3dworld`, GPL-3.0-or-later).
 2. OpenCASCADE (LGPL-2.1-only, used under §3, with source distribution notice).
 3. Embedded Font Data in `epaint_default_fonts` (OFL-1.1, Ubuntu-font-1.0, MIT).
-4. All third-party Rust crates linked across targets.
+4. All third-party Rust crates linked across every build in BUILDS — which is
+   more than every target: a crate reached only through a feature flag is
+   still distributed when that build is the one served.
 
 Usage:
   python3 tools/notice.py           # Writes NOTICE
@@ -20,7 +22,16 @@ import subprocess
 import sys
 import tarfile
 
-TARGETS = ("x86_64-unknown-linux-gnu", "wasm32-unknown-unknown")
+# Builds, not targets. The threaded browser variant links two crates nothing
+# else does — `wasm-bindgen-rayon` and `wasm_sync` — and `--filter-platform`
+# prunes an optional dependency that is off, so asking for the platform alone
+# leaves them out of a file whose whole job is to leave nothing out. Same list,
+# same reasoning, as BUILDS in tools/licences.py.
+BUILDS = (
+    ("x86_64-unknown-linux-gnu", ()),
+    ("wasm32-unknown-unknown", ()),
+    ("wasm32-unknown-unknown", ("--features", "w3d-web/threads")),
+)
 
 PROJECT_HEADER = """3dworld - B-rep CAD modeller in Rust and WebAssembly
 Copyright (c) 2026 3dworld contributors
@@ -63,8 +74,8 @@ The binary embeds font data used for UI rendering:
 """
 
 
-def get_packages_for_target(target):
-    cmd = ["cargo", "metadata", "--format-version=1", f"--filter-platform={target}"]
+def get_packages_for_target(target, extra=()):
+    cmd = ["cargo", "metadata", "--format-version=1", f"--filter-platform={target}", *extra]
     res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True)
     data = json.loads(res.stdout)
     pkgs = {}
@@ -142,8 +153,8 @@ def generate_notice():
     subprocess.run(["cargo", "fetch", "--target", "x86_64-unknown-linux-gnu", "--target", "wasm32-unknown-unknown"], capture_output=True, text=True)
 
     all_packages = {}
-    for target in TARGETS:
-        pkgs = get_packages_for_target(target)
+    for target, extra in BUILDS:
+        pkgs = get_packages_for_target(target, extra)
         for (name, ver), pkg in pkgs.items():
             all_packages[(name, ver)] = pkg
 
