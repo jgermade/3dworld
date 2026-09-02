@@ -62,11 +62,34 @@ export function probe() {
     threads,
     simd,
     isolated,
+    isolatedBy: isolated ? isolationSource() : null,
     // The two-variant axis, and it is an `and`. Threads in the engine without
     // the headers is the common case — a host that has not set COOP/COEP — and
     // it is exactly as unusable as no threads at all.
     threaded: threads && isolated,
   };
+}
+
+/**
+ * Where the headers came from: the host, or `coi-serviceworker.js` supplying
+ * what the host would not.
+ *
+ * It is worth showing rather than inferring. On GitHub Pages the worker is the
+ * only one of the two available, and a user who cannot tell them apart cannot
+ * tell a working worker from a host that quietly started sending headers — nor
+ * notice when the worker stops working.
+ *
+ * It is a heuristic and only one case can confuse it: a page served *with* the
+ * headers that is also controlled by a worker installed on an earlier visit,
+ * which reads as the worker's doing. Distinguishing them would mean re-fetching
+ * the document to look at its headers, and the worker rewrites those too.
+ */
+function isolationSource() {
+  const controlled =
+    typeof navigator !== 'undefined' && navigator.serviceWorker
+      ? !!navigator.serviceWorker.controller
+      : false;
+  return controlled ? 'service worker' : 'server headers';
 }
 
 /** Why the fast variant was not used, in one sentence, or null. */
