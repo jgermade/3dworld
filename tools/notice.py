@@ -79,8 +79,10 @@ def get_packages_for_target(target):
 def find_license_file(manifest_path):
     pkg_dir = pathlib.Path(manifest_path).parent
     candidates = [
-        "LICENSE", "LICENSE-MIT", "LICENSE-APACHE", "LICENSE.txt",
-        "LICENSE.md", "COPYING", "OFL.txt", "NOTICE"
+        "LICENSE", "LICENSE-MIT", "LICENSE-MIT.md", "LICENSE-MIT.txt", "LICENSE.MIT",
+        "LICENSE-APACHE", "LICENSE-APACHE.md", "LICENSE-APACHE.txt", "LICENSE.APACHE",
+        "LICENSE-ZLIB", "LICENSE-ZLIB.md",
+        "LICENSE.txt", "LICENSE.md", "COPYING", "OFL.txt", "NOTICE"
     ]
     for c in candidates:
         p = pkg_dir / c
@@ -88,7 +90,7 @@ def find_license_file(manifest_path):
             return p
     # Case-insensitive check
     if pkg_dir.is_dir():
-        for f in pkg_dir.iterdir():
+        for f in sorted(pkg_dir.iterdir(), key=lambda x: x.name):
             if f.is_file() and (f.name.upper().startswith("LICENSE") or f.name.upper().startswith("COPYING")):
                 return f
     return None
@@ -96,8 +98,10 @@ def find_license_file(manifest_path):
 
 def find_license_in_crate_archive(name, version, manifest_path=None):
     candidates = [
-        "LICENSE", "LICENSE-MIT", "LICENSE-APACHE", "LICENSE.txt",
-        "LICENSE.md", "COPYING", "OFL.txt", "NOTICE"
+        "LICENSE", "LICENSE-MIT", "LICENSE-MIT.md", "LICENSE-MIT.txt", "LICENSE.MIT",
+        "LICENSE-APACHE", "LICENSE-APACHE.md", "LICENSE-APACHE.txt", "LICENSE.APACHE",
+        "LICENSE-ZLIB", "LICENSE-ZLIB.md",
+        "LICENSE.txt", "LICENSE.md", "COPYING", "OFL.txt", "NOTICE"
     ]
     crate_files = []
     if manifest_path:
@@ -123,7 +127,7 @@ def find_license_in_crate_archive(name, version, manifest_path=None):
                             return c, f.read().decode("utf-8", errors="replace").replace("\r\n", "\n").strip()
                     except KeyError:
                         pass
-                for member in tar.getmembers():
+                for member in sorted(tar.getmembers(), key=lambda m: m.name):
                     rel = member.name[len(prefix):] if member.name.startswith(prefix) else member.name
                     if "/" not in rel and (rel.upper().startswith("LICENSE") or rel.upper().startswith("COPYING")):
                         f = tar.extractfile(member)

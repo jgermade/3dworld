@@ -71,10 +71,10 @@ fn main() -> std::process::ExitCode {
     };
     event_loop.set_control_flow(ControlFlow::Poll);
 
-    #[cfg(feature = "truck")]
-    let kernel = w3d_kernel_truck::TruckKernel::default();
-    #[cfg(all(feature = "occt", not(feature = "truck")))]
+    #[cfg(feature = "occt")]
     let kernel = w3d_kernel_occt::OcctKernel::new();
+    #[cfg(all(feature = "truck", not(feature = "occt")))]
+    let kernel = w3d_kernel_truck::TruckKernel::default();
     #[cfg(not(any(feature = "occt", feature = "truck")))]
     let kernel = w3d_kernel_fake::FakeKernel::default();
 
