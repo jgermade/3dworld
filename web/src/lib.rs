@@ -87,6 +87,9 @@ pub struct Viewer {
     /// but a threaded build that reports the same figure as a single-threaded
     /// one is a pool that is not being used, and nothing else here would say so.
     tessellate_ms: f64,
+    /// Whether the scene's boolean succeeded, so the page can say whether what
+    /// it draws was modelled or merely asked for. See `scene`.
+    modelled: bool,
 }
 
 /// Opens a device against `canvas` and builds the scene.
@@ -141,7 +144,7 @@ pub async fn start(canvas: HtmlCanvasElement, force_webgl: bool) -> Result<Viewe
     let renderer = Renderer::new(&gpu.device, format);
     let depth = depth_texture(&gpu.device, width, height);
 
-    let mut doc = scene();
+    let (mut doc, modelled) = scene();
     let ids: Vec<_> = doc.nodes().map(|(id, _)| id).collect();
 
     // Tessellation is timed on its own, with the GPU upload outside the clock:
@@ -181,6 +184,7 @@ pub async fn start(canvas: HtmlCanvasElement, force_webgl: bool) -> Result<Viewe
         pending: None,
         selected: None,
         tessellate_ms,
+        modelled,
     })
 }
 
@@ -227,6 +231,9 @@ impl Viewer {
         // Read from rayon, not from which file was loaded — see `thread_count`.
         set(&out, "threads", &thread_count().into())?;
         set(&out, "tessellateMs", &self.tessellate_ms.into())?;
+        // Whether the plate on screen has a hole in it because a boolean cut
+        // one, or is a plate and a pin sharing a space. See `scene`.
+        set(&out, "modelled", &self.modelled.into())?;
         set(
             &out,
             "deindexed",
@@ -368,19 +375,25 @@ fn depth_texture(device: &wgpu::Device, width: u32, height: u32) -> wgpu::Textur
     })
 }
 
-/// A plate with a hole, on the fake kernel — the same document the headless
+/// A plate with a hole, on `TruckKernel` — the same document the headless
 /// tests draw, so that a difference between here and there is a difference in
 /// the browser rather than in the scene.
-/// Pure Rust B-rep geometry scene rendered via TruckKernel in WebAssembly.
-fn scene() -> Document<TruckKernel> {
+///
+/// The second half of the pair says whether it really is a plate with a hole.
+/// Between 2026-08-27 and 2026-09-05 this function asked for the difference
+/// and drew a plate: the backend's boolean returned a copy of its first
+/// operand, and `let _ =` on the result meant the page could not tell. The
+/// boolean is real now and can still decline — so the answer is carried out to
+/// `report()` and asserted in the browser, rather than assumed here.
+fn scene() -> (Document<TruckKernel>, bool) {
     let mut doc = Document::new(TruckKernel::default());
     let plate = doc
         .add_box("plate", Vec3::new(40.0, 40.0, 10.0))
         .expect("box");
     let drill = doc.add_cylinder("drill", 6.0, 20.0).expect("cylinder");
     let _ = doc.transform(drill, &Mat4::from_translation(Vec3::new(8.0, 0.0, 0.0)));
-    let _ = doc.boolean(BooleanOp::Difference, plate, drill);
-    doc
+    let modelled = doc.boolean(BooleanOp::Difference, plate, drill).is_ok();
+    (doc, modelled)
 }
 
 fn set(target: &Object, key: &str, value: &JsValue) -> Result<(), JsError> {

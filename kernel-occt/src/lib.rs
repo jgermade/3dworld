@@ -260,6 +260,11 @@ impl GeometryKernel for OcctKernel {
         "opencascade"
     }
 
+    /// OpenCASCADE, exactly.
+    fn does_geometry(&self) -> bool {
+        true
+    }
+
     fn create_box(&mut self, size: Vec3) -> Result<Body> {
         let mut id = 0;
         check_new(unsafe { w3d_occt_make_box(self.ctx, size.x, size.y, size.z, &mut id) })?;

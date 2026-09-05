@@ -48,7 +48,7 @@ fn fingerprint(mesh: &Mesh) -> (usize, usize, usize, u64, u64) {
     )
 }
 
-/// Two solids, chosen for what they make the merge do rather than for what
+/// Three solids, chosen for what they make the merge do rather than for what
 /// they look like.
 ///
 /// A box is six planar faces of equal size — the case where an order bug is
@@ -57,18 +57,33 @@ fn fingerprint(mesh: &Mesh) -> (usize, usize, usize, u64, u64) {
 /// different vertex counts per face, and enough faces that the sort has
 /// something to sort.
 ///
-/// Deliberately *not* the drilled plate this backend's `boolean` appears to
-/// produce. It does not: `BooleanOp::Difference` returns a copy of its first
-/// operand here, so the "plate with a hole" is a plate. See the record file
-/// for 2026-09-03 and the register item it opened — the fixture would have
-/// been a box wearing a misleading name.
-fn cases(k: &mut TruckKernel) -> [(&'static str, w3d_kernel::Body); 2] {
+/// The third is the one this file said it could not have. Until 2026-09-05
+/// `BooleanOp::Difference` returned a copy of its first operand here, so a
+/// "plate with a hole" was a plate and the fixture would have been a box
+/// wearing a misleading name. It is a plate with a hole now: the same
+/// 40x40x10 plate and 6mm drill that `make freecad-check` weighs against
+/// 16000 - pi*6^2*10, and the case where the merge has to hold an order
+/// across faces bounded by an intersection curve rather than by a parameter
+/// range.
+fn cases(k: &mut TruckKernel) -> [(&'static str, w3d_kernel::Body); 3] {
     let plate = k.create_box(Vec3::new(40.0, 40.0, 10.0)).expect("box");
     let pin = k.create_cylinder(6.0, 20.0).expect("cylinder");
     let pin = k
         .transform(pin, &Mat4::from_translation(Vec3::new(8.0, 0.0, 0.0)))
         .expect("transform");
-    [("box", plate), ("cylinder", pin)]
+    let drilled = k
+        .boolean(
+            w3d_kernel::BooleanOp::Difference,
+            plate,
+            pin,
+            w3d_kernel::Tolerance::document_default(),
+        )
+        .expect("a plate this backend can drill");
+    [
+        ("box", plate),
+        ("cylinder", pin),
+        ("drilled plate", drilled),
+    ]
 }
 
 #[test]
@@ -93,11 +108,22 @@ fn tessellation_is_independent_of_the_thread_count() {
 /// Recorded from the sequential path and asserted against both, in the order
 /// [`cases`] returns. See the note at the top of the file on why these are
 /// literals rather than two runs compared in one process.
-const FINGERPRINTS: [(usize, usize, usize, u64, u64); 2] = [
+const FINGERPRINTS: [(usize, usize, usize, u64, u64); 3] = [
     // box: six planar faces, four vertices each
-    (24, 24, 36, 12909945243647881981, 1236065057125872),
-    // cylinder: a curved lateral surface and two caps, 1266 triangles
-    (1290, 1290, 3798, 15766414192103659986, 494696828649949194),
+    (24, 24, 36, 14095475103671264770, 1236065057125872),
+    // cylinder: a disc swept along the axis — four lateral faces and two caps,
+    // and a cap triangulated over its whole disc rather than gridded over the
+    // square the disc is inscribed in, which is most of the vertex count
+    (
+        3273,
+        3273,
+        18438,
+        15871330935632557431,
+        14858392254419109789,
+    ),
+    // drilled plate: six planar faces and the wall of the hole, the top and
+    // bottom bounded by a circle that no parameter range describes
+    (3425, 3425, 18882, 809326082532109153, 11939554635547878893),
 ];
 
 /// `w3d-web`'s threaded variant tessellates through `rayon`, which requires the

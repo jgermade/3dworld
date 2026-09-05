@@ -18,12 +18,14 @@
 │     the loader, and a canvas       w3d-web                        ✅ │
 │                                                                     │
 │   ═════ w3d_kernel::GeometryKernel ═════  the seam, and the spec  ✅ │
-│         + conformance: one suite, every backend                     │
+│         + conformance: one suite in two halves — the contract, of   │
+│           every backend; the geometry, of the ones that claim any   │
 │                                                                     │
 │   w3d-kernel-fake  no geometry, full contract — drives the tests  ✅ │
-│   w3d-kernel-occt  OpenCASCADE through a 13-entry C ABI           ✅ │
+│   w3d-kernel-occt  OpenCASCADE through a 16-entry C ABI           ✅ │
 │     └ native build ✅   Emscripten build ⬜                          │
-│   kernel-native/   ours, or truck — swapped in behind the trait   ⬜ │
+│   w3d-kernel-truck pure Rust: exact surfaces, a narrow boolean    ◐ │
+│     └ native ✅   wasm ✅   sphere booleans ⬜                        │
 └─────────────────────────────────────────────────────────────────────┘
         │                                                     │
         ▼                                                     ▼

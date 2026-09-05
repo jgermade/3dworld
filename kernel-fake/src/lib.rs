@@ -211,6 +211,13 @@ impl GeometryKernel for FakeKernel {
         "fake"
     }
 
+    /// Bounding boxes, and a tree that remembers what it was asked for. Every
+    /// answer here is the contract's shape without the contract's geometry,
+    /// which is exactly what this backend is for.
+    fn does_geometry(&self) -> bool {
+        false
+    }
+
     fn create_box(&mut self, size: Vec3) -> Result<Body> {
         if size.x <= 0.0 || size.y <= 0.0 || size.z <= 0.0 {
             return Err(KernelError::Degenerate("box extent must be positive"));

@@ -5,15 +5,44 @@
 //! question with an answer, and the answer is this report.
 //!
 //! Every assertion here has to be true of *any* correct kernel, which rules
-//! out most of the interesting ones. Nothing checks that a boolean is
-//! geometrically right — that needs fixtures with golden topology, and it is
-//! the next suite, not this one. What is checked is the contract: handles
+//! out most of the interesting ones. What is checked is the contract: handles
 //! stay valid when the contract says they do, bounds relate to their operands
 //! the way set operations require, tessellation is well-formed and lies inside
 //! the body it came from, and errors happen where they are promised.
+//!
+//! # The two halves, and why there are two
+//!
+//! Until 2026-09-05 the whole suite was the paragraph above, and a backend
+//! whose `boolean` returned *the bounding box of its operands* passed it. That
+//! is not a hypothetical: `TruckKernel` did exactly that, in the browser, for
+//! nine days. Every assertion the suite made about a boolean was about its
+//! bounds, and the bounds of a bounding box are correct.
+//!
+//! So there is now a second half, run only against a backend whose
+//! [`GeometryKernel::does_geometry`] says `true`, and it asks the question
+//! bounds cannot: **how much material is there?** The volume a tessellation
+//! encloses is cheap to compute, is true of any correct kernel to within its
+//! sag, and is not something bookkeeping can fake — a bounding box has a
+//! volume and it is the wrong one. `FakeKernel` is excused from this half by
+//! saying what it is, not by being special-cased here.
+//!
+//! # A backend may decline; it may not lie
+//!
+//! The other half of the same decision. `truck`'s boolean is real and narrow:
+//! it will subtract one box from another exactly, drill a plate exactly, and
+//! it cannot touch a sphere — where it panics rather than answering, so the
+//! backend refuses the call before it gets there. The suite therefore accepts
+//! `Err` from a boolean on the harder fixtures, and accepts nothing else: an
+//! answer, once given, is held to the set-theoretic relation it claims.
+//!
+//! There is a floor under that, or "decline everything" would pass. Three
+//! fixtures are **mandatory** — the union, difference and intersection of two
+//! overlapping axis-aligned boxes, whose volumes are arithmetic — because a
+//! kernel that cannot subtract one box from another is not a kernel.
 
 use crate::{
-    Aabb, BooleanOp, GeometryKernel, KernelError, Mat4, Mesh, Profile, Quality, Tolerance, Vec3,
+    Aabb, Body, BooleanOp, GeometryKernel, KernelError, Mat4, Mesh, Profile, Quality, Tolerance,
+    Vec3,
 };
 
 pub struct Check {
@@ -24,6 +53,11 @@ pub struct Check {
 pub struct Report {
     pub kernel: &'static str,
     pub checks: Vec<Check>,
+    /// Whether the geometry half ran, which is the backend's own answer to
+    /// [`GeometryKernel::does_geometry`]. A report that says `false` is a
+    /// report about bookkeeping: it is evidence the contract is satisfied and
+    /// no evidence at all that anything was modelled.
+    pub geometry: bool,
 }
 
 impl Report {
@@ -43,8 +77,13 @@ impl Report {
         if self.passed() {
             return;
         }
+        let half = if self.geometry {
+            "contract and geometry"
+        } else {
+            "contract only"
+        };
         let mut msg = format!(
-            "{} failed {} of {} conformance checks:\n",
+            "{} failed {} of {} conformance checks ({half}):\n",
             self.kernel,
             self.failures().count(),
             self.checks.len()
@@ -203,9 +242,14 @@ pub fn run<K: GeometryKernel>(k: &mut K, tol: Tolerance, quality: Quality) -> Re
             k.bounds(a).map_err(|e| e.to_string())?,
             k.bounds(b).map_err(|e| e.to_string())?,
         );
-        let u = k
-            .boolean(BooleanOp::Union, a, b, tol)
-            .map_err(|e| e.to_string())?;
+        let u = match k.boolean(BooleanOp::Union, a, b, tol) {
+            Ok(u) => u,
+            // Declining is conforming — see the note at the top of this file.
+            // A backend that declines *everything* is caught by the mandatory
+            // box fixtures in the geometry half, not here.
+            Err(KernelError::Unsupported(_)) => return Ok(()),
+            Err(e) => return Err(format!("union failed: {e}")),
+        };
         let bu = k.bounds(u).map_err(|e| e.to_string())?;
         require(
             bu.contains_box(&ba, slack) && bu.contains_box(&bb, slack),
@@ -217,9 +261,11 @@ pub fn run<K: GeometryKernel>(k: &mut K, tol: Tolerance, quality: Quality) -> Re
         let a = k.create_box(Vec3::splat(4.0)).map_err(|e| e.to_string())?;
         let b = k.create_sphere(1.0).map_err(|e| e.to_string())?;
         let ba = k.bounds(a).map_err(|e| e.to_string())?;
-        let d = k
-            .boolean(BooleanOp::Difference, a, b, tol)
-            .map_err(|e| e.to_string())?;
+        let d = match k.boolean(BooleanOp::Difference, a, b, tol) {
+            Ok(d) => d,
+            Err(KernelError::Unsupported(_)) => return Ok(()),
+            Err(e) => return Err(format!("difference failed: {e}")),
+        };
         let bd = k.bounds(d).map_err(|e| e.to_string())?;
         require(
             ba.contains_box(&bd, slack),
@@ -234,9 +280,11 @@ pub fn run<K: GeometryKernel>(k: &mut K, tol: Tolerance, quality: Quality) -> Re
             k.bounds(a).map_err(|e| e.to_string())?,
             k.bounds(b).map_err(|e| e.to_string())?,
         );
-        let i = k
-            .boolean(BooleanOp::Intersection, a, b, tol)
-            .map_err(|e| e.to_string())?;
+        let i = match k.boolean(BooleanOp::Intersection, a, b, tol) {
+            Ok(i) => i,
+            Err(KernelError::Unsupported(_)) => return Ok(()),
+            Err(e) => return Err(format!("intersection failed: {e}")),
+        };
         let bi = k.bounds(i).map_err(|e| e.to_string())?;
         require(
             ba.contains_box(&bi, slack) && bb.contains_box(&bi, slack),
@@ -250,9 +298,13 @@ pub fn run<K: GeometryKernel>(k: &mut K, tol: Tolerance, quality: Quality) -> Re
         let a = k.create_box(Vec3::splat(2.0)).map_err(|e| e.to_string())?;
         let b = k.create_sphere(1.0).map_err(|e| e.to_string())?;
         let before = k.bounds(a).map_err(|e| e.to_string())?;
-        let _ = k
-            .boolean(BooleanOp::Union, a, b, tol)
-            .map_err(|e| e.to_string())?;
+        // Declined or done, the operands must survive: a backend that
+        // consumed them and *then* failed has taken the document with it, and
+        // that is the case a suite is least likely to think of.
+        match k.boolean(BooleanOp::Union, a, b, tol) {
+            Ok(_) | Err(KernelError::Unsupported(_)) => {}
+            Err(e) => return Err(format!("union failed: {e}")),
+        }
         let after = k
             .bounds(a)
             .map_err(|e| format!("operand invalidated by the boolean: {e}"))?;
@@ -732,10 +784,243 @@ pub fn run<K: GeometryKernel>(k: &mut K, tol: Tolerance, quality: Quality) -> Re
         }
     );
 
+    if k.does_geometry() {
+        geometry_checks(k, tol, quality, &mut checks);
+    }
+
     Report {
         kernel: k.name(),
         checks,
+        geometry: k.does_geometry(),
     }
+}
+
+/// The volume these triangles enclose, by the divergence theorem.
+///
+/// Positive when the mesh winds counter-clockwise seen from the outside, which
+/// is the convention [`Mesh`] states — so the sign of this number is the
+/// orientation check, and its magnitude is the geometry one. It is the
+/// cheapest question that tells modelling from bookkeeping: a bounding box has
+/// a volume too, and it is not the same volume.
+///
+/// It assumes a closed mesh, which every check that calls it has already
+/// asserted the well-formedness of.
+fn enclosed_volume(mesh: &Mesh) -> f64 {
+    let point = |i: u32| {
+        let p = mesh.positions[i as usize];
+        Vec3::new(p[0] as f64, p[1] as f64, p[2] as f64)
+    };
+    let mut total = 0.0;
+    for t in mesh.indices.as_chunks::<3>().0 {
+        total += point(t[0]).dot(point(t[1]).cross(point(t[2])));
+    }
+    total / 6.0
+}
+
+/// Two overlapping axis-aligned boxes, whose union, difference and
+/// intersection are arithmetic rather than opinion.
+///
+/// A 4-cube at the origin and a 2-cube whose own corner sits at the first's,
+/// so they share exactly a 1×1×1 corner: 64, 8, and 1. Every number the
+/// mandatory checks assert comes from those three.
+struct Corners {
+    big: Body,
+    small: Body,
+}
+
+const BIG: f64 = 64.0;
+const SMALL: f64 = 8.0;
+const OVERLAP: f64 = 1.0;
+
+fn corners<K: GeometryKernel>(k: &mut K) -> core::result::Result<Corners, String> {
+    let big = k.create_box(Vec3::splat(4.0)).map_err(|e| e.to_string())?;
+    let small = k.create_box(Vec3::splat(2.0)).map_err(|e| e.to_string())?;
+    // Centred bodies, so moving the small one by half of each extent puts its
+    // corner on the big one's: the overlap is the unit cube at (1.5, 1.5, 1.5).
+    let small = k
+        .transform(small, &Mat4::from_translation(Vec3::splat(2.0)))
+        .map_err(|e| e.to_string())?;
+    Ok(Corners { big, small })
+}
+
+/// What a body's mesh says its volume is, with the mesh checked first.
+fn volume_of<K: GeometryKernel>(
+    k: &K,
+    body: Body,
+    quality: Quality,
+) -> core::result::Result<f64, String> {
+    let bounds = k.bounds(body).map_err(|e| e.to_string())?;
+    let mesh = k
+        .tessellate(body, quality)
+        .map_err(|e| format!("tessellate: {e}"))?;
+    check_mesh(&mesh, &bounds, quality.sag.max(1e-4) * 4.0)?;
+    Ok(enclosed_volume(&mesh))
+}
+
+fn within(got: f64, expected: f64, fraction: f64) -> bool {
+    (got - expected).abs() <= expected.abs() * fraction
+}
+
+/// The geometry half on its own, whatever the backend claims.
+///
+/// [`run`] decides from [`GeometryKernel::does_geometry`] whether to include
+/// these, which is the right thing for a backend and the wrong thing for
+/// testing the split itself. This is how the negative control in
+/// `kernel-fake/tests/conformance.rs` works: it holds `FakeKernel` — the one
+/// backend that says `false` — to the half it is excused from, and requires it
+/// to *fail*. A tier nothing fails is a tier that excuses everybody.
+pub fn geometry<K: GeometryKernel>(k: &mut K, tol: Tolerance, quality: Quality) -> Report {
+    let mut checks = Vec::new();
+    geometry_checks(k, tol, quality, &mut checks);
+    Report {
+        kernel: k.name(),
+        checks,
+        geometry: true,
+    }
+}
+
+/// The half that only runs against a backend that says it does geometry.
+///
+/// Everything here is still true of *any* correct kernel — these are volumes a
+/// child could compute — but none of it is true of a backend that answers with
+/// bounding boxes, and that is the point. See the note at the top of the file.
+fn geometry_checks<K: GeometryKernel>(
+    k: &mut K,
+    tol: Tolerance,
+    quality: Quality,
+    checks: &mut Vec<Check>,
+) {
+    check!(checks, "a box's mesh encloses the box's volume", {
+        let size = Vec3::new(2.0, 4.0, 6.0);
+        let b = k.create_box(size).map_err(|e| e.to_string())?;
+        let got = volume_of(k, b, quality)?;
+        // A box is planar, so its mesh is not an approximation of anything and
+        // the only slack is `f32`'s. Anything looser here would let a mesh of
+        // the *bounding* box through, which for a box is the same mesh — which
+        // is why the checks below use shapes where it is not.
+        require(
+            within(got, 48.0, 1.0e-3),
+            format!("a 2x4x6 box tessellated to a volume of {got}, not 48"),
+        )
+    });
+
+    check!(checks, "a curved body is oriented outwards", {
+        // The sign is the assertion. A mesh wound the other way encloses minus
+        // its own volume, which is what a sphere and a cylinder did here for
+        // nine days while every other check in this file passed.
+        //
+        // The magnitude is asserted loosely and one-sidedly: a tessellation
+        // whose vertices lie on the surface is inscribed, so it may fall short
+        // of the true volume by its sag and must not exceed it by more than
+        // rounding.
+        for (name, body, exact) in [
+            (
+                "sphere",
+                k.create_sphere(1.0).map_err(|e| e.to_string())?,
+                4.0 * core::f64::consts::PI / 3.0,
+            ),
+            (
+                "cylinder",
+                k.create_cylinder(1.0, 2.0).map_err(|e| e.to_string())?,
+                2.0 * core::f64::consts::PI,
+            ),
+        ] {
+            let got = volume_of(k, body, quality)?;
+            require(
+                got > 0.0,
+                format!(
+                    "the {name}'s mesh encloses {got}, a negative volume: it is \
+                     wound inside out, and every normal on it points at the \
+                     body's centre"
+                ),
+            )?;
+            require(
+                got <= exact * 1.01 && got >= exact * 0.7,
+                format!("the {name}'s mesh encloses {got}, and it should be near {exact}"),
+            )?;
+        }
+        Ok(())
+    });
+
+    // The three below are the floor: no `Unsupported` is accepted, because a
+    // kernel that cannot subtract one box from another is not a kernel, and
+    // without them "decline everything" would pass this file.
+    check!(checks, "a union of two boxes is both, counted once", {
+        let c = corners(k)?;
+        let u = k
+            .boolean(BooleanOp::Union, c.big, c.small, tol)
+            .map_err(|e| format!("a union of two boxes is mandatory, and this one {e}"))?;
+        let got = volume_of(k, u, quality)?;
+        require(
+            within(got, BIG + SMALL - OVERLAP, 1.0e-3),
+            format!(
+                "the union encloses {got}, not {}. A result of {} would be the \
+                 bounding box of the operands rather than their union",
+                BIG + SMALL - OVERLAP,
+                5.0 * 5.0 * 5.0
+            ),
+        )
+    });
+
+    check!(
+        checks,
+        "a difference removes exactly what the tool covers",
+        {
+            let c = corners(k)?;
+            let d = k
+                .boolean(BooleanOp::Difference, c.big, c.small, tol)
+                .map_err(|e| format!("a difference of two boxes is mandatory, and this one {e}"))?;
+            let got = volume_of(k, d, quality)?;
+            require(
+                within(got, BIG - OVERLAP, 1.0e-3),
+                format!(
+                    "the difference encloses {got}, not {}. A result of {BIG} would \
+                 be a copy of the minuend, which is a boolean that ignored its \
+                 second operand",
+                    BIG - OVERLAP
+                ),
+            )
+        }
+    );
+
+    check!(checks, "an intersection is only what both contain", {
+        let c = corners(k)?;
+        let i = k
+            .boolean(BooleanOp::Intersection, c.big, c.small, tol)
+            .map_err(|e| format!("an intersection of two boxes is mandatory, and this one {e}"))?;
+        let got = volume_of(k, i, quality)?;
+        require(
+            within(got, OVERLAP, 1.0e-3),
+            format!("the intersection encloses {got}, not {OVERLAP}"),
+        )
+    });
+
+    check!(
+        checks,
+        "a difference of a body with a copy of itself is empty or refused",
+        {
+            // There is no empty `Body` in this contract, so a kernel is
+            // entitled to refuse this outright — and a kernel that answers has
+            // said something about nothing, which had better weigh nothing.
+            let a = k.create_box(Vec3::splat(2.0)).map_err(|e| e.to_string())?;
+            let b = k.copy(a).map_err(|e| e.to_string())?;
+            match k.boolean(BooleanOp::Difference, a, b, tol) {
+                Err(_) => Ok(()),
+                Ok(d) => match volume_of(k, d, quality) {
+                    // An empty result may not tessellate at all, which is not a
+                    // failure of this check.
+                    Err(_) => Ok(()),
+                    Ok(got) => require(
+                        got.abs() <= SMALL * 1.0e-3,
+                        format!(
+                            "subtracting a body from itself left {got} of \
+                             material behind"
+                        ),
+                    ),
+                },
+            }
+        }
+    );
 }
 
 /// Prose, and not a STEP file by any reading. Used in both directions of the

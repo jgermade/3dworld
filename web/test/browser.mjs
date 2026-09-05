@@ -247,6 +247,12 @@ console.log('\n— WebGPU offered, cross-origin isolated —');
       typeof r.report.tessellateMs === 'number' && r.report.tessellateMs >= 0,
       `${r.report.tessellateMs} ms on a pool of ${r.report.threads}`,
     );
+    // The page asked for a plate with a hole from the first day it drew
+    // anything, and for nine days it got a plate: the backend's boolean
+    // returned a copy of its first operand. Nothing in a screenshot or a
+    // triangle count would say so, and this is the only check anywhere that
+    // asserts the browser is modelling rather than displaying.
+    check('the plate on screen was cut, not just asked for', r.report.modelled === true);
     check('nothing threw', r.consoleErrors.length === 0, r.consoleErrors.join(' | '));
   }
 }
