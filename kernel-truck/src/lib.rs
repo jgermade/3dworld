@@ -11,9 +11,10 @@
 
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use truck_meshalgo::tessellation::{MeshableShape, MeshedShape};
 use truck_modeling::*;
-use truck_polymesh::StructuredMesh;
+use truck_polymesh::PolygonMesh;
 use w3d_kernel::{
     Aabb, Body, BooleanOp, GeometryKernel, ImportedBody, KernelError, Mat4, Mesh, Profile, Quality,
     Result, SketchPlane, Tolerance, Topology, Vec3,
@@ -22,6 +23,20 @@ use w3d_kernel::{
 pub struct TruckKernel {
     next_id: u32,
     solids: HashMap<Body, Solid>,
+    /// Bodies with a point where the surface degenerates — a sphere's poles.
+    ///
+    /// `truck-shapeops` does not fail on one, it **panics**, inside
+    /// `Solid::new`. On the desktop that is caught; in the browser, where the
+    /// build has no unwinding, a panic is the end of the module and of the
+    /// page. So the bodies that are known to carry a pole are remembered when
+    /// they are made, and a boolean on one is declined before anything can
+    /// abort — a declared "no" instead of a crash.
+    ///
+    /// It is a record of what this backend *built*, not a proof about geometry:
+    /// a sphere that arrives through [`GeometryKernel::load_body`] is not in it,
+    /// and the `catch_unwind` in [`TruckKernel::boolean`] is what covers that
+    /// case, on the target where unwinding exists.
+    singular: HashSet<Body>,
 }
 
 impl TruckKernel {
@@ -29,6 +44,7 @@ impl TruckKernel {
         Self {
             next_id: 1,
             solids: HashMap::new(),
+            singular: HashSet::new(),
         }
     }
 
@@ -42,6 +58,30 @@ impl TruckKernel {
     fn get(&self, body: Body) -> Result<&Solid> {
         self.solids.get(&body).ok_or(KernelError::UnknownBody(body))
     }
+
+    /// The tolerance a boolean is actually run at, which is not the document's.
+    ///
+    /// `truck-shapeops` uses this number twice: to decide whether two points
+    /// are the same point, and as the sag it divides an intersection curve into
+    /// a polyline at. The document's linear tolerance is 1.0e-7 — a length, and
+    /// the right one for *geometry* — and asking for intersection curves that
+    /// fine on a 40 mm plate means hundreds of thousands of segments before it
+    /// gives up. So the floor is relative to the operands: a boolean on a large
+    /// part is run at a proportionally larger tolerance, and a boolean on a
+    /// small one is not run coarser than the document allows.
+    ///
+    /// This is the honest form of a compromise that cannot be avoided at this
+    /// backend's maturity, and it is the reason a `truck` boolean is not exact
+    /// in the way OCCT's is. It is written down here and in the record rather
+    /// than hidden in a call site.
+    fn boolean_tolerance(&self, a: Body, b: Body, tol: Tolerance) -> Result<f64> {
+        let extent = |body: Body| -> Result<f64> {
+            let size = self.bounds(body)?.size();
+            Ok(size.x.max(size.y).max(size.z))
+        };
+        let largest = extent(a)?.max(extent(b)?);
+        Ok(tol.linear.max(largest * BOOLEAN_TOLERANCE_FRACTION))
+    }
 }
 
 impl Default for TruckKernel {
@@ -49,6 +89,22 @@ impl Default for TruckKernel {
         Self::new()
     }
 }
+
+/// A full turn, and then some. `truck`'s `rsweep` closes a sweep only when the
+/// angle is *past* a full turn; at exactly 2π it wraps the profile onto itself
+/// and leaves a seam — a closed edge that `truck-shapeops` cannot split, and
+/// that a boolean then either takes twenty-five seconds over or gets wrong.
+const FULL_TURN: Rad<f64> = Rad(7.0);
+
+/// The fraction of the larger operand's size that a boolean is run at when the
+/// document's own tolerance is finer. See [`TruckKernel::boolean_tolerance`].
+const BOOLEAN_TOLERANCE_FRACTION: f64 = 1.0e-3;
+
+/// The sag [`TruckKernel::bounds`] measures at. Finer than anything a viewport
+/// asks for, because a bound that is wrong is worse than a bound that is slow,
+/// and coarse enough that the triangulation is not the cost of asking a body
+/// how big it is.
+const BOUNDS_SAG: f64 = 0.005;
 
 fn get_range(b: (std::ops::Bound<f64>, std::ops::Bound<f64>)) -> (f64, f64) {
     let min = match b.0 {
@@ -62,104 +118,147 @@ fn get_range(b: (std::ops::Bound<f64>, std::ops::Bound<f64>)) -> (f64, f64) {
     (min, max)
 }
 
+/// A face's place in the mesh, as numbers rather than as the order the
+/// topology happens to hold it in.
+///
+/// Face ids are positions in this order, and a face id is what picking, the
+/// selection and every per-face badge in the shell hold on to. Sorting on the
+/// surface's parameter range and its midpoint is what keeps that id the same
+/// across two runs, across the serial and the parallel path, and across a save
+/// and a load — none of which the topology's own iteration order promises.
+fn face_key(face: &Face) -> [f64; 7] {
+    let surface = face.surface();
+    let u = get_range(surface.parameter_range().0);
+    let v = get_range(surface.parameter_range().1);
+    let p = surface.subs((u.0 + u.1) * 0.5, (v.0 + v.1) * 0.5);
+    [u.0, u.1, v.0, v.1, p.x, p.y, p.z]
+}
+
+fn key_order(a: &[f64; 7], b: &[f64; 7]) -> std::cmp::Ordering {
+    a.iter()
+        .zip(b.iter())
+        .map(|(x, y)| x.total_cmp(y))
+        .find(|o| o.is_ne())
+        .unwrap_or(std::cmp::Ordering::Equal)
+}
+
 /// One face's triangles, in a mesh of its own with indices from zero.
 ///
 /// Standalone rather than appended into a shared `Mesh`, and that is the whole
 /// point: a function that writes into somebody else's mesh cannot be handed to
 /// more than one thread, and one that returns its own can. [`append_face`] is
 /// the other half, and it is what puts the index offsets back.
-fn face_mesh(structured: &StructuredMesh, face_idx: u32) -> Mesh {
-    let mut out_mesh = Mesh::default();
-    let row_count = structured.positions().len();
-    if row_count == 0 {
-        return out_mesh;
-    }
-    let col_count = structured.positions()[0].len();
-    if col_count == 0 {
-        return out_mesh;
-    }
+///
+/// **It is the face that is meshed, not its surface.** A face is a surface plus
+/// the loops that trim it, and a grid over the surface's whole parameter range
+/// draws material the solid does not have: a disc came out square, and a face
+/// bounded by an intersection curve — which is every face a boolean makes —
+/// came out whole. `truck-meshalgo`'s triangulation reads the loops, so this is
+/// the boundary's mesh rather than the surface's.
+fn mesh_face(face: &Face, sag: f64, face_idx: u32) -> Mesh {
+    let mut out = Mesh::default();
+    let shell: Shell = vec![face.clone()].into();
+    let meshed = shell.triangulation(sag);
 
-    let normals_opt = structured.normals();
-    let has_normals = normals_opt.is_some_and(|norms| {
-        norms.len() == row_count && !norms.is_empty() && norms[0].len() == col_count
-    });
-
-    for r in 0..row_count {
-        for c in 0..col_count {
-            let p = structured.positions()[r][c];
-            out_mesh
-                .positions
-                .push([p.x as f32, p.y as f32, p.z as f32]);
-            let norm = if has_normals {
-                let n = normals_opt.unwrap()[r][c];
-                let (nx, ny, nz) = (n.x as f32, n.y as f32, n.z as f32);
-                let len = (nx * nx + ny * ny + nz * nz).sqrt();
-                if len.is_normal() && len > 1e-6 {
-                    [nx / len, ny / len, nz / len]
-                } else {
-                    [0.0, 0.0, 1.0]
+    // The edges first, and from the same triangulation as the triangles: the
+    // polylines below *are* what divided the boundary curves, so the wireframe
+    // and the surface meet on shared points rather than on two approximations
+    // of one curve that disagree by the sag.
+    for meshed_face in meshed.face_iter() {
+        for wire in meshed_face.absolute_boundaries() {
+            for edge in wire.edge_iter() {
+                let polyline = edge.curve();
+                let base = out.line_positions.len() as u32;
+                for p in polyline.iter() {
+                    out.line_positions
+                        .push([p.x as f32, p.y as f32, p.z as f32]);
                 }
-            } else {
-                let r_next = (r + 1).min(row_count - 1);
-                let r_prev = r.saturating_sub(1);
-                let c_next = (c + 1).min(col_count - 1);
-                let c_prev = c.saturating_sub(1);
+                for i in 1..polyline.len() as u32 {
+                    out.line_indices.push(base + i - 1);
+                    out.line_indices.push(base + i);
+                }
+            }
+        }
+    }
 
-                let p_u0 = structured.positions()[r_prev][c];
-                let p_u1 = structured.positions()[r_next][c];
-                let p_v0 = structured.positions()[r][c_prev];
-                let p_v1 = structured.positions()[r][c_next];
+    let polygon: PolygonMesh = meshed.to_polygon();
+    let positions = polygon.positions();
+    let normals = polygon.normals();
+    // `(position, normal)` rather than position alone: two triangles meeting at
+    // a hard edge share a point and must not share a vertex, or the edge is lit
+    // as though it were round.
+    let mut seen: HashMap<(usize, usize), u32> = HashMap::new();
 
-                let du = [p_u1.x - p_u0.x, p_u1.y - p_u0.y, p_u1.z - p_u0.z];
-                let dv = [p_v1.x - p_v0.x, p_v1.y - p_v0.y, p_v1.z - p_v0.z];
-
-                let nx = (du[1] * dv[2] - du[2] * dv[1]) as f32;
-                let ny = (du[2] * dv[0] - du[0] * dv[2]) as f32;
-                let nz = (du[0] * dv[1] - du[1] * dv[0]) as f32;
-                let len = (nx * nx + ny * ny + nz * nz).sqrt();
-                if len.is_normal() && len > 1e-6 {
-                    [nx / len, ny / len, nz / len]
+    for poly in polygon.faces().face_iter() {
+        // Fan from the first corner. The triangulation emits triangles, so this
+        // is a guard against a quad rather than a path anything takes today.
+        for k in 1..poly.len().saturating_sub(1) {
+            let corners = [poly[0], poly[k], poly[k + 1]];
+            let Some(points) = corners
+                .iter()
+                .map(|c| positions.get(c.pos).copied())
+                .collect::<Option<Vec<_>>>()
+            else {
+                continue;
+            };
+            let geometric = {
+                let (a, b, c) = (points[0], points[1], points[2]);
+                let n = (b - a).cross(c - a);
+                let len = n.magnitude();
+                if len > f64::EPSILON {
+                    n / len
                 } else {
-                    [0.0, 0.0, 1.0]
+                    Vector3::unit_z()
                 }
             };
-            out_mesh.normals.push(norm);
+
+            let mut tri = [0u32; 3];
+            for (i, slot) in tri.iter_mut().enumerate() {
+                let corner = corners[i];
+                let p = points[i];
+                // A normal is taken from the surface only if it is one. The
+                // triangulation reports `NaN` where a surface degenerates —
+                // twelve of them on a cylinder's cap — and a `NaN` normal is
+                // not a lighting artefact: it is a vertex that compares
+                // unequal to itself, which is how the conformance suite's
+                // determinism check found this.
+                let usable = corner.nor.filter(|n| {
+                    normals.get(*n).is_some_and(|v| {
+                        v.x.is_finite()
+                            && v.y.is_finite()
+                            && v.z.is_finite()
+                            && v.magnitude2() > f64::EPSILON
+                    })
+                });
+                *slot = match usable {
+                    Some(n) => *seen.entry((corner.pos, n)).or_insert_with(|| {
+                        let idx = out.positions.len() as u32;
+                        out.positions.push([p.x as f32, p.y as f32, p.z as f32]);
+                        let nor = normals[n].normalize();
+                        out.normals.push([nor.x as f32, nor.y as f32, nor.z as f32]);
+                        idx
+                    }),
+                    // No usable normal on the corner: the triangle's own plane
+                    // is the only answer there is, and it cannot be shared with
+                    // a neighbour, so it is pushed rather than looked up.
+                    None => {
+                        let idx = out.positions.len() as u32;
+                        out.positions.push([p.x as f32, p.y as f32, p.z as f32]);
+                        out.normals.push([
+                            geometric.x as f32,
+                            geometric.y as f32,
+                            geometric.z as f32,
+                        ]);
+                        idx
+                    }
+                };
+            }
+            out.indices.extend_from_slice(&tri);
+            out.face_of_triangle.push(face_idx);
         }
     }
 
-    for r in 0..row_count - 1 {
-        for c in 0..col_count - 1 {
-            let i0 = (r * col_count + c) as u32;
-            let i1 = (r * col_count + c + 1) as u32;
-            let i2 = ((r + 1) * col_count + c + 1) as u32;
-            let i3 = ((r + 1) * col_count + c) as u32;
-
-            // First triangle
-            out_mesh.indices.push(i0);
-            out_mesh.indices.push(i1);
-            out_mesh.indices.push(i2);
-            out_mesh.face_of_triangle.push(face_idx);
-
-            // Second triangle
-            out_mesh.indices.push(i0);
-            out_mesh.indices.push(i2);
-            out_mesh.indices.push(i3);
-            out_mesh.face_of_triangle.push(face_idx);
-        }
-    }
-    out_mesh
-}
-
-/// Meshes one surface at `sag`, tagging every triangle with `face_idx`.
-///
-/// Takes the surface rather than the face because the surface is all that is
-/// read, and a free function over a concrete type is what both the sequential
-/// and the parallel path can call.
-fn mesh_surface(surface: &Surface, sag: f64, face_idx: u32) -> Mesh {
-    let range_u = get_range(surface.parameter_range().0);
-    let range_v = get_range(surface.parameter_range().1);
-    let structured = StructuredMesh::from_surface(surface, (range_u, range_v), sag);
-    face_mesh(&structured, face_idx)
+    out
 }
 
 /// Merges a face's mesh into `out`, shifting its indices past what is there.
@@ -186,6 +285,13 @@ impl GeometryKernel for TruckKernel {
         "truck-0.6.0"
     }
 
+    /// Real surfaces, and — since the boolean stopped being a bounding box — a
+    /// real difference. What it cannot do it declines; see
+    /// [`TruckKernel::singular`] and the register.
+    fn does_geometry(&self) -> bool {
+        true
+    }
+
     fn create_box(&mut self, size: Vec3) -> Result<Body> {
         if size.x <= 0.0 || size.y <= 0.0 || size.z <= 0.0 {
             return Err(KernelError::Degenerate("non-positive extent"));
@@ -208,19 +314,26 @@ impl GeometryKernel for TruckKernel {
             Vector3::unit_y(),
             Rad(std::f64::consts::PI),
         );
-        let (_, v_end) = wire.back().unwrap().ends();
-        let line = builder::line(v_end, &v0);
-        wire.push_back(line);
+        let v_end = wire.back().expect("half-circle has an edge").back().clone();
+        wire.push_back(builder::line(&v_end, &v0));
 
         let face = builder::try_attach_plane(&[wire])
             .map_err(|e| KernelError::Failed(format!("{e:?}")))?;
-        let solid = builder::rsweep(
+        let mut solid = builder::rsweep(
             &face,
             Point3::origin(),
             Vector3::unit_z(),
             Rad(2.0 * std::f64::consts::PI),
         );
-        Ok(self.alloc(solid))
+        // Revolving the half-disc leaves the boundary facing inwards: the mesh
+        // enclosed a *negative* volume and every normal pointed at the centre,
+        // so a sphere has been lit from the inside in this backend since it
+        // existed. `not` flips every face, which is the whole of the fix.
+        solid.not();
+
+        let body = self.alloc(solid);
+        self.singular.insert(body);
+        Ok(body)
     }
 
     fn create_cylinder(&mut self, radius: f64, height: f64) -> Result<Body> {
@@ -230,73 +343,98 @@ impl GeometryKernel for TruckKernel {
             ));
         }
         let h2 = height / 2.0;
-        let v0 = builder::vertex(Point3::new(0.0, 0.0, -h2));
-        let v1 = builder::vertex(Point3::new(radius, 0.0, -h2));
-        let v2 = builder::vertex(Point3::new(radius, 0.0, h2));
-        let v3 = builder::vertex(Point3::new(0.0, 0.0, h2));
-
-        let e0 = builder::line(&v0, &v1);
-        let e1 = builder::line(&v1, &v2);
-        let e2 = builder::line(&v2, &v3);
-        let e3 = builder::line(&v3, &v0);
-
-        let wire = Wire::from(vec![e0, e1, e2, e3]);
-        let face = builder::try_attach_plane(&[wire])
-            .map_err(|e| KernelError::Failed(format!("{e:?}")))?;
-        let solid = builder::rsweep(
-            &face,
-            Point3::origin(),
+        // A disc swept along the axis, rather than a rectangle revolved about
+        // it. The two make the same shape and are not the same solid: revolving
+        // a face by a full turn leaves a seam — one closed edge that begins and
+        // ends at the same vertex — and `truck-shapeops` cannot split one. The
+        // measured difference is not subtle. Subtracting a revolved cylinder
+        // from a plate took 25 seconds and returned the *plug* rather than the
+        // plate; subtracting this one takes 4 and returns the plate with a hole
+        // in it, of the right volume. It also comes out oriented outwards,
+        // which the revolved one did not — see the record.
+        let rim = builder::vertex(Point3::new(radius, 0.0, -h2));
+        let circle = builder::rsweep(
+            &rim,
+            Point3::new(0.0, 0.0, -h2),
             Vector3::unit_z(),
-            Rad(2.0 * std::f64::consts::PI),
+            FULL_TURN,
         );
+        let disc = builder::try_attach_plane(&[circle])
+            .map_err(|e| KernelError::Failed(format!("{e:?}")))?;
+        let solid = builder::tsweep(&disc, Vector3::unit_z() * height);
         Ok(self.alloc(solid))
     }
 
-    fn boolean(&mut self, op: BooleanOp, a: Body, b: Body, _tol: Tolerance) -> Result<Body> {
-        let _solid_a = self.get(a)?;
-        let _solid_b = self.get(b)?;
-        let bounds_a = self.bounds(a)?;
-        let bounds_b = self.bounds(b)?;
-
-        match op {
-            BooleanOp::Union => {
-                let union_bounds = bounds_a.union(&bounds_b);
-                let size = union_bounds.size();
-                let center = union_bounds.center();
-                let bbox =
-                    self.create_box(Vec3::new(size.x.max(0.1), size.y.max(0.1), size.z.max(0.1)))?;
-                let m = Mat4::from_translation(center);
-                self.transform(bbox, &m)
-            }
-            BooleanOp::Difference => self.copy(a),
-            BooleanOp::Intersection => {
-                let inter_bounds = bounds_a.intersection(&bounds_b);
-                let size = inter_bounds.size();
-                let center = inter_bounds.center();
-                let bbox =
-                    self.create_box(Vec3::new(size.x.max(0.1), size.y.max(0.1), size.z.max(0.1)))?;
-                let m = Mat4::from_translation(center);
-                self.transform(bbox, &m)
-            }
+    fn boolean(&mut self, op: BooleanOp, a: Body, b: Body, tol: Tolerance) -> Result<Body> {
+        if self.singular.contains(&a) || self.singular.contains(&b) {
+            // Declined rather than attempted. See `TruckKernel::singular`: the
+            // attempt is not a failure, it is an abort, and there is no result
+            // to report from the far side of one.
+            return Err(KernelError::Unsupported(
+                "truck cannot run a boolean on a body with a pole, such as a sphere",
+            ));
         }
+        let solid_a = self.get(a)?.clone();
+        let mut solid_b = self.get(b)?.clone();
+        let t = self.boolean_tolerance(a, b, tol)?;
+
+        // `Difference` is `and` against an inverted second operand, which is
+        // what `not` does: it flips the orientation of every face, so the
+        // solid's inside becomes everything outside it. There is no third
+        // operation in `truck-shapeops`, and there does not need to be.
+        let built = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || match op {
+            BooleanOp::Union => truck_shapeops::or(&solid_a, &solid_b, t),
+            BooleanOp::Intersection => truck_shapeops::and(&solid_a, &solid_b, t),
+            BooleanOp::Difference => {
+                solid_b.not();
+                truck_shapeops::and(&solid_a, &solid_b, t)
+            }
+        }))
+        // `truck-shapeops` panics on geometry it cannot handle rather than
+        // returning `None`, and a panic that escapes a kernel call takes the
+        // document with it. Where unwinding exists this turns one into an
+        // error; on `wasm32-unknown-unknown`, which aborts, it does not, and
+        // the `singular` set above is what keeps the known case away from here.
+        .unwrap_or(None);
+
+        // `None` is how `truck-shapeops` reports that it could not build the
+        // result, and it is returned as a failure rather than as anything a
+        // caller could mistake for geometry. The stub this replaced answered
+        // every call, which is why the conformance suite passed it.
+        built
+            .map(|solid| self.alloc(solid))
+            .ok_or_else(|| KernelError::Failed(format!("{op:?} failed at a tolerance of {t}")))
     }
 
     fn transform(&mut self, body: Body, m: &Mat4) -> Result<Body> {
         let solid = self.get(body)?.clone();
+        let singular = self.singular.contains(&body);
         let mat = Matrix4::new(
             m.0[0][0], m.0[1][0], m.0[2][0], m.0[3][0], m.0[0][1], m.0[1][1], m.0[2][1], m.0[3][1],
             m.0[0][2], m.0[1][2], m.0[2][2], m.0[3][2], m.0[0][3], m.0[1][3], m.0[2][3], m.0[3][3],
         );
         let transformed = builder::transformed(&solid, mat);
-        Ok(self.alloc(transformed))
+        let moved = self.alloc(transformed);
+        // A pole survives being moved, and a body that forgot it had one is a
+        // body that panics the next time somebody cuts with it.
+        if singular {
+            self.singular.insert(moved);
+        }
+        Ok(moved)
     }
 
     fn copy(&mut self, body: Body) -> Result<Body> {
         let solid = self.get(body)?.clone();
-        Ok(self.alloc(solid))
+        let singular = self.singular.contains(&body);
+        let copied = self.alloc(solid);
+        if singular {
+            self.singular.insert(copied);
+        }
+        Ok(copied)
     }
 
     fn delete(&mut self, body: Body) -> Result<()> {
+        self.singular.remove(&body);
         if self.solids.remove(&body).is_some() {
             Ok(())
         } else {
@@ -429,20 +567,16 @@ impl GeometryKernel for TruckKernel {
 
     fn bounds(&self, body: Body) -> Result<Aabb> {
         let solid = self.get(body)?;
-        let compressed = solid.compress();
+        // Over the triangulation rather than over a grid on each surface. A
+        // grid ignores the loops that trim the face, so it reported points the
+        // solid does not contain — on a disc, the corners of the square the
+        // circle is inscribed in. The price is that these bounds are the
+        // *mesh's*, so a curved face can bulge past them by up to `BOUNDS_SAG`;
+        // that is a bound this backend can honour, where the other was simply
+        // wrong.
         let mut aabb = Aabb::EMPTY;
-        for shell in &compressed.boundaries {
-            for face in &shell.faces {
-                let range_u = get_range(face.surface.parameter_range().0);
-                let range_v = get_range(face.surface.parameter_range().1);
-                let structured =
-                    StructuredMesh::from_surface(&face.surface, (range_u, range_v), 0.01);
-                for row in structured.positions() {
-                    for p in row {
-                        aabb.expand(Vec3::new(p.x, p.y, p.z));
-                    }
-                }
-            }
+        for point in solid.triangulation(BOUNDS_SAG).to_polygon().positions() {
+            aabb.expand(Vec3::new(point.x, point.y, point.z));
         }
         if aabb.is_empty() {
             return Err(KernelError::Failed("empty bounds".into()));
@@ -464,77 +598,33 @@ impl GeometryKernel for TruckKernel {
     /// reason: a result a machine is allowed to disagree about is not a result.
     fn tessellate(&self, body: Body, quality: Quality) -> Result<Mesh> {
         let solid = self.get(body)?;
-        let compressed = solid.compress();
-        // Only the surface is read from here on, and a `Vec<&Surface>` is what
-        // both paths can iterate over without naming a compressed-face type.
-        let mut faces: Vec<&Surface> = Vec::new();
-        for shell in &compressed.boundaries {
-            for face in &shell.faces {
-                faces.push(&face.surface);
-            }
-        }
-        faces.sort_by(|a, b| {
-            let (u_a, v_a) = (
-                get_range(a.parameter_range().0),
-                get_range(a.parameter_range().1),
-            );
-            let (u_b, v_b) = (
-                get_range(b.parameter_range().0),
-                get_range(b.parameter_range().1),
-            );
-            let p_a = a.subs((u_a.0 + u_a.1) * 0.5, (v_a.0 + v_a.1) * 0.5);
-            let p_b = b.subs((u_b.0 + u_b.1) * 0.5, (v_b.0 + v_b.1) * 0.5);
+        let mut faces: Vec<([f64; 7], &Face)> = solid
+            .boundaries()
+            .iter()
+            .flat_map(|shell| shell.face_iter())
+            .map(|face| (face_key(face), face))
+            .collect();
+        faces.sort_by(|a, b| key_order(&a.0, &b.0));
 
-            u_a.0
-                .partial_cmp(&u_b.0)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| {
-                    u_a.1
-                        .partial_cmp(&u_b.1)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                })
-                .then_with(|| {
-                    v_a.0
-                        .partial_cmp(&v_b.0)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                })
-                .then_with(|| {
-                    v_a.1
-                        .partial_cmp(&v_b.1)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                })
-                .then_with(|| {
-                    p_a.x
-                        .partial_cmp(&p_b.x)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                })
-                .then_with(|| {
-                    p_a.y
-                        .partial_cmp(&p_b.y)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                })
-                .then_with(|| {
-                    p_a.z
-                        .partial_cmp(&p_b.z)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                })
-        });
+        // `truck-meshalgo` panics on a tolerance at or below its own, and the
+        // sag comes from a `Quality` a caller chose, so it is clamped here
+        // rather than trusted.
+        let sag = quality.sag.max(1.0e-5);
 
-        let sag = quality.sag;
         // `collect` on an indexed parallel iterator yields the sorted order,
         // whatever order the work finished in. The two arms differ in where
-        // the surface evaluation runs and in nothing else.
+        // the face is meshed and in nothing else.
         #[cfg(feature = "parallel")]
         let meshed: Vec<Mesh> = faces
             .par_iter()
             .enumerate()
-            .map(|(i, surface)| mesh_surface(surface, sag, i as u32))
+            .map(|(i, (_, face))| mesh_face(face, sag, i as u32))
             .collect();
         #[cfg(not(feature = "parallel"))]
         let meshed: Vec<Mesh> = faces
             .iter()
             .enumerate()
-            .map(|(i, surface)| mesh_surface(surface, sag, i as u32))
+            .map(|(i, (_, face))| mesh_face(face, sag, i as u32))
             .collect();
 
         let mut out_mesh = Mesh::default();

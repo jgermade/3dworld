@@ -143,6 +143,14 @@ pub struct Topology {
 /// possible at all, so it is part of the contract rather than an extra: a
 /// backend that cannot say which face a triangle came from cannot drive the
 /// modeller.
+///
+/// **Triangles wind counter-clockwise seen from outside the body, and normals
+/// point out of it.** That was the renderer's assumption from the first frame
+/// and nothing said it, so a backend could satisfy every other line of this
+/// contract while handing back a solid turned inside out — which one did, for
+/// a fortnight, on every sphere and every cylinder it made. The conformance
+/// suite's geometry half now asks the question the convention implies: the
+/// volume these triangles enclose is positive.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Mesh {
     pub positions: Vec<[f32; 3]>,
@@ -317,6 +325,23 @@ pub type Result<T> = core::result::Result<T, KernelError>;
 pub trait GeometryKernel {
     /// For logs and for the conformance report. Not for branching on.
     fn name(&self) -> &'static str;
+
+    /// Whether this backend's answers are geometry, or bookkeeping in the
+    /// shape of geometry.
+    ///
+    /// `FakeKernel` answers every method in this contract without doing any
+    /// geometry at all — a bounding box for a bounds, a box's mesh for a
+    /// tessellation, a retained tree for a boolean — and that is what makes
+    /// `core/`, `format/` and `app/` testable with no kernel installed. It is
+    /// not a defect and it must not be made one.
+    ///
+    /// The conformance suite is in two halves because of it. The contract half
+    /// runs against every backend; the geometry half — a difference removes
+    /// material, a mesh encloses the volume its body has — runs only where
+    /// this says `true`. Without the split, the suite either lets a bounding
+    /// box pass as a boolean or fails the one backend that never claimed
+    /// otherwise. There is no default: a backend says which it is.
+    fn does_geometry(&self) -> bool;
 
     /// Origin-centred, `size` across.
     fn create_box(&mut self, size: Vec3) -> Result<Body>;
