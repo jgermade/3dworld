@@ -409,6 +409,42 @@ pub fn run<K: GeometryKernel>(k: &mut K, tol: Tolerance, quality: Quality) -> Re
         Ok(())
     });
 
+    check!(
+        checks,
+        "a face id names one connected region of the surface",
+        {
+            // Contract, not geometry: `face_of_triangle` is what a selection, an
+            // ID-buffer pick and a per-face fillet are all stored against, so an id
+            // that spans two separate patches means a click on one of them lands on
+            // both. True of any backend that answers the question at all, including
+            // one whose faces are the sides of a bounding box.
+            for (what, body) in [
+                ("box", k.create_box(Vec3::new(2.0, 3.0, 4.0))),
+                ("cylinder", k.create_cylinder(1.0, 3.0)),
+            ] {
+                let body = body.map_err(|e| e.to_string())?;
+                let mesh = k.tessellate(body, quality).map_err(|e| e.to_string())?;
+                let bounds = k.bounds(body).map_err(|e| e.to_string())?;
+                let extent = bounds
+                    .size()
+                    .axis(0)
+                    .max(bounds.size().axis(1))
+                    .max(bounds.size().axis(2));
+                for f in census(&mesh, extent * 1.0e-5) {
+                    require(
+                        f.regions == 1,
+                        format!(
+                            "on the {what}, face {} covers {} disconnected regions \
+                         of the surface",
+                            f.id, f.regions
+                        ),
+                    )?;
+                }
+            }
+            Ok(())
+        }
+    );
+
     check!(checks, "tessellation is deterministic", {
         // Not a nicety: it is what makes a fixture suite mean anything, and it
         // is the property relaxed SIMD below the seam would quietly destroy.
@@ -997,6 +1033,213 @@ fn geometry_checks<K: GeometryKernel>(
 
     check!(
         checks,
+        "a box's boundary is six planes, each holding its own area at its own centre",
+        {
+            // The fixture a census can be read on. A box has no curved surface
+            // at all, so `curved` is 0 and asserted rather than skipped: a
+            // backend whose face ids do not partition the boundary leaves area
+            // over here, and there is nowhere for it to go.
+            let b = k
+                .create_box(Vec3::new(2.0, 4.0, 6.0))
+                .map_err(|e| e.to_string())?;
+            let mesh = k
+                .tessellate(b, quality)
+                .map_err(|e| format!("tessellate: {e}"))?;
+            let planes = [
+                (Vec3::X, 1.0, 24.0),
+                (Vec3::new(-1.0, 0.0, 0.0), 1.0, 24.0),
+                (Vec3::Y, 2.0, 12.0),
+                (Vec3::new(0.0, -1.0, 0.0), 2.0, 12.0),
+                (Vec3::Z, 3.0, 8.0),
+                (Vec3::new(0.0, 0.0, -1.0), 3.0, 8.0),
+            ]
+            .map(|(normal, offset, area)| GoldenPlane {
+                normal,
+                offset,
+                area,
+                // A box's face is centred on its own plane, so the centroid is
+                // the normal scaled out to the plane.
+                centroid: normal * offset,
+            });
+            check_census(&mesh, &planes, 0.0, &slack_for(6.0))
+        }
+    );
+
+    check!(
+        checks,
+        "a drilled plate has the hole where it was asked for",
+        {
+            let Some(mesh) = drilled_plate(k, tol, quality, &Mat4::IDENTITY)? else {
+                return Ok(());
+            };
+            let (planes, wall) = drilled_plate_golden(&Mat4::IDENTITY);
+            check_census(&mesh, &planes, wall, &slack_for(2.0 * PLATE_HALF))
+        }
+    );
+
+    check!(
+        checks,
+        "the same plate, off every axis, is still the same plate",
+        {
+            // The same fixture rotated 30 degrees about Z and 20 about X, so
+            // that not one face of it is axis-aligned and not one coordinate
+            // is a round number.
+            //
+            // Two different things are being asked. The first is about the
+            // *census*: every number it computes — an area, a centre of area,
+            // a distance from a plane — is supposed to be independent of the
+            // frame it is measured in, and a check that only ever sees
+            // axis-aligned fixtures cannot tell that from an implementation
+            // that quietly assumes one. The second is about the *kernel*: a
+            // rotation is exact on paper and is a matrix multiplication in
+            // `f32` by the time it reaches the mesh, so this is where a
+            // transform that is subtly not rigid shows up as a face that has
+            // changed size.
+            let m = Mat4::from_axis_angle(Vec3::Z, 0.5235987755982988, 1.0e-12)
+                .mul(&Mat4::from_axis_angle(Vec3::X, 0.3490658503988659, 1.0e-12));
+            let Some(mesh) = drilled_plate(k, tol, quality, &m)? else {
+                return Ok(());
+            };
+            let (planes, wall) = drilled_plate_golden(&m);
+            check_census(&mesh, &planes, wall, &slack_for(2.0 * PLATE_HALF))
+        }
+    );
+
+    // -- Degenerate operands ------------------------------------------------
+    //
+    // Where B-rep kernels actually fail, and where until now this repository
+    // tested only OpenCASCADE — `kernel-occt/tests/degenerate.rs` runs under
+    // `make test-occt` and nowhere else, so the backend the browser actually
+    // runs on had no degenerate coverage at all.
+    //
+    // Every one of these is declinable. What none of them may do is answer.
+
+    check!(
+        checks,
+        "a difference by a tool that misses leaves the minuend whole",
+        {
+            // The case a user meets by dragging a drill off the edge of the
+            // part. `TruckKernel` answered it with an empty body — `Ok`, no
+            // faces, no bounds, no mesh — until 2026-09-05, because a
+            // difference is an intersection against an inverted operand and
+            // the library it delegates to answers "empty" whenever the two
+            // boundaries never meet. That is right for an intersection and
+            // exactly wrong here.
+            //
+            // Three separations, because they fail differently: wholly apart,
+            // touching on a face, and touching at a single corner. The last
+            // two are the ones a bounding-box test alone would call an overlap.
+            for (what, offset) in [
+                ("50 mm away", Vec3::new(50.0, 0.0, 0.0)),
+                ("touching on a face", Vec3::new(2.0, 0.0, 0.0)),
+                ("touching at a corner", Vec3::splat(2.0)),
+            ] {
+                let a = k.create_box(Vec3::splat(2.0)).map_err(|e| e.to_string())?;
+                let b = k.create_box(Vec3::splat(2.0)).map_err(|e| e.to_string())?;
+                let b = k
+                    .transform(b, &Mat4::from_translation(offset))
+                    .map_err(|e| e.to_string())?;
+                let Ok(d) = k.boolean(BooleanOp::Difference, a, b, tol) else {
+                    continue;
+                };
+                // Deliberately not tolerant of a tessellation failure. Where
+                // the result is *meant* to be empty this suite accepts one;
+                // here the result is the whole minuend, so a body that will
+                // not mesh is the defect rather than an excuse for it.
+                let got = volume_of(k, d, quality).map_err(|e| {
+                    format!(
+                        "a 2-cube minus an identical cube {what} gave a body \
+                         that will not mesh ({e}). The tool removes nothing, \
+                         so the answer is the cube — a result with no geometry \
+                         in it is the part disappearing"
+                    )
+                })?;
+                require(
+                    within(got, 8.0, 1.0e-3),
+                    format!(
+                        "a 2-cube minus an identical cube {what} encloses \
+                         {got}, not 8. The two share no volume, so nothing is \
+                         removed"
+                    ),
+                )?;
+            }
+            Ok(())
+        }
+    );
+
+    check!(
+        checks,
+        "an intersection of bodies that share no volume is empty or refused",
+        {
+            // The mirror of the check above, and the reason it is worth having
+            // both: the same delegation that made the difference wrong makes
+            // this one right, so a backend can pass this and fail that.
+            for offset in [Vec3::new(50.0, 0.0, 0.0), Vec3::new(2.0, 0.0, 0.0)] {
+                let a = k.create_box(Vec3::splat(2.0)).map_err(|e| e.to_string())?;
+                let b = k.create_box(Vec3::splat(2.0)).map_err(|e| e.to_string())?;
+                let b = k
+                    .transform(b, &Mat4::from_translation(offset))
+                    .map_err(|e| e.to_string())?;
+                let Ok(i) = k.boolean(BooleanOp::Intersection, a, b, tol) else {
+                    continue;
+                };
+                // As with the self-difference check: a result that is meant to
+                // be nothing is allowed not to mesh.
+                if let Ok(got) = volume_of(k, i, quality) {
+                    require(
+                        got.abs() <= 8.0 * 1.0e-3,
+                        format!(
+                            "two 2-cubes that share no volume intersected to \
+                             {got} of material"
+                        ),
+                    )?;
+                }
+            }
+            Ok(())
+        }
+    );
+
+    check!(checks, "a union of two separate bodies is both of them", {
+        let a = k.create_box(Vec3::splat(2.0)).map_err(|e| e.to_string())?;
+        let b = k.create_box(Vec3::splat(2.0)).map_err(|e| e.to_string())?;
+        let b = k
+            .transform(b, &Mat4::from_translation(Vec3::new(50.0, 0.0, 0.0)))
+            .map_err(|e| e.to_string())?;
+        let Ok(u) = k.boolean(BooleanOp::Union, a, b, tol) else {
+            return Ok(());
+        };
+        let got = volume_of(k, u, quality)?;
+        require(
+            within(got, 16.0, 1.0e-3),
+            format!(
+                "the union of two separate 2-cubes encloses {got}, not 16. A \
+                 result of 8 is one of them thrown away; the bounding box of \
+                 the pair would be far larger than either"
+            ),
+        )
+    });
+
+    check!(
+        checks,
+        "a wall thin enough to be a sheet is still a solid",
+        {
+            // Ten thousand to one. A thickness this far below the other two
+            // extents is where a tessellator that works in absolute units rather
+            // than relative ones collapses the solid, and where a boolean's
+            // tolerance can exceed the feature it is meant to resolve.
+            let plate = k
+                .create_box(Vec3::new(100.0, 100.0, 0.01))
+                .map_err(|e| e.to_string())?;
+            let got = volume_of(k, plate, quality)?;
+            require(
+                within(got, 100.0, 1.0e-3),
+                format!("a 100 x 100 x 0.01 plate encloses {got}, not 100"),
+            )
+        }
+    );
+
+    check!(
+        checks,
         "a difference of a body with a copy of itself is empty or refused",
         {
             // There is no empty `Body` in this contract, so a kernel is
@@ -1027,3 +1270,742 @@ fn geometry_checks<K: GeometryKernel>(
 /// STEP checks so that "not supported" and "not a STEP file" can be told
 /// apart.
 const NOT_STEP: &[u8] = b"this is not a STEP file, and never was one";
+
+// ---------------------------------------------------------------------------
+// The golden census: comparing a result face by face, not weighing it
+// ---------------------------------------------------------------------------
+//
+// The geometry half above weighs a body: it asks how much material a mesh
+// encloses. That catches a bounding box pretending to be a boolean, which is
+// what it was written for, and it is blind to everything that does not change
+// a volume. A hole drilled 8 mm from where it was asked for encloses exactly
+// the volume of a hole drilled in the right place.
+//
+// What follows compares the boundary instead. Three things are asserted about
+// it, and each is chosen because it is true of *any* correct kernel:
+//
+//   - **Every face id names one connected region of the surface.** A face is
+//     one region. An id spanning two means two faces share it, and since
+//     `face_of_triangle` is what a selection and a per-face fillet are stored
+//     against, a click on one of them lands on the other.
+//   - **The material in each plane of the boundary, and where its centre of
+//     area is.** Not per face: which planar faces a kernel splits a coplanar
+//     region into is its own business — a union may leave an L-shaped side as
+//     one face or as two, and both are correct — so faces are summed into the
+//     plane they lie in first. The area and the area-weighted centroid of a
+//     plane's material are then arithmetic, and no partition changes them.
+//   - **The total area that is not planar.** A cylindrical wall may be one
+//     face or four; its area is 2*pi*r*h either way.
+//
+// The centroid is the half that volume cannot reach, and it is why this is
+// worth its length: it is what says the hole is *where it was asked for*.
+
+/// Union-find over triangle indices, for counting a face's connected regions.
+struct Dsu(Vec<usize>);
+
+impl Dsu {
+    fn new(n: usize) -> Self {
+        Self((0..n).collect())
+    }
+
+    fn find(&mut self, mut x: usize) -> usize {
+        while self.0[x] != x {
+            self.0[x] = self.0[self.0[x]];
+            x = self.0[x];
+        }
+        x
+    }
+
+    fn union(&mut self, a: usize, b: usize) {
+        let (a, b) = (self.find(a), self.find(b));
+        if a != b {
+            self.0[a] = b;
+        }
+    }
+}
+
+/// Coincident vertices, as clusters of position indices.
+///
+/// A tessellator is free to emit a shared corner once or once per face, so
+/// "these two triangles touch" cannot be read off the index buffer. Positions
+/// decide it instead.
+///
+/// The method is a sort and a split on gaps, once per axis: everything starts
+/// in one bucket, and a bucket is cut wherever consecutive coordinates differ
+/// by more than `tol`. That chains — three points at 0, `tol` and `2*tol` come
+/// out as one cluster — so it can **over**-merge, and cannot under-merge: two
+/// points within `tol` of each other are always in the same cluster.
+///
+/// Over-merging is the safe direction and is why it is worth having a method
+/// with a known bias rather than an exact one. Merging too much can make a
+/// face that really is in two pieces look connected — a missed defect. Merging
+/// too little would make a connected face look broken, which is a conformance
+/// suite failing a correct kernel, and the more expensive mistake by far.
+fn weld_clusters(positions: &[[f32; 3]], tol: f64) -> Vec<usize> {
+    let n = positions.len();
+    let coord = |i: usize, ax: usize| f64::from(positions[i][ax]);
+
+    let mut buckets: Vec<Vec<usize>> = vec![(0..n).collect()];
+    for ax in 0..3 {
+        let mut next: Vec<Vec<usize>> = Vec::new();
+        for mut bucket in buckets {
+            bucket.sort_unstable_by(|&i, &j| {
+                coord(i, ax)
+                    .partial_cmp(&coord(j, ax))
+                    .unwrap_or(core::cmp::Ordering::Equal)
+            });
+            let mut run: Vec<usize> = Vec::new();
+            for i in bucket {
+                if let Some(&last) = run.last()
+                    && coord(i, ax) - coord(last, ax) > tol
+                {
+                    next.push(core::mem::take(&mut run));
+                }
+                run.push(i);
+            }
+            if !run.is_empty() {
+                next.push(run);
+            }
+        }
+        buckets = next;
+    }
+
+    let mut cluster = vec![0usize; n];
+    for (c, bucket) in buckets.iter().enumerate() {
+        for &i in bucket {
+            cluster[i] = c;
+        }
+    }
+    cluster
+}
+
+/// One face id's worth of a tessellation, reduced to what is true of the
+/// *face* rather than of the mesh that happens to represent it.
+struct Face {
+    id: u32,
+    area: f64,
+    /// Area-weighted mean of the triangle normals, normalised. `None` when the
+    /// face curves far enough that they cancel — a whole cylinder in one face
+    /// — which is a face no plane describes, and is treated as one.
+    normal: Option<Vec3>,
+    /// Centre of area.
+    centroid: Vec3,
+    /// How far the furthest of the face's vertices lies from the plane through
+    /// `centroid` with normal `normal`.
+    ///
+    /// A distance, deliberately, and not an angle between normals: a
+    /// constrained triangulation leaves slivers along a trimming curve, a
+    /// sliver's normal is numerical noise, and its distance from the plane is
+    /// not. Planarity tested by normals fails on the one fixture that matters
+    /// here — the face with a hole in it.
+    flatness: f64,
+    /// How many connected regions of surface carry this id. One, in a correct
+    /// kernel.
+    regions: usize,
+}
+
+/// Every face of a mesh, by [`Mesh::face_of_triangle`].
+fn census(mesh: &Mesh, weld: f64) -> Vec<Face> {
+    let cluster = weld_clusters(&mesh.positions, weld);
+    let point = |i: u32| {
+        let p = mesh.positions[i as usize];
+        Vec3::new(f64::from(p[0]), f64::from(p[1]), f64::from(p[2]))
+    };
+
+    let mut ids: Vec<u32> = mesh.face_of_triangle.clone();
+    ids.sort_unstable();
+    ids.dedup();
+
+    let mut faces = Vec::with_capacity(ids.len());
+    for id in ids {
+        let tris: Vec<usize> = (0..mesh.triangle_count())
+            .filter(|&t| mesh.face_of_triangle[t] == id)
+            .collect();
+
+        let mut area = 0.0;
+        let mut normal_sum = Vec3::ZERO;
+        let mut centroid_sum = Vec3::ZERO;
+        for &t in &tris {
+            let a = point(mesh.indices[3 * t]);
+            let b = point(mesh.indices[3 * t + 1]);
+            let c = point(mesh.indices[3 * t + 2]);
+            let cross = (b - a).cross(c - a);
+            let tri_area = 0.5 * cross.length();
+            area += tri_area;
+            normal_sum = normal_sum + cross * 0.5;
+            centroid_sum = centroid_sum + (a + b + c) * (tri_area / 3.0);
+        }
+        let centroid = if area > 0.0 {
+            centroid_sum * (1.0 / area)
+        } else {
+            Vec3::ZERO
+        };
+
+        // Relative to the face's own area, so a sliver cannot decide this.
+        let normal = normal_sum.normalize(area * 1.0e-6);
+        let flatness = match normal {
+            None => f64::INFINITY,
+            Some(n) => tris
+                .iter()
+                .flat_map(|&t| (0..3).map(move |k| point(mesh.indices[3 * t + k])))
+                .fold(0.0f64, |worst, v| worst.max((v - centroid).dot(n).abs())),
+        };
+
+        let mut dsu = Dsu::new(tris.len());
+        let mut seen: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
+        for (slot, &t) in tris.iter().enumerate() {
+            for k in 0..3 {
+                let c = cluster[mesh.indices[3 * t + k] as usize];
+                match seen.entry(c) {
+                    std::collections::hash_map::Entry::Occupied(e) => dsu.union(slot, *e.get()),
+                    std::collections::hash_map::Entry::Vacant(e) => {
+                        e.insert(slot);
+                    }
+                }
+            }
+        }
+        let mut roots: Vec<usize> = (0..tris.len()).map(|s| dsu.find(s)).collect();
+        roots.sort_unstable();
+        roots.dedup();
+
+        faces.push(Face {
+            id,
+            area,
+            normal,
+            centroid,
+            flatness,
+            regions: roots.len(),
+        });
+    }
+    faces
+}
+
+/// A plane of a body's boundary, and what a fixture asserts about it.
+///
+/// `offset` is the signed distance from the origin along `normal`, so a plane
+/// is named by where it is rather than by which face id happened to land on
+/// it — face ids are a backend's own numbering and this suite never compares
+/// them between kernels.
+struct GoldenPlane {
+    normal: Vec3,
+    offset: f64,
+    area: f64,
+    centroid: Vec3,
+}
+
+/// How much a golden fixture is willing to be wrong by, and about what.
+///
+/// Three numbers rather than one because they answer to three different
+/// things: `flat` to `f32` and to the sag a curved neighbour is allowed,
+/// `area` to a tessellation being inscribed, and `centroid` to a position,
+/// which is the number this whole census exists to assert and the one that has
+/// no reason to drift at all.
+struct Slack {
+    /// Coincident within this, for connectivity.
+    weld: f64,
+    /// A vertex this far off its face's own plane is still on it.
+    flat: f64,
+    /// Relative, on the area in one plane.
+    area: f64,
+    /// Relative, on the *total* curved area, and one-sided: a tessellation
+    /// whose vertices lie on the surface is inscribed, and a polygon inscribed
+    /// in a circle is shorter than the circle. So a curved area may fall short
+    /// by the sag and may not exceed by more than rounding, and this is the
+    /// looser of the two directions. It is looser than `area` for the same
+    /// reason: a wall's area is a perimeter times a height and loses the
+    /// polygon's whole shortfall, where a face with a hole in it loses only
+    /// the difference between two areas.
+    curved: f64,
+    /// Absolute, on a centre of area.
+    centroid: f64,
+}
+
+/// A body's boundary against a fixture that names every plane of it.
+///
+/// `curved` is the total area of everything not lying in one of `planes` —
+/// 2*pi*r*h for the wall of a hole, and zero for a body with no curved surface
+/// at all, which is asserted rather than skipped.
+fn check_census(
+    mesh: &Mesh,
+    planes: &[GoldenPlane],
+    curved: f64,
+    slack: &Slack,
+) -> core::result::Result<(), String> {
+    let faces = census(mesh, slack.weld);
+
+    for f in &faces {
+        require(
+            f.regions == 1,
+            format!(
+                "face {} covers {} disconnected regions of the surface. A face \
+                 is one region: two of them under one id means a click on \
+                 either selects both, and a fillet asked for one rounds the \
+                 other",
+                f.id, f.regions
+            ),
+        )?;
+    }
+
+    // A face lies in a golden plane when it is flat, points the same way, and
+    // sits at the same distance. All three, because two of them are satisfied
+    // by the face on the opposite side of a plate.
+    let mut claimed = vec![false; faces.len()];
+    for plane in planes {
+        let mut area = 0.0;
+        let mut centroid_sum = Vec3::ZERO;
+        for (i, f) in faces.iter().enumerate() {
+            let Some(n) = f.normal else { continue };
+            if f.flatness > slack.flat
+                || n.dot(plane.normal) < 1.0 - 1.0e-6
+                || (f.centroid.dot(plane.normal) - plane.offset).abs() > slack.flat
+            {
+                continue;
+            }
+            claimed[i] = true;
+            area += f.area;
+            centroid_sum = centroid_sum + f.centroid * f.area;
+        }
+
+        require(
+            area > 0.0,
+            format!(
+                "nothing in this body lies in the plane {:?} at {}, where the \
+                 fixture says {} of material is",
+                plane.normal, plane.offset, plane.area
+            ),
+        )?;
+        require(
+            within(area, plane.area, slack.area),
+            format!(
+                "the plane {:?} at {} holds {area} of material, not {}",
+                plane.normal, plane.offset, plane.area
+            ),
+        )?;
+
+        let centroid = centroid_sum * (1.0 / area);
+        let off = (centroid - plane.centroid).length();
+        require(
+            off <= slack.centroid,
+            format!(
+                "the material in the plane {:?} at {} has its centre of area \
+                 at {:?}, and the fixture puts it at {:?} — {off} away. The \
+                 area is right and the position is not, which is what a \
+                 feature in the wrong place looks like",
+                plane.normal, plane.offset, centroid, plane.centroid
+            ),
+        )?;
+    }
+
+    let unclaimed: f64 = faces
+        .iter()
+        .zip(&claimed)
+        .filter(|&(_, &c)| !c)
+        .map(|(f, _)| f.area)
+        .sum();
+    require(
+        unclaimed <= curved * (1.0 + 1.0e-3) && unclaimed >= curved * (1.0 - slack.curved),
+        format!(
+            "{unclaimed} of this body's boundary lies in no plane the fixture \
+             names, and it says there should be {curved}"
+        ),
+    )
+}
+
+/// The drilled-plate fixture: a 40x40x10 plate with a 6 mm drill through it at
+/// x = 8, placed by `m`.
+///
+/// The same plate and drill `make freecad-check` weighs against
+/// 16000 - pi*6^2*10 and that `w3d-kernel-truck`'s tessellation fingerprints
+/// are recorded on, so a disagreement here is a disagreement with three other
+/// checks at once.
+///
+/// **The hole is off-centre on purpose.** Centred, the plate's face has its
+/// centre of area at the origin whether the hole is there or not, and the
+/// assertion would be about nothing.
+///
+/// `Ok(None)` is a backend that declined the boolean, which it is entitled to
+/// do — everything here that is not one of the three mandatory box fixtures is
+/// declinable. It may not answer wrongly.
+const PLATE_HALF: f64 = 20.0;
+const PLATE_THICK: f64 = 10.0;
+const DRILL_R: f64 = 6.0;
+const DRILL_AT: f64 = 8.0;
+
+fn drilled_plate<K: GeometryKernel>(
+    k: &mut K,
+    tol: Tolerance,
+    quality: Quality,
+    m: &Mat4,
+) -> core::result::Result<Option<Mesh>, String> {
+    let plate = k
+        .create_box(Vec3::new(2.0 * PLATE_HALF, 2.0 * PLATE_HALF, PLATE_THICK))
+        .map_err(|e| e.to_string())?;
+    let drill = k
+        .create_cylinder(DRILL_R, 2.0 * PLATE_THICK)
+        .map_err(|e| e.to_string())?;
+    let drill = k
+        .transform(
+            drill,
+            &Mat4::from_translation(Vec3::new(DRILL_AT, 0.0, 0.0)),
+        )
+        .map_err(|e| e.to_string())?;
+    let Ok(drilled) = k.boolean(BooleanOp::Difference, plate, drill, tol) else {
+        return Ok(None);
+    };
+    // Placed *after* the boolean, so the rotated case exercises a transform of
+    // a boolean's result rather than a boolean of transformed operands. The
+    // second would be a different fixture and a weaker one: it would let a
+    // backend that only works on axis-aligned input pass by doing the cut in
+    // the frame it likes.
+    let placed = k.transform(drilled, m).map_err(|e| e.to_string())?;
+    let mesh = k
+        .tessellate(placed, quality)
+        .map_err(|e| format!("tessellate: {e}"))?;
+    Ok(Some(mesh))
+}
+
+/// The six planes of the drilled plate under `m`, and the area of the wall,
+/// which lies in none of them.
+///
+/// `m` must be rigid: areas are carried over unchanged, which is true of a
+/// rotation and a translation and of nothing else.
+fn drilled_plate_golden(m: &Mat4) -> ([GoldenPlane; 6], f64) {
+    let face = 4.0 * PLATE_HALF * PLATE_HALF;
+    let hole = core::f64::consts::PI * DRILL_R * DRILL_R;
+    // The centre of area of a square with a disc taken out of it: the square's
+    // first moment about the origin is zero, the disc's is its area times where
+    // it sits, and what is left is the difference over the difference.
+    let shift = -DRILL_AT * hole / (face - hole);
+    let side = 2.0 * PLATE_HALF * PLATE_THICK;
+    let z = PLATE_THICK / 2.0;
+
+    let planes = [
+        (Vec3::Z, z, face - hole, Vec3::new(shift, 0.0, z)),
+        (
+            Vec3::new(0.0, 0.0, -1.0),
+            z,
+            face - hole,
+            Vec3::new(shift, 0.0, -z),
+        ),
+        (Vec3::X, PLATE_HALF, side, Vec3::new(PLATE_HALF, 0.0, 0.0)),
+        (
+            Vec3::new(-1.0, 0.0, 0.0),
+            PLATE_HALF,
+            side,
+            Vec3::new(-PLATE_HALF, 0.0, 0.0),
+        ),
+        (Vec3::Y, PLATE_HALF, side, Vec3::new(0.0, PLATE_HALF, 0.0)),
+        (
+            Vec3::new(0.0, -1.0, 0.0),
+            PLATE_HALF,
+            side,
+            Vec3::new(0.0, -PLATE_HALF, 0.0),
+        ),
+    ]
+    .map(|(normal, _offset, area, centroid)| {
+        // A normal is a direction and a centroid is a point, so they are
+        // carried by the matrix differently — and the offset is recomputed from
+        // the placed pair rather than carried at all, because a translation
+        // changes a plane's distance from the origin while leaving its normal
+        // alone. Deriving it is also the only version that stays right if `m`
+        // ever gains a translation.
+        let normal = m.transform_vector(normal);
+        let centroid = m.transform_point(centroid);
+        GoldenPlane {
+            normal,
+            offset: centroid.dot(normal),
+            area,
+            centroid,
+        }
+    });
+    (planes, 2.0 * core::f64::consts::PI * DRILL_R * PLATE_THICK)
+}
+
+/// Slack proportional to the fixture, so one set of numbers describes a 6 mm
+/// box and a 40 mm plate alike. `size` is the body's largest extent.
+fn slack_for(size: f64) -> Slack {
+    Slack {
+        weld: size * 1.0e-5,
+        // A planar face's vertices are off its own plane by `f32` rounding and
+        // nothing else. The sag belongs to the curved faces and is deliberately
+        // *not* in this number: a tolerance loose enough to admit a curved face
+        // as flat would let the wall of a hole be counted as part of the plate.
+        flat: size * 1.0e-4,
+        // Measured rather than guessed, against `TruckKernel` at
+        // `Quality::display_default()` on the drilled plate: the plane holding
+        // the face with the hole in it came out 1.15e-4 over, the wall 1.8e-4
+        // short, and the centre of area 0.001 from where the arithmetic puts
+        // it. Every number below is that measurement with an order of
+        // magnitude on it — loose enough that a finer or coarser tessellator
+        // does not fail the suite, and tight enough that the defects these
+        // exist to catch miss by a wide margin: a hole 0.3 mm out of place
+        // moves the centroid past `centroid`, and a wall that is not there at
+        // all misses `curved` by the whole of it.
+        //
+        // `OcctKernel`'s margins are **not** measured here. OCCT is not
+        // installed in the environment this was written in, so what holds
+        // these numbers against the other backend that does geometry is CI.
+        area: 2.0e-3,
+        curved: 2.0e-2,
+        centroid: size * 5.0e-4,
+    }
+}
+
+#[cfg(test)]
+mod census_controls {
+    //! Negative controls for the golden census.
+    //!
+    //! `make licences` runs its negative controls first because a checker that
+    //! cannot fail is a checker that says yes, and the same argument applies
+    //! with more force here: [`check_census`] passes against both backends in
+    //! the tree, and that is equally consistent with it asserting nothing.
+    //!
+    //! So the census is run against a mesh built here, by hand, with no kernel
+    //! anywhere — a 40x40x10 plate with a *square* hole through it, which
+    //! exercises every path the real fixture does and whose every number is an
+    //! integer. Then the same mesh is broken in the three specific ways the
+    //! census claims to catch, and each break has to produce a failure.
+    //!
+    //! The second control is the one worth reading. It moves the hole and
+    //! changes nothing else: the volume is identical, the bounding box is
+    //! identical, the face count is identical, and every area in the census is
+    //! identical. Only the centre of area moves. That is the defect this whole
+    //! file was written for, and it is invisible to every other check in this
+    //! suite.
+
+    use super::*;
+
+    const H: f64 = 20.0;
+    const T: f64 = 10.0;
+    const HOLE: f64 = 3.0;
+
+    /// Two triangles, wound counter-clockwise seen from outside when `a`, `b`,
+    /// `c`, `d` go round that way.
+    fn quad(mesh: &mut Mesh, face: u32, corners: [[f64; 3]; 4]) {
+        let base = mesh.positions.len() as u32;
+        for c in corners {
+            mesh.positions.push([c[0] as f32, c[1] as f32, c[2] as f32]);
+            // Never read by the census, which takes its normals from the
+            // triangles. Present so the mesh is well-formed.
+            mesh.normals.push([0.0, 0.0, 0.0]);
+        }
+        mesh.indices
+            .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+        mesh.face_of_triangle.push(face);
+        mesh.face_of_triangle.push(face);
+    }
+
+    /// A 40x40x10 plate with a square hole of side `2 * HOLE` through it,
+    /// centred at `(at, 0)`. Ten faces: two with the hole in them, four sides,
+    /// and four walls.
+    fn plate(at: f64) -> Mesh {
+        let mut m = Mesh::default();
+        let (lo, hi) = (at - HOLE, at + HOLE);
+        let z = T / 2.0;
+
+        // The face with the hole in it, top and bottom, as four rectangles
+        // around the opening — one face id each, so the census has a face made
+        // of pieces that are only connected through each other.
+        for (id, sign) in [(0u32, 1.0), (1u32, -1.0)] {
+            let s = sign * z;
+            let rects = [
+                [[-H, -H], [lo, -H], [lo, H], [-H, H]],
+                [[hi, -H], [H, -H], [H, H], [hi, H]],
+                [[lo, -H], [hi, -H], [hi, -HOLE], [lo, -HOLE]],
+                [[lo, HOLE], [hi, HOLE], [hi, H], [lo, H]],
+            ];
+            for r in rects {
+                let mut c = r.map(|p| [p[0], p[1], s]);
+                if sign < 0.0 {
+                    c.reverse();
+                }
+                quad(&mut m, id, c);
+            }
+        }
+
+        // The four outer sides.
+        quad(&mut m, 2, [[H, -H, -z], [H, H, -z], [H, H, z], [H, -H, z]]);
+        quad(
+            &mut m,
+            3,
+            [[-H, H, -z], [-H, -H, -z], [-H, -H, z], [-H, H, z]],
+        );
+        quad(&mut m, 4, [[H, H, -z], [-H, H, -z], [-H, H, z], [H, H, z]]);
+        quad(
+            &mut m,
+            5,
+            [[-H, -H, -z], [H, -H, -z], [H, -H, z], [-H, -H, z]],
+        );
+
+        // The four walls of the hole. Their outward normals point *into* the
+        // hole, which is what puts them in planes no golden names.
+        quad(
+            &mut m,
+            6,
+            [
+                [lo, -HOLE, -z],
+                [lo, HOLE, -z],
+                [lo, HOLE, z],
+                [lo, -HOLE, z],
+            ],
+        );
+        quad(
+            &mut m,
+            7,
+            [
+                [hi, HOLE, -z],
+                [hi, -HOLE, -z],
+                [hi, -HOLE, z],
+                [hi, HOLE, z],
+            ],
+        );
+        quad(
+            &mut m,
+            8,
+            [
+                [hi, -HOLE, -z],
+                [lo, -HOLE, -z],
+                [lo, -HOLE, z],
+                [hi, -HOLE, z],
+            ],
+        );
+        quad(
+            &mut m,
+            9,
+            [[lo, HOLE, -z], [hi, HOLE, -z], [hi, HOLE, z], [lo, HOLE, z]],
+        );
+        m
+    }
+
+    /// The six planes of a plate whose hole is at `(at, 0)`, and the area of
+    /// the walls that lie in none of them.
+    fn golden(at: f64) -> ([GoldenPlane; 6], f64) {
+        let face = 4.0 * H * H;
+        let hole = 4.0 * HOLE * HOLE;
+        let shift = -at * hole / (face - hole);
+        let side = 2.0 * H * T;
+        (
+            [
+                GoldenPlane {
+                    normal: Vec3::Z,
+                    offset: T / 2.0,
+                    area: face - hole,
+                    centroid: Vec3::new(shift, 0.0, T / 2.0),
+                },
+                GoldenPlane {
+                    normal: Vec3::new(0.0, 0.0, -1.0),
+                    offset: T / 2.0,
+                    area: face - hole,
+                    centroid: Vec3::new(shift, 0.0, -T / 2.0),
+                },
+                GoldenPlane {
+                    normal: Vec3::X,
+                    offset: H,
+                    area: side,
+                    centroid: Vec3::new(H, 0.0, 0.0),
+                },
+                GoldenPlane {
+                    normal: Vec3::new(-1.0, 0.0, 0.0),
+                    offset: H,
+                    area: side,
+                    centroid: Vec3::new(-H, 0.0, 0.0),
+                },
+                GoldenPlane {
+                    normal: Vec3::Y,
+                    offset: H,
+                    area: side,
+                    centroid: Vec3::new(0.0, H, 0.0),
+                },
+                GoldenPlane {
+                    normal: Vec3::new(0.0, -1.0, 0.0),
+                    offset: H,
+                    area: side,
+                    centroid: Vec3::new(0.0, -H, 0.0),
+                },
+            ],
+            // Four walls, each `2 * HOLE` across and `T` deep.
+            8.0 * HOLE * T,
+        )
+    }
+
+    #[test]
+    fn the_fixture_describes_the_plate_it_was_written_for() {
+        let (planes, walls) = golden(8.0);
+        check_census(&plate(8.0), &planes, walls, &slack_for(2.0 * H))
+            .expect("the plate this fixture describes");
+    }
+
+    #[test]
+    fn a_hole_in_the_wrong_place_keeps_every_area_and_is_caught_anyway() {
+        // Same plate, hole moved 2 mm. Nothing an area, a volume, a bounding
+        // box or a face count can see.
+        let moved = plate(6.0);
+        let (planes, walls) = golden(8.0);
+
+        let err = check_census(&moved, &planes, walls, &slack_for(2.0 * H))
+            .expect_err("a hole 2 mm from where the fixture puts it must fail");
+        assert!(
+            err.contains("centre of area"),
+            "the hole moved and the census failed for some other reason: {err}"
+        );
+
+        // And the claim that nothing else moved, asserted rather than assumed:
+        // the area is still exactly right, so the centroid is carrying this
+        // failure on its own.
+        let faces = census(&moved, 2.0 * H * 1.0e-5);
+        let by_plane: f64 = faces.iter().take(2).map(|f| f.area).sum();
+        assert!(
+            (by_plane - 2.0 * (4.0 * H * H - 4.0 * HOLE * HOLE)).abs() < 1.0e-9,
+            "the two faces with the hole in them hold {by_plane}, and moving a \
+             hole does not change that"
+        );
+    }
+
+    #[test]
+    fn one_id_over_two_separate_patches_is_caught() {
+        // The two opposite sides of the plate, given the same face id. They
+        // are 40 mm apart and nothing joins them, so this is two faces wearing
+        // one name — and a click on either would select both.
+        let mut broken = plate(8.0);
+        for f in &mut broken.face_of_triangle {
+            if *f == 5 {
+                *f = 4;
+            }
+        }
+        let (planes, walls) = golden(8.0);
+        let err = check_census(&broken, &planes, walls, &slack_for(2.0 * H))
+            .expect_err("one id over two patches must fail");
+        assert!(
+            err.contains("disconnected regions"),
+            "two patches under one id failed for some other reason: {err}"
+        );
+    }
+
+    #[test]
+    fn a_wall_that_is_not_there_is_caught() {
+        // The hole's walls deleted: the plate still has a hole in the face it
+        // is drilled through, and nothing lining it.
+        let mut hollow = plate(8.0);
+        let keep: Vec<bool> = hollow.face_of_triangle.iter().map(|&f| f < 6).collect();
+        let mut i = 0;
+        hollow.indices = hollow
+            .indices
+            .chunks(3)
+            .zip(&keep)
+            .filter(|&(_, &k)| k)
+            .flat_map(|(t, _)| t.to_vec())
+            .collect();
+        hollow.face_of_triangle.retain(|_| {
+            i += 1;
+            keep[i - 1]
+        });
+
+        let (planes, walls) = golden(8.0);
+        let err = check_census(&hollow, &planes, walls, &slack_for(2.0 * H))
+            .expect_err("a hole with no wall must fail");
+        assert!(
+            err.contains("lies in no plane"),
+            "a missing wall failed for some other reason: {err}"
+        );
+    }
+}
