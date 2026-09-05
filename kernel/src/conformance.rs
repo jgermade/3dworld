@@ -1069,93 +1069,172 @@ fn geometry_checks<K: GeometryKernel>(
         checks,
         "a drilled plate has the hole where it was asked for",
         {
-            // The 40x40x10 plate and the 6 mm drill that `make freecad-check`
-            // weighs against 16000 - pi*6^2*10, and that `w3d-kernel-truck`'s
-            // tessellation fingerprints are recorded on. The volume is already
-            // checked in three other places; what is new here is *where*.
-            //
-            // The hole is off-centre on purpose. Centred, the plate's top face
-            // has its centre of area at the origin whether the hole is there
-            // or not, and the assertion would be about nothing. At x = 8 the
-            // material left in that plane is lopsided, and its centre of area
-            // moves to a number arithmetic can state — which no volume, no
-            // bounding box and no face count can.
-            const HALF: f64 = 20.0;
-            const THICK: f64 = 10.0;
-            const R: f64 = 6.0;
-            const AT: f64 = 8.0;
-
-            let plate = k
-                .create_box(Vec3::new(2.0 * HALF, 2.0 * HALF, THICK))
-                .map_err(|e| e.to_string())?;
-            let drill = k
-                .create_cylinder(R, 2.0 * THICK)
-                .map_err(|e| e.to_string())?;
-            let drill = k
-                .transform(drill, &Mat4::from_translation(Vec3::new(AT, 0.0, 0.0)))
-                .map_err(|e| e.to_string())?;
-
-            // Declinable, like every fixture here that is not one of the three
-            // mandatory boxes: a backend that will not drill says so and is
-            // held to nothing further. It may not answer wrongly.
-            let Ok(drilled) = k.boolean(BooleanOp::Difference, plate, drill, tol) else {
+            let Some(mesh) = drilled_plate(k, tol, quality, &Mat4::IDENTITY)? else {
                 return Ok(());
             };
-            let mesh = k
-                .tessellate(drilled, quality)
-                .map_err(|e| format!("tessellate: {e}"))?;
+            let (planes, wall) = drilled_plate_golden(&Mat4::IDENTITY);
+            check_census(&mesh, &planes, wall, &slack_for(2.0 * PLATE_HALF))
+        }
+    );
 
-            let face = 2.0 * HALF * 2.0 * HALF;
-            let hole = core::f64::consts::PI * R * R;
-            // The centre of area of a square with a disc taken out of it: the
-            // square's first moment is zero, the disc's is its area times where
-            // it sits, and what is left is the difference over the difference.
-            let shift = -AT * hole / (face - hole);
-            let side = 2.0 * HALF * THICK;
+    check!(
+        checks,
+        "the same plate, off every axis, is still the same plate",
+        {
+            // The same fixture rotated 30 degrees about Z and 20 about X, so
+            // that not one face of it is axis-aligned and not one coordinate
+            // is a round number.
+            //
+            // Two different things are being asked. The first is about the
+            // *census*: every number it computes — an area, a centre of area,
+            // a distance from a plane — is supposed to be independent of the
+            // frame it is measured in, and a check that only ever sees
+            // axis-aligned fixtures cannot tell that from an implementation
+            // that quietly assumes one. The second is about the *kernel*: a
+            // rotation is exact on paper and is a matrix multiplication in
+            // `f32` by the time it reaches the mesh, so this is where a
+            // transform that is subtly not rigid shows up as a face that has
+            // changed size.
+            let m = Mat4::from_axis_angle(Vec3::Z, 0.5235987755982988, 1.0e-12)
+                .mul(&Mat4::from_axis_angle(Vec3::X, 0.3490658503988659, 1.0e-12));
+            let Some(mesh) = drilled_plate(k, tol, quality, &m)? else {
+                return Ok(());
+            };
+            let (planes, wall) = drilled_plate_golden(&m);
+            check_census(&mesh, &planes, wall, &slack_for(2.0 * PLATE_HALF))
+        }
+    );
 
-            let planes = [
-                GoldenPlane {
-                    normal: Vec3::Z,
-                    offset: THICK / 2.0,
-                    area: face - hole,
-                    centroid: Vec3::new(shift, 0.0, THICK / 2.0),
-                },
-                GoldenPlane {
-                    normal: Vec3::new(0.0, 0.0, -1.0),
-                    offset: THICK / 2.0,
-                    area: face - hole,
-                    centroid: Vec3::new(shift, 0.0, -THICK / 2.0),
-                },
-                GoldenPlane {
-                    normal: Vec3::X,
-                    offset: HALF,
-                    area: side,
-                    centroid: Vec3::new(HALF, 0.0, 0.0),
-                },
-                GoldenPlane {
-                    normal: Vec3::new(-1.0, 0.0, 0.0),
-                    offset: HALF,
-                    area: side,
-                    centroid: Vec3::new(-HALF, 0.0, 0.0),
-                },
-                GoldenPlane {
-                    normal: Vec3::Y,
-                    offset: HALF,
-                    area: side,
-                    centroid: Vec3::new(0.0, HALF, 0.0),
-                },
-                GoldenPlane {
-                    normal: Vec3::new(0.0, -1.0, 0.0),
-                    offset: HALF,
-                    area: side,
-                    centroid: Vec3::new(0.0, -HALF, 0.0),
-                },
-            ];
-            // Everything not in one of those six planes is the wall of the
-            // hole, and a cylinder's wall is its circumference times the
-            // plate's thickness.
-            let wall = 2.0 * core::f64::consts::PI * R * THICK;
-            check_census(&mesh, &planes, wall, &slack_for(2.0 * HALF))
+    // -- Degenerate operands ------------------------------------------------
+    //
+    // Where B-rep kernels actually fail, and where until now this repository
+    // tested only OpenCASCADE — `kernel-occt/tests/degenerate.rs` runs under
+    // `make test-occt` and nowhere else, so the backend the browser actually
+    // runs on had no degenerate coverage at all.
+    //
+    // Every one of these is declinable. What none of them may do is answer.
+
+    check!(
+        checks,
+        "a difference by a tool that misses leaves the minuend whole",
+        {
+            // The case a user meets by dragging a drill off the edge of the
+            // part. `TruckKernel` answered it with an empty body — `Ok`, no
+            // faces, no bounds, no mesh — until 2026-09-05, because a
+            // difference is an intersection against an inverted operand and
+            // the library it delegates to answers "empty" whenever the two
+            // boundaries never meet. That is right for an intersection and
+            // exactly wrong here.
+            //
+            // Three separations, because they fail differently: wholly apart,
+            // touching on a face, and touching at a single corner. The last
+            // two are the ones a bounding-box test alone would call an overlap.
+            for (what, offset) in [
+                ("50 mm away", Vec3::new(50.0, 0.0, 0.0)),
+                ("touching on a face", Vec3::new(2.0, 0.0, 0.0)),
+                ("touching at a corner", Vec3::splat(2.0)),
+            ] {
+                let a = k.create_box(Vec3::splat(2.0)).map_err(|e| e.to_string())?;
+                let b = k.create_box(Vec3::splat(2.0)).map_err(|e| e.to_string())?;
+                let b = k
+                    .transform(b, &Mat4::from_translation(offset))
+                    .map_err(|e| e.to_string())?;
+                let Ok(d) = k.boolean(BooleanOp::Difference, a, b, tol) else {
+                    continue;
+                };
+                // Deliberately not tolerant of a tessellation failure. Where
+                // the result is *meant* to be empty this suite accepts one;
+                // here the result is the whole minuend, so a body that will
+                // not mesh is the defect rather than an excuse for it.
+                let got = volume_of(k, d, quality).map_err(|e| {
+                    format!(
+                        "a 2-cube minus an identical cube {what} gave a body \
+                         that will not mesh ({e}). The tool removes nothing, \
+                         so the answer is the cube — a result with no geometry \
+                         in it is the part disappearing"
+                    )
+                })?;
+                require(
+                    within(got, 8.0, 1.0e-3),
+                    format!(
+                        "a 2-cube minus an identical cube {what} encloses \
+                         {got}, not 8. The two share no volume, so nothing is \
+                         removed"
+                    ),
+                )?;
+            }
+            Ok(())
+        }
+    );
+
+    check!(
+        checks,
+        "an intersection of bodies that share no volume is empty or refused",
+        {
+            // The mirror of the check above, and the reason it is worth having
+            // both: the same delegation that made the difference wrong makes
+            // this one right, so a backend can pass this and fail that.
+            for offset in [Vec3::new(50.0, 0.0, 0.0), Vec3::new(2.0, 0.0, 0.0)] {
+                let a = k.create_box(Vec3::splat(2.0)).map_err(|e| e.to_string())?;
+                let b = k.create_box(Vec3::splat(2.0)).map_err(|e| e.to_string())?;
+                let b = k
+                    .transform(b, &Mat4::from_translation(offset))
+                    .map_err(|e| e.to_string())?;
+                let Ok(i) = k.boolean(BooleanOp::Intersection, a, b, tol) else {
+                    continue;
+                };
+                // As with the self-difference check: a result that is meant to
+                // be nothing is allowed not to mesh.
+                if let Ok(got) = volume_of(k, i, quality) {
+                    require(
+                        got.abs() <= 8.0 * 1.0e-3,
+                        format!(
+                            "two 2-cubes that share no volume intersected to \
+                             {got} of material"
+                        ),
+                    )?;
+                }
+            }
+            Ok(())
+        }
+    );
+
+    check!(checks, "a union of two separate bodies is both of them", {
+        let a = k.create_box(Vec3::splat(2.0)).map_err(|e| e.to_string())?;
+        let b = k.create_box(Vec3::splat(2.0)).map_err(|e| e.to_string())?;
+        let b = k
+            .transform(b, &Mat4::from_translation(Vec3::new(50.0, 0.0, 0.0)))
+            .map_err(|e| e.to_string())?;
+        let Ok(u) = k.boolean(BooleanOp::Union, a, b, tol) else {
+            return Ok(());
+        };
+        let got = volume_of(k, u, quality)?;
+        require(
+            within(got, 16.0, 1.0e-3),
+            format!(
+                "the union of two separate 2-cubes encloses {got}, not 16. A \
+                 result of 8 is one of them thrown away; the bounding box of \
+                 the pair would be far larger than either"
+            ),
+        )
+    });
+
+    check!(
+        checks,
+        "a wall thin enough to be a sheet is still a solid",
+        {
+            // Ten thousand to one. A thickness this far below the other two
+            // extents is where a tessellator that works in absolute units rather
+            // than relative ones collapses the solid, and where a boolean's
+            // tolerance can exceed the feature it is meant to resolve.
+            let plate = k
+                .create_box(Vec3::new(100.0, 100.0, 0.01))
+                .map_err(|e| e.to_string())?;
+            let got = volume_of(k, plate, quality)?;
+            require(
+                within(got, 100.0, 1.0e-3),
+                format!("a 100 x 100 x 0.01 plate encloses {got}, not 100"),
+            )
         }
     );
 
@@ -1530,6 +1609,116 @@ fn check_census(
              names, and it says there should be {curved}"
         ),
     )
+}
+
+/// The drilled-plate fixture: a 40x40x10 plate with a 6 mm drill through it at
+/// x = 8, placed by `m`.
+///
+/// The same plate and drill `make freecad-check` weighs against
+/// 16000 - pi*6^2*10 and that `w3d-kernel-truck`'s tessellation fingerprints
+/// are recorded on, so a disagreement here is a disagreement with three other
+/// checks at once.
+///
+/// **The hole is off-centre on purpose.** Centred, the plate's face has its
+/// centre of area at the origin whether the hole is there or not, and the
+/// assertion would be about nothing.
+///
+/// `Ok(None)` is a backend that declined the boolean, which it is entitled to
+/// do — everything here that is not one of the three mandatory box fixtures is
+/// declinable. It may not answer wrongly.
+const PLATE_HALF: f64 = 20.0;
+const PLATE_THICK: f64 = 10.0;
+const DRILL_R: f64 = 6.0;
+const DRILL_AT: f64 = 8.0;
+
+fn drilled_plate<K: GeometryKernel>(
+    k: &mut K,
+    tol: Tolerance,
+    quality: Quality,
+    m: &Mat4,
+) -> core::result::Result<Option<Mesh>, String> {
+    let plate = k
+        .create_box(Vec3::new(2.0 * PLATE_HALF, 2.0 * PLATE_HALF, PLATE_THICK))
+        .map_err(|e| e.to_string())?;
+    let drill = k
+        .create_cylinder(DRILL_R, 2.0 * PLATE_THICK)
+        .map_err(|e| e.to_string())?;
+    let drill = k
+        .transform(
+            drill,
+            &Mat4::from_translation(Vec3::new(DRILL_AT, 0.0, 0.0)),
+        )
+        .map_err(|e| e.to_string())?;
+    let Ok(drilled) = k.boolean(BooleanOp::Difference, plate, drill, tol) else {
+        return Ok(None);
+    };
+    // Placed *after* the boolean, so the rotated case exercises a transform of
+    // a boolean's result rather than a boolean of transformed operands. The
+    // second would be a different fixture and a weaker one: it would let a
+    // backend that only works on axis-aligned input pass by doing the cut in
+    // the frame it likes.
+    let placed = k.transform(drilled, m).map_err(|e| e.to_string())?;
+    let mesh = k
+        .tessellate(placed, quality)
+        .map_err(|e| format!("tessellate: {e}"))?;
+    Ok(Some(mesh))
+}
+
+/// The six planes of the drilled plate under `m`, and the area of the wall,
+/// which lies in none of them.
+///
+/// `m` must be rigid: areas are carried over unchanged, which is true of a
+/// rotation and a translation and of nothing else.
+fn drilled_plate_golden(m: &Mat4) -> ([GoldenPlane; 6], f64) {
+    let face = 4.0 * PLATE_HALF * PLATE_HALF;
+    let hole = core::f64::consts::PI * DRILL_R * DRILL_R;
+    // The centre of area of a square with a disc taken out of it: the square's
+    // first moment about the origin is zero, the disc's is its area times where
+    // it sits, and what is left is the difference over the difference.
+    let shift = -DRILL_AT * hole / (face - hole);
+    let side = 2.0 * PLATE_HALF * PLATE_THICK;
+    let z = PLATE_THICK / 2.0;
+
+    let planes = [
+        (Vec3::Z, z, face - hole, Vec3::new(shift, 0.0, z)),
+        (
+            Vec3::new(0.0, 0.0, -1.0),
+            z,
+            face - hole,
+            Vec3::new(shift, 0.0, -z),
+        ),
+        (Vec3::X, PLATE_HALF, side, Vec3::new(PLATE_HALF, 0.0, 0.0)),
+        (
+            Vec3::new(-1.0, 0.0, 0.0),
+            PLATE_HALF,
+            side,
+            Vec3::new(-PLATE_HALF, 0.0, 0.0),
+        ),
+        (Vec3::Y, PLATE_HALF, side, Vec3::new(0.0, PLATE_HALF, 0.0)),
+        (
+            Vec3::new(0.0, -1.0, 0.0),
+            PLATE_HALF,
+            side,
+            Vec3::new(0.0, -PLATE_HALF, 0.0),
+        ),
+    ]
+    .map(|(normal, _offset, area, centroid)| {
+        // A normal is a direction and a centroid is a point, so they are
+        // carried by the matrix differently — and the offset is recomputed from
+        // the placed pair rather than carried at all, because a translation
+        // changes a plane's distance from the origin while leaving its normal
+        // alone. Deriving it is also the only version that stays right if `m`
+        // ever gains a translation.
+        let normal = m.transform_vector(normal);
+        let centroid = m.transform_point(centroid);
+        GoldenPlane {
+            normal,
+            offset: centroid.dot(normal),
+            area,
+            centroid,
+        }
+    });
+    (planes, 2.0 * core::f64::consts::PI * DRILL_R * PLATE_THICK)
 }
 
 /// Slack proportional to the fixture, so one set of numbers describes a 6 mm

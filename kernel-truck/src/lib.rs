@@ -374,6 +374,51 @@ impl GeometryKernel for TruckKernel {
                 "truck cannot run a boolean on a body with a pole, such as a sphere",
             ));
         }
+        // Operands that share no interior are decided here rather than handed
+        // to `truck-shapeops`, because it gets one of the three wrong and does
+        // so silently.
+        //
+        // `Difference` is `and` against an inverted operand (see below), and
+        // `truck_shapeops::and` answers with an **empty solid** when the two
+        // boundaries never meet — which is right for an intersection and
+        // exactly wrong for a difference, where A lies wholly inside the
+        // inverted B and the answer is A. Measured before this existed: a
+        // 2 mm cube minus an identical cube 50 mm away returned `Ok` carrying
+        // a body with no faces, empty bounds and no mesh. A user who drags a
+        // drill off the edge of the part watches the part disappear, and
+        // nothing in the suite asked.
+        //
+        // Disjoint *bounding boxes* are what is tested, so this fires only
+        // when the operands provably share no interior point. Boxes that
+        // overlap in a set of zero volume — touching on a face, an edge or a
+        // corner — count as disjoint, which is right: a solid is a closed
+        // regular set and removing a measure-zero slice of its boundary
+        // leaves it alone. Overlapping boxes prove nothing and are left to
+        // `truck-shapeops`, so this is a shortcut on the certain half and
+        // never a guess on the other.
+        let overlap = self.bounds(a)?.intersection(&self.bounds(b)?);
+        let size = overlap.size();
+        let separable = overlap.is_empty() || size.x <= 0.0 || size.y <= 0.0 || size.z <= 0.0;
+        if separable {
+            match op {
+                // A minus something that does not touch it is A.
+                BooleanOp::Difference => return Ok(self.alloc(self.get(a)?.clone())),
+                // Empty, and there is no empty `Body` in this contract — so it
+                // is refused rather than answered with something a caller
+                // could mistake for geometry. `conformance` accepts "empty or
+                // refused" and this is the honest half of that.
+                BooleanOp::Intersection => {
+                    return Err(KernelError::Failed(
+                        "the operands share no volume, and there is no empty body".into(),
+                    ));
+                }
+                // Not shortcut. Two solids meeting on a face are a real merge
+                // with a real seam to build, and `truck_shapeops::or` already
+                // answers the wholly-separate case correctly.
+                BooleanOp::Union => {}
+            }
+        }
+
         let solid_a = self.get(a)?.clone();
         let mut solid_b = self.get(b)?.clone();
         let t = self.boolean_tolerance(a, b, tol)?;
