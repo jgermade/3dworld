@@ -109,10 +109,14 @@ render/        w3d-render       wgpu: capability detection, mesh upload,        
                                 camera, and ID-buffer picking                   ✅ WebGL2
                                                                                 ⬜ WebGPU
 web/           w3d-web          the loader: probe, dispatch, COOP/COEP, and     ✅ built
-                                a canvas that draws and picks                   ⬜ threaded
+                                a canvas that draws and picks                   ✅ threaded
 app/           w3d-app          the modeller: editor, scene, and a winit +      ✅ desktop
                                 egui shell that draws in one pass               ⬜ web
-kernel-native/                  a kernel of our own, or truck                   ⬜
+kernel-truck/  w3d-kernel-truck pure Rust, and what the browser models on:      ✅ native
+                                exact surfaces, and a boolean that is narrow    ✅ wasm
+                                rather than absent — it declines what it        ◐ boolean
+                                cannot do, and no longer answers wrongly
+kernel-native/                  a kernel of our own                             ⬜
 ```
 
 Crates are prefixed `w3d-` because `3dworld` is not a valid Rust identifier and the name is not
@@ -198,7 +202,7 @@ capability, it is declared there first**, then implemented behind whichever back
 | `make clippy` | `-D warnings`, no allow-list. A lint that has to be silenced gets an argument in a record file. |
 | `make licences` | Every crate on **both** targets is compatible with GPL-3.0-or-later, against the allowlist in `tools/licences.py`; an unlisted licence fails the build. It runs its own negative controls first, because a checker that cannot fail is a checker that says yes. |
 | `cargo test --workspace` | Document, history, selection and the arena's identity rules — against `w3d-kernel-fake`, with no OCCT, no browser and no `.wasm` anywhere. |
-| `w3d_kernel::conformance` | One suite, against *every* backend, `FakeKernel` included. A backend is only a backend if it passes, and this is what keeps the kernel decision reversible. |
+| `w3d_kernel::conformance` | One suite in two halves, against *every* backend, `FakeKernel` included. The **contract** half — handles, bounds, well-formed meshes, promised errors — is run against all of them. The **geometry** half — the volume a mesh encloses, and what a boolean does to it — is run only where `does_geometry()` says the backend does any, because a bounding box satisfies every bounds assertion a boolean can be held to and one backend passed this suite for nine days doing exactly that. A backend may *decline* an operation and still conform; it may not answer wrongly, and three box fixtures are mandatory so that declining everything cannot pass. `kernel-fake`'s negative control holds the fake to the half it is excused from and requires it to fail. |
 | `w3d_format` round-trip | A saved document keeps its nodes, names, visibility, tolerance, quality and shared bodies, and refuses a file written by another kernel — both directions. The container is asserted to be a zip a standard tool can open. |
 | `make wasm` | The default members build for `wasm32-unknown-unknown`, **and the WebGL2 backend is really in the tree** — the second half because asking wgpu for `gles` instead of `webgl` compiles cleanly and ships no fallback at all. |
 | `make test-occt` | The conformance suite against **real geometry**, the document driven by OpenCASCADE, real geometry through the real viewport with a click that names a face, and STEP: bytes asserted to be a part-21 file *by inspection*, read back by a kernel that never saw the geometry. It also runs clippy over this crate, which `make clippy` cannot reach — being outside `default-members` is what keeps `make test` free of setup, and it is also what kept the FFI crate unlinted until somebody looked. Outside `make test` because it needs OCCT installed. |
