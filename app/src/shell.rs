@@ -1111,24 +1111,22 @@ fn chrome<K: GeometryKernel + Default>(
                 ui.separator();
             }
 
-            let nodes: Vec<_> = editor
-                .document()
-                .nodes()
-                .map(|(id, node)| (id, node.name.clone(), node.parent, node.children.len()))
-                .collect();
+            // Depth first from the roots, with the depth in hand — an imported
+            // assembly is three levels deep and the arena's own order says
+            // nothing about which node is inside which.
+            let rows = editor.outline_rows();
             let selected = editor.selection();
 
             egui::ScrollArea::vertical().show(ui, |ui| {
-                for (id, name, parent, child_count) in nodes {
+                for row in rows {
+                    let id = row.id;
                     let is = selected.contains(&id);
-                    let prefix = if parent.is_some() {
-                        "  ↳ "
-                    } else if child_count > 0 {
-                        "📁 "
+                    let icon = if row.group || row.children > 0 {
+                        "📁"
                     } else {
-                        "📦 "
+                        "📦"
                     };
-                    let label = format!("{prefix}{name}");
+                    let label = format!("{}{icon} {}", "    ".repeat(row.depth), row.name);
                     if ui.selectable_label(is, &label).clicked() {
                         let doc = editor.document_mut();
                         if is {

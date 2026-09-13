@@ -664,11 +664,12 @@ pub fn run<K: GeometryKernel>(k: &mut K, tol: Tolerance, quality: Quality) -> Re
         let imported = k
             .import_step(&bytes)
             .map_err(|e| format!("this kernel could not read back what it just wrote: {e}"))?;
+        imported.validate()?;
         require(
-            imported.len() == 1,
-            format!("one solid went out and {} came back", imported.len()),
+            imported.bodies.len() == 1,
+            format!("one solid went out and {} came back", imported.bodies.len()),
         )?;
-        let b = imported[0].body;
+        let b = imported.bodies[0].body;
 
         // Bounds and the solid count, and deliberately **not** the face, edge
         // and vertex counts. STEP is a boundary description, and nothing in it
@@ -698,6 +699,61 @@ pub fn run<K: GeometryKernel>(k: &mut K, tol: Tolerance, quality: Quality) -> Re
 
     check!(
         checks,
+        "two solids in one file come back as two, in a tree that holds together",
+        {
+            // The round-trip above sends one solid, which is the case where a
+            // tree cannot be wrong. Two is the smallest file that has an
+            // arrangement at all, and it is also the first check here that
+            // holds a backend to returning *both* — a reader that transfers
+            // the first root and stops passes everything above this.
+            let small = k.create_box(Vec3::splat(2.0)).map_err(|e| e.to_string())?;
+            let large = k.create_box(Vec3::splat(6.0)).map_err(|e| e.to_string())?;
+            let wanted = [
+                k.bounds(small).map_err(|e| e.to_string())?,
+                k.bounds(large).map_err(|e| e.to_string())?,
+            ];
+
+            let bytes = match k.export_step(&[small, large]) {
+                Ok(bytes) => bytes,
+                Err(KernelError::Unsupported(_)) => return Ok(()),
+                Err(e) => return Err(format!("export of two bodies failed: {e}")),
+            };
+            let imported = k
+                .import_step(&bytes)
+                .map_err(|e| format!("two solids were written and could not be read back: {e}"))?;
+            imported.validate()?;
+            require(
+                imported.bodies.len() == 2,
+                format!(
+                    "two solids went out and {} came back",
+                    imported.bodies.len()
+                ),
+            )?;
+
+            // Which order they arrive in is the reader's business, so this
+            // matches by size rather than by index. What it will not accept is
+            // the same solid twice — the failure a flattening walk produces,
+            // and one that a count alone cannot see.
+            for want in &wanted {
+                let matches = imported
+                    .bodies
+                    .iter()
+                    .filter(|b| {
+                        k.bounds(b.body)
+                            .is_ok_and(|got| boxes_close(&got, want, slack))
+                    })
+                    .count();
+                require(
+                    matches == 1,
+                    format!("{matches} of the two imported solids are the size of {want:?}"),
+                )?;
+            }
+            Ok(())
+        }
+    );
+
+    check!(
+        checks,
         "bytes that are not STEP are refused by the right name",
         {
             // Two different sentences to a user — "this build cannot read STEP"
@@ -707,9 +763,9 @@ pub fn run<K: GeometryKernel>(k: &mut K, tol: Tolerance, quality: Quality) -> Re
             let a = k.create_box(Vec3::splat(2.0)).map_err(|e| e.to_string())?;
             let does_step = !matches!(k.export_step(&[a]), Err(KernelError::Unsupported(_)));
             match (does_step, k.import_step(NOT_STEP)) {
-                (_, Ok(bodies)) => Err(format!(
+                (_, Ok(imported)) => Err(format!(
                     "{} bodies came out of {} bytes of prose",
-                    bodies.len(),
+                    imported.bodies.len(),
                     NOT_STEP.len()
                 )),
                 (true, Err(KernelError::Failed(_))) => Ok(()),

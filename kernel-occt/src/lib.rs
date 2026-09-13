@@ -40,23 +40,39 @@ impl RawBytes {
     }
 }
 
-/// Several body ids owned by the C++ side until `w3d_occt_bodies_free`. A STEP
-/// file holds any number of solids and nobody knows how many until it has been
-/// read, so this is the one call that answers with a list.
+/// What one STEP file held, owned by the C++ side until
+/// `w3d_occt_import_free`: a body per solid placement, and the assembly tree
+/// they sat in. A STEP file holds any number of solids and nobody knows how
+/// many until it has been read, so this is the one call that answers with a
+/// list — and, since the tree's interior nodes carry no solid, with two.
+///
+/// Mirrors `W3dOcctImport` in `native/w3d_occt.h`, field for field.
 #[repr(C)]
-struct RawBodies {
+struct RawImport {
     ids: *const u32,
     names: *const *const c_char,
+    parents: *const u32,
     len: u32,
+    assembly_names: *const *const c_char,
+    assembly_parents: *const u32,
+    assemblies: u32,
     owner: *mut core::ffi::c_void,
 }
 
-impl RawBodies {
+/// The shim's `W3D_OCCT_NO_PARENT`: a solid at the file's root, or an assembly
+/// nobody contains.
+const NO_PARENT: u32 = u32::MAX;
+
+impl RawImport {
     const fn empty() -> Self {
         Self {
             ids: core::ptr::null(),
             names: core::ptr::null(),
+            parents: core::ptr::null(),
             len: 0,
+            assembly_names: core::ptr::null(),
+            assembly_parents: core::ptr::null(),
+            assemblies: 0,
             owner: core::ptr::null_mut(),
         }
     }
@@ -178,9 +194,9 @@ unsafe extern "C" {
         ctx: *mut Context,
         data: *const u8,
         len: u32,
-        out: *mut RawBodies,
+        out: *mut RawImport,
     ) -> i32;
-    fn w3d_occt_bodies_free(bodies: *mut RawBodies);
+    fn w3d_occt_import_free(imported: *mut RawImport);
     fn w3d_occt_last_error() -> *const c_char;
     fn w3d_occt_live_bodies(ctx: *const Context) -> u32;
 }
@@ -594,10 +610,11 @@ impl GeometryKernel for OcctKernel {
         Ok(bytes)
     }
 
-    fn import_step(&mut self, bytes: &[u8]) -> Result<Vec<w3d_kernel::ImportedBody>> {
-        let mut raw = RawBodies::empty();
+    fn import_step(&mut self, bytes: &[u8]) -> Result<w3d_kernel::Import> {
+        let mut raw = RawImport::empty();
         // SAFETY: the pointer and length describe `bytes`, which outlives the
-        // call; the ids and names are copied out before they are freed.
+        // call; the ids, names and parents are copied out before they are
+        // freed.
         let code = unsafe {
             w3d_occt_import_step(
                 self.ctx,
@@ -612,28 +629,85 @@ impl GeometryKernel for OcctKernel {
         // collects OCCT's diagnostics instead of letting them print.
         check_new(code)?;
         let ids = unsafe { core::slice::from_raw_parts(raw.ids, raw.len as usize) };
-        let names_ptrs = if !raw.names.is_null() {
-            unsafe { core::slice::from_raw_parts(raw.names, raw.len as usize) }
-        } else {
-            &[]
-        };
+        let names = unsafe { strings(raw.names, raw.len) };
+        let parents = unsafe { indices(raw.parents, raw.len) };
+        let assembly_names = unsafe { strings(raw.assembly_names, raw.assemblies) };
+        let assembly_parents = unsafe { indices(raw.assembly_parents, raw.assemblies) };
 
-        let mut out = Vec::with_capacity(raw.len as usize);
-        for i in 0..raw.len as usize {
-            let body = Body::from_raw(ids[i]);
-            let name = if i < names_ptrs.len() && !names_ptrs[i].is_null() {
-                let cstr = unsafe { std::ffi::CStr::from_ptr(names_ptrs[i]) };
-                let s = cstr.to_string_lossy().trim().to_string();
-                if s.is_empty() { None } else { Some(s) }
-            } else {
-                None
-            };
-            out.push(w3d_kernel::ImportedBody { body, name });
+        let assemblies = (0..raw.assemblies as usize)
+            .map(|i| w3d_kernel::ImportedAssembly {
+                name: assembly_names.get(i).cloned().flatten(),
+                parent: assembly_parents.get(i).copied().flatten(),
+            })
+            .collect();
+        let bodies = (0..raw.len as usize)
+            .map(|i| w3d_kernel::ImportedBody {
+                body: Body::from_raw(ids[i]),
+                name: names.get(i).cloned().flatten(),
+                parent: parents.get(i).copied().flatten(),
+            })
+            .collect();
+
+        unsafe { w3d_occt_import_free(&mut raw) };
+        let imported = w3d_kernel::Import { bodies, assemblies };
+        // The contract's structural rule, checked on this side of the boundary
+        // rather than trusted across it: the walk in the shim emits a parent
+        // before its children, and a C++ index that stopped being one would
+        // otherwise reach the document as a tree that is not a tree.
+        if let Err(why) = imported.validate() {
+            return Err(KernelError::Failed(format!(
+                "the STEP reader produced an assembly tree that is not one: {why}"
+            )));
         }
-
-        unsafe { w3d_occt_bodies_free(&mut raw) };
-        Ok(out)
+        Ok(imported)
     }
+}
+
+/// Copies `count` nullable C strings out of the shim's arrays. A null pointer,
+/// and a string that is nothing but whitespace, both become `None`: OCCT
+/// answers with an empty name for a label that has none, and a document does
+/// not want a node called `" "`.
+///
+/// SAFETY: `array` must be null, or valid for `count` pointers, each null or a
+/// null-terminated string that outlives the call.
+unsafe fn strings(array: *const *const c_char, count: u32) -> Vec<Option<String>> {
+    if array.is_null() {
+        return Vec::new();
+    }
+    let ptrs = unsafe { core::slice::from_raw_parts(array, count as usize) };
+    ptrs.iter()
+        .map(|&p| {
+            if p.is_null() {
+                return None;
+            }
+            let s = unsafe { CStr::from_ptr(p) }
+                .to_string_lossy()
+                .trim()
+                .to_string();
+            if s.is_empty() { None } else { Some(s) }
+        })
+        .collect()
+}
+
+/// Copies `count` parent indices out, turning the shim's `NO_PARENT` sentinel
+/// into `None` here so that nothing above this file has to know the sentinel
+/// exists.
+///
+/// SAFETY: `array` must be null, or valid for `count` `u32`s.
+unsafe fn indices(array: *const u32, count: u32) -> Vec<Option<usize>> {
+    if array.is_null() {
+        return Vec::new();
+    }
+    unsafe { core::slice::from_raw_parts(array, count as usize) }
+        .iter()
+        .map(|&i| {
+            if i == NO_PARENT {
+                None
+            } else {
+                Some(i as usize)
+            }
+        })
+        .collect()
 }
 
 /// SAFETY: `ptr` must be valid for `count * 3` floats.

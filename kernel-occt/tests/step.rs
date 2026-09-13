@@ -44,10 +44,10 @@ fn a_kernel_that_never_saw_the_geometry_reads_what_another_wrote() {
     // This is the whole point of the format: the receiving program is not
     // this one.
     let mut reader = OcctKernel::new();
-    let bodies = reader.import_step(&bytes).unwrap();
-    assert_eq!(bodies.len(), 1, "one solid was written");
+    let imported = reader.import_step(&bytes).unwrap();
+    assert_eq!(imported.bodies.len(), 1, "one solid was written");
 
-    let after = reader.bounds(bodies[0].body).unwrap();
+    let after = reader.bounds(imported.bodies[0].body).unwrap();
     let slack = 1.0e-6;
     for (a, b, what) in [
         (before.min.x, after.min.x, "min.x"),
@@ -65,7 +65,7 @@ fn a_kernel_that_never_saw_the_geometry_reads_what_another_wrote() {
 
     // And it is geometry, not a bounding box that happens to agree: the hole
     // is still a hole.
-    let topology = reader.topology(bodies[0].body).unwrap();
+    let topology = reader.topology(imported.bodies[0].body).unwrap();
     assert_eq!(topology.solids, 1);
     assert!(
         topology.faces >= 6,
@@ -134,14 +134,26 @@ fn every_solid_in_a_file_becomes_a_body() {
     let bytes = k.export_step(&[a, b, c]).unwrap();
 
     let mut reader = OcctKernel::new();
-    let bodies = reader.import_step(&bytes).unwrap();
-    assert_eq!(bodies.len(), 3, "three solids went in");
+    let imported = reader.import_step(&bytes).unwrap();
+    assert_eq!(imported.bodies.len(), 3, "three solids went in");
     // Distinct handles into the reading kernel, all of them live.
-    for item in &bodies {
+    for item in &imported.bodies {
         reader
             .bounds(item.body)
             .expect("a body that cannot be measured");
     }
+    // A file this kernel writes has no assembly in it — three products at the
+    // root — so this is what a *flat* import looks like, and the tree an
+    // assembly gets is measured against a file from elsewhere in
+    // `examples/assembly_tree.rs`.
+    imported
+        .validate()
+        .expect("the import's tree holds together");
+    assert!(imported.assemblies.is_empty(), "a flat file grew a tree");
+    assert!(
+        imported.bodies.iter().all(|b| b.parent.is_none()),
+        "a solid in a flat file claims to sit in an assembly"
+    );
     assert_eq!(reader.live_bodies(), 3, "the import leaked or lost bodies");
 }
 
@@ -248,9 +260,9 @@ fn step_file_in_inches_is_converted_to_millimetres_on_import() {
 
     let mut reader = OcctKernel::new();
     let imported = reader.import_step(inch_step_str.as_bytes()).unwrap();
-    assert_eq!(imported.len(), 1);
+    assert_eq!(imported.bodies.len(), 1);
 
-    let bounds = reader.bounds(imported[0].body).unwrap();
+    let bounds = reader.bounds(imported.bodies[0].body).unwrap();
     let size = bounds.size();
 
     // 1 in x 2 in x 3 in converted to millimetres: 25.4 mm x 50.8 mm x 76.2 mm

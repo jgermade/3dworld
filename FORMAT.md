@@ -114,6 +114,13 @@ Named so that their absence is a decision and not an oversight:
 - **Materials and colour.** There is one material.
 - **Units.** `tolerance` implies a scale and nothing states one. A document is
   currently unitless numbers, and adding units is a version-2 conversation.
+- **The node tree.** A document can hold one — a group node with children, which
+  is what an imported STEP assembly becomes — and `nodes[]` is a flat list with
+  nowhere to say so. A file therefore holds every body and none of the structure
+  around them, and a group node is not written at all: it has no geometry, and
+  an entry without geometry is not a thing a version-1 reader can read. Putting
+  the tree in means a node identity a parent can refer to, which is the same
+  version-2 conversation as units.
 - **A thumbnail**, which every file browser would like and which costs a
   renderer at save time.
 

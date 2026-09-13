@@ -158,6 +158,24 @@ pub fn save_with_options<K: GeometryKernel>(
     let mut nodes = Vec::new();
 
     for (_, node) in doc.nodes() {
+        // A group is structure and carries no solid, so there is nothing here
+        // to serialise: asking the kernel to save `GROUP_BODY` would refuse the
+        // whole document, and asking it to save the `0` a group used to carry
+        // would have written the first body in the document a second time under
+        // the group's name.
+        //
+        // Skipping it means **a version-1 file has no tree in it**. That is a
+        // loss and it is deliberate: putting one in is a change to the format,
+        // which has its own specification and its own version rule, and it
+        // arrives with the other things a version 2 owes — units, and a node
+        // identity that survives a save. Until then an imported assembly saves
+        // as the parts it is made of, which is every solid, flat.
+        // `a_group_does_not_survive_a_save` in `tests/roundtrip.rs` is that
+        // sentence as a check, so this cannot quietly start meaning something
+        // else.
+        if node.is_group() {
+            continue;
+        }
         let raw = node.body.raw();
         let path = match paths.get(&raw) {
             Some(path) => path.clone(),
