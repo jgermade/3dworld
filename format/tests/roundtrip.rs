@@ -223,3 +223,38 @@ fn camera_pose_and_thumbnail_survive_w3d_round_trip() {
     assert_eq!(loaded.camera, Some(camera));
     assert_eq!(loaded.thumbnail_png, Some(dummy_png));
 }
+
+#[test]
+fn a_group_does_not_survive_a_save() {
+    // The limitation, pinned. A version-1 file holds nodes and geometry and has
+    // nowhere to put an assembly tree, so a document with groups in it saves as
+    // the bodies alone. This test exists so that changing that is a deliberate
+    // act with a version number attached, rather than something a reader
+    // discovers.
+    let mut d = Document::new(FakeKernel::default());
+    let group = d.add_group("Engine");
+    let part = d.add_box("Piston", Vec3::new(1.0, 1.0, 1.0)).unwrap();
+    d.reparent(part, Some(group)).unwrap();
+    assert_eq!(d.len(), 2);
+
+    // The group is not a body, so nothing is written for it — and in
+    // particular no second copy of the piston's geometry, which is what the
+    // `0` a group used to carry would have produced.
+    let bytes = save(&d).unwrap();
+    let entries = w3d_format::zip::read(&bytes).unwrap();
+    assert_eq!(
+        entries
+            .keys()
+            .filter(|k| k.starts_with("geometry/"))
+            .count(),
+        1
+    );
+
+    let after = load(FakeKernel::default(), &bytes).unwrap();
+    let names: Vec<_> = after.nodes().map(|(_, n)| n.name.clone()).collect();
+    assert_eq!(names, vec!["Piston".to_string()]);
+    assert!(
+        after.nodes().all(|(id, _)| after.parent_of(id).is_none()),
+        "a version-1 file cannot carry a parent, so nothing loaded should have one"
+    );
+}

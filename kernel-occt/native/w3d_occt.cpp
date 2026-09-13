@@ -833,16 +833,81 @@ int32_t w3d_occt_export_step(W3dOcctContext *ctx, const uint32_t *bodies,
 
 namespace {
 
-struct OcctBodiesOwner {
+struct OcctImportOwner {
   std::vector<uint32_t> ids;
   std::vector<std::string> names_str;
   std::vector<const char *> names_ptr;
+  std::vector<uint32_t> parents;
+  std::vector<std::string> assembly_names_str;
+  std::vector<const char *> assembly_names_ptr;
+  std::vector<uint32_t> assembly_parents;
 };
+
+/// One solid placement found in the file, and where it sat.
+struct FoundSolid {
+  TopoDS_Shape shape;
+  std::string name;
+  uint32_t parent;
+};
+
+/// An interior node of the file's assembly tree.
+struct FoundAssembly {
+  std::string name;
+  uint32_t parent;
+};
+
+/// The name a *file* gave a label, and nothing OpenCASCADE invented.
+///
+/// XDE names an instance label that the file left unnamed after the label it
+/// refers to — `=>[0:1:1:11]` — which is a debugging aid and not a product
+/// name. It reached the Outliner as a node called `=>[0:1:1:11]` until this
+/// function started refusing it.
+std::string label_name(const TDF_Label &label) {
+  Handle(TDataStd_Name) attr;
+  if (!label.IsNull() && label.FindAttribute(TDataStd_Name::GetID(), attr)) {
+    std::string name = TCollection_AsciiString(attr->Get()).ToCString();
+    if (name.rfind("=>", 0) == 0) {
+      return {};
+    }
+    return name;
+  }
+  return {};
+}
+
+/// Whether a label's components are an *arrangement* — a subassembly holding
+/// parts — or one product's several shape representations.
+///
+/// XDE marks both as assemblies, and this is the distinction it does not draw.
+/// Pro/ENGINEER writes every part in the AS1 sample as a product holding two
+/// representations, a `SOLID` and a `COMPOUND`, so `BOLT` arrives as an
+/// "assembly" of two unnamed instances. Taken at face value that puts a group
+/// node around every single part, names the part's own body after nothing, and
+/// turns a tree of ten assemblies into one of twenty-eight.
+///
+/// The signal is the *names*: a file names the components of a real assembly,
+/// because that is how a user refers to them, and leaves the representations of
+/// one product unnamed. So a label holds structure when at least one component
+/// carries a name the file wrote.
+///
+/// It is a judgement about how STEP is written rather than a rule STEP states,
+/// and what it costs when it is wrong is bounded and worth knowing: an assembly
+/// whose components a file left *entirely* unnamed collapses into one node.
+/// Every solid under it still arrives, still in the right place — only the one
+/// level of structure is lost, and there was no name in the file to label it
+/// with anyway.
+bool holds_structure(const TDF_LabelSequence &components) {
+  for (int c = 1; c <= components.Length(); ++c) {
+    if (!label_name(components.Value(c)).empty()) {
+      return true;
+    }
+  }
+  return false;
+}
 
 } // namespace
 
 int32_t w3d_occt_import_step(W3dOcctContext *ctx, const uint8_t *data,
-                             uint32_t len, W3dOcctBodies *out) {
+                             uint32_t len, W3dOcctImport *out) {
   if (!data || len == 0) {
     return fail("no bytes: not a STEP file");
   }
@@ -855,7 +920,8 @@ int32_t w3d_occt_import_step(W3dOcctContext *ctx, const uint8_t *data,
     // its unit.
     Interface_Static::SetCVal("xstep.cascade.unit", "MM");
 
-    std::vector<std::pair<TopoDS_Shape, std::string>> solids;
+    std::vector<FoundSolid> solids;
+    std::vector<FoundAssembly> assemblies;
     uint32_t faces = 0;
 
     // Try XDE / CAF reader first to extract product names and assembly hierarchy
@@ -875,31 +941,77 @@ int32_t w3d_occt_import_step(W3dOcctContext *ctx, const uint8_t *data,
       TDF_LabelSequence free_shapes;
       shape_tool->GetFreeShapes(free_shapes);
 
-      auto extract_label = [&](auto self, const TDF_Label &label) -> void {
-        Handle(TDataStd_Name) attr;
-        std::string label_name;
-        if (label.FindAttribute(TDataStd_Name::GetID(), attr)) {
-          label_name = TCollection_AsciiString(attr->Get()).ToCString();
-        }
-        TopoDS_Shape shape = shape_tool->GetShape(label);
-        if (!shape.IsNull()) {
-          for (TopExp_Explorer e(shape, TopAbs_SOLID); e.More(); e.Next()) {
-            solids.push_back({e.Current(), label_name});
+      // Walks the XDE tree, emitting a solid where the tree has a part and an
+      // assembly entry where it has structure — and emitting each solid
+      // **once**.
+      //
+      // The walk this replaced did neither. It took the solids of every label
+      // it met, and an assembly's label holds a compound of its whole subtree,
+      // so every solid was emitted again for each ancestor above it: the AS1
+      // assembly's eighteen placements arrived as thirty-six bodies, eighteen
+      // of them named after the root product. And it recursed with
+      // `GetComponents` on a component, which is a *reference* and has no
+      // components of its own — the structure lives on the label it refers to
+      // — so the walk stopped one level down and the names of the parts
+      // themselves (L_BRACKET, NUT, BOLT) never left the file.
+      //
+      // `location` is why this cannot just take the top compound and be done.
+      // A component's placement is relative to the assembly holding it, so the
+      // global position of a bolt is the product of every location on the way
+      // down. The old walk got that for free by reading solids out of the root
+      // compound, where OCCT had already applied them; a walk that visits
+      // parts has to carry it.
+      auto walk = [&](auto self, const TDF_Label &label, uint32_t parent,
+                      const TopLoc_Location &location) -> void {
+        std::string name = label_name(label);
+        TDF_Label target = label;
+        TopLoc_Location here = location;
+
+        if (XCAFDoc_ShapeTool::IsReference(label)) {
+          here = location * XCAFDoc_ShapeTool::GetLocation(label);
+          TDF_Label referred;
+          if (XCAFDoc_ShapeTool::GetReferredShape(label, referred)) {
+            target = referred;
+            // The instance's name first, because that is what a file calls
+            // this placement of the part, and the part's own name when the
+            // placement has none.
+            if (name.empty()) {
+              name = label_name(referred);
+            }
           }
-          TopTools_IndexedMapOfShape map;
-          TopExp::MapShapes(shape, TopAbs_FACE, map);
-          faces += static_cast<uint32_t>(map.Extent());
         }
+
         TDF_LabelSequence components;
-        if (XCAFDoc_ShapeTool::GetComponents(label, components)) {
+        const bool interior = XCAFDoc_ShapeTool::GetComponents(target, components) &&
+                              components.Length() > 0 && holds_structure(components);
+
+        if (interior) {
+          const uint32_t me = static_cast<uint32_t>(assemblies.size());
+          assemblies.push_back({name, parent});
           for (int c = 1; c <= components.Length(); ++c) {
-            self(self, components.Value(c));
+            self(self, components.Value(c), me, here);
           }
+          return;
         }
+
+        // A leaf: this is a part, and its solids are the bodies. The shape
+        // comes from the referred label in its own coordinates and is moved
+        // into the world by the locations gathered on the way here.
+        TopoDS_Shape shape = shape_tool->GetShape(target);
+        if (shape.IsNull()) {
+          return;
+        }
+        shape.Move(here);
+        for (TopExp_Explorer e(shape, TopAbs_SOLID); e.More(); e.Next()) {
+          solids.push_back({e.Current(), name, parent});
+        }
+        TopTools_IndexedMapOfShape map;
+        TopExp::MapShapes(shape, TopAbs_FACE, map);
+        faces += static_cast<uint32_t>(map.Extent());
       };
 
       for (int i = 1; i <= free_shapes.Length(); ++i) {
-        extract_label(extract_label, free_shapes.Value(i));
+        walk(walk, free_shapes.Value(i), W3D_OCCT_NO_PARENT, TopLoc_Location());
       }
     }
 
@@ -915,7 +1027,7 @@ int32_t w3d_occt_import_step(W3dOcctContext *ctx, const uint8_t *data,
       for (int i = 1; i <= reader.NbShapes(); ++i) {
         const TopoDS_Shape shape = reader.Shape(i);
         for (TopExp_Explorer e(shape, TopAbs_SOLID); e.More(); e.Next()) {
-          solids.push_back({e.Current(), ""});
+          solids.push_back({e.Current(), "", W3D_OCCT_NO_PARENT});
         }
         TopTools_IndexedMapOfShape map;
         TopExp::MapShapes(shape, TopAbs_FACE, map);
@@ -931,31 +1043,47 @@ int32_t w3d_occt_import_step(W3dOcctContext *ctx, const uint8_t *data,
       return fail(why.str().c_str());
     }
 
-    auto *owner = new OcctBodiesOwner();
+    auto *owner = new OcctImportOwner();
     owner->ids.reserve(solids.size());
     owner->names_str.reserve(solids.size());
     owner->names_ptr.reserve(solids.size());
+    owner->parents.reserve(solids.size());
 
     for (const auto &item : solids) {
-      owner->ids.push_back(ctx->store(item.first));
-      owner->names_str.push_back(item.second);
+      owner->ids.push_back(ctx->store(item.shape));
+      owner->names_str.push_back(item.name);
+      owner->parents.push_back(item.parent);
     }
     for (const auto &s : owner->names_str) {
       owner->names_ptr.push_back(s.empty() ? nullptr : s.c_str());
     }
+    owner->assembly_names_str.reserve(assemblies.size());
+    owner->assembly_names_ptr.reserve(assemblies.size());
+    owner->assembly_parents.reserve(assemblies.size());
+    for (const auto &item : assemblies) {
+      owner->assembly_names_str.push_back(item.name);
+      owner->assembly_parents.push_back(item.parent);
+    }
+    for (const auto &s : owner->assembly_names_str) {
+      owner->assembly_names_ptr.push_back(s.empty() ? nullptr : s.c_str());
+    }
 
     out->ids = owner->ids.data();
     out->names = owner->names_ptr.data();
+    out->parents = owner->parents.data();
     out->len = static_cast<uint32_t>(owner->ids.size());
+    out->assembly_names = owner->assembly_names_ptr.data();
+    out->assembly_parents = owner->assembly_parents.data();
+    out->assemblies = static_cast<uint32_t>(owner->assembly_names_ptr.size());
     out->owner = owner;
     return W3D_OCCT_OK;
   });
 }
 
-void w3d_occt_bodies_free(W3dOcctBodies *bodies) {
-  if (bodies && bodies->owner) {
-    delete static_cast<OcctBodiesOwner *>(bodies->owner);
-    std::memset(bodies, 0, sizeof(*bodies));
+void w3d_occt_import_free(W3dOcctImport *imported) {
+  if (imported && imported->owner) {
+    delete static_cast<OcctImportOwner *>(imported->owner);
+    std::memset(imported, 0, sizeof(*imported));
   }
 }
 

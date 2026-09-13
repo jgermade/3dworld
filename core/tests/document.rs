@@ -3,7 +3,10 @@
 //! hole in it.
 
 use w3d_core::Document;
-use w3d_core::kernel::{Aabb, BooleanOp, GeometryKernel, Mat4, Quality, Tolerance, Vec3};
+use w3d_core::kernel::{
+    Aabb, Body, BooleanOp, GeometryKernel, Import, ImportedAssembly, ImportedBody, Mat4, Mesh,
+    Profile, Quality, SketchPlane, Tolerance, Topology, Vec3,
+};
 use w3d_kernel_fake::FakeKernel;
 
 fn doc() -> Document<FakeKernel> {
@@ -297,4 +300,320 @@ fn assembly_hierarchy_groups_and_reparenting() {
     d.reparent(part1, None).unwrap();
     assert_eq!(d.parent_of(part1), None);
     assert_eq!(d.children_of(group), &[part2]);
+}
+
+// ---------------------------------------------------------------------------
+// A kernel that can hand the document an assembly
+// ---------------------------------------------------------------------------
+//
+// `FakeKernel` refuses STEP, which is conforming and leaves the document's
+// tree-building with no way to be tested here — and "here" is where it has to
+// be tested, because turning an `Import` into nodes is the document's job and
+// has nothing to do with which kernel read the file. So this is `FakeKernel` in
+// every respect but one: `import_step` answers with a tree it was handed.
+//
+// It is a stub and not a second backend: `name` says so, and the only method
+// with a body of its own is the one under test.
+
+struct Assembling {
+    inner: FakeKernel,
+    answer: fn(&mut FakeKernel) -> w3d_core::kernel::Import,
+}
+
+impl Assembling {
+    fn new(answer: fn(&mut FakeKernel) -> w3d_core::kernel::Import) -> Self {
+        Self {
+            inner: FakeKernel::new(),
+            answer,
+        }
+    }
+}
+
+impl GeometryKernel for Assembling {
+    fn import_step(&mut self, _bytes: &[u8]) -> w3d_core::kernel::Result<Import> {
+        Ok((self.answer)(&mut self.inner))
+    }
+
+    fn name(&self) -> &'static str {
+        "assembling stub over the fake kernel"
+    }
+    fn does_geometry(&self) -> bool {
+        self.inner.does_geometry()
+    }
+    fn create_box(&mut self, size: Vec3) -> w3d_core::kernel::Result<Body> {
+        self.inner.create_box(size)
+    }
+    fn create_sphere(&mut self, radius: f64) -> w3d_core::kernel::Result<Body> {
+        self.inner.create_sphere(radius)
+    }
+    fn create_cylinder(&mut self, radius: f64, height: f64) -> w3d_core::kernel::Result<Body> {
+        self.inner.create_cylinder(radius, height)
+    }
+    fn boolean(
+        &mut self,
+        op: BooleanOp,
+        a: Body,
+        b: Body,
+        tol: Tolerance,
+    ) -> w3d_core::kernel::Result<Body> {
+        self.inner.boolean(op, a, b, tol)
+    }
+    fn transform(&mut self, body: Body, m: &Mat4) -> w3d_core::kernel::Result<Body> {
+        self.inner.transform(body, m)
+    }
+    fn copy(&mut self, body: Body) -> w3d_core::kernel::Result<Body> {
+        self.inner.copy(body)
+    }
+    fn delete(&mut self, body: Body) -> w3d_core::kernel::Result<()> {
+        self.inner.delete(body)
+    }
+    fn fillet(&mut self, body: Body, radius: f64) -> w3d_core::kernel::Result<Body> {
+        self.inner.fillet(body, radius)
+    }
+    fn chamfer(&mut self, body: Body, distance: f64) -> w3d_core::kernel::Result<Body> {
+        self.inner.chamfer(body, distance)
+    }
+    fn extrude(&mut self, profile: &Profile, distance: f64) -> w3d_core::kernel::Result<Body> {
+        self.inner.extrude(profile, distance)
+    }
+    fn revolve(
+        &mut self,
+        profile: &Profile,
+        axis_origin: Vec3,
+        axis_dir: Vec3,
+        angle_rad: f64,
+    ) -> w3d_core::kernel::Result<Body> {
+        self.inner
+            .revolve(profile, axis_origin, axis_dir, angle_rad)
+    }
+    fn sweep(&mut self, profile: &Profile, path_points: &[Vec3]) -> w3d_core::kernel::Result<Body> {
+        self.inner.sweep(profile, path_points)
+    }
+    fn loft(
+        &mut self,
+        profiles: &[Profile],
+        planes: &[SketchPlane],
+    ) -> w3d_core::kernel::Result<Body> {
+        self.inner.loft(profiles, planes)
+    }
+    fn shell(
+        &mut self,
+        body: Body,
+        face_id: u32,
+        thickness: f64,
+    ) -> w3d_core::kernel::Result<Body> {
+        self.inner.shell(body, face_id, thickness)
+    }
+    fn topology(&self, body: Body) -> w3d_core::kernel::Result<Topology> {
+        self.inner.topology(body)
+    }
+    fn bounds(&self, body: Body) -> w3d_core::kernel::Result<Aabb> {
+        self.inner.bounds(body)
+    }
+    fn tessellate(&self, body: Body, quality: Quality) -> w3d_core::kernel::Result<Mesh> {
+        self.inner.tessellate(body, quality)
+    }
+    fn geometry_format(&self) -> &'static str {
+        self.inner.geometry_format()
+    }
+    fn save_body(&self, body: Body) -> w3d_core::kernel::Result<Vec<u8>> {
+        self.inner.save_body(body)
+    }
+    fn load_body(&mut self, bytes: &[u8]) -> w3d_core::kernel::Result<Body> {
+        self.inner.load_body(bytes)
+    }
+    fn export_step(&self, bodies: &[Body]) -> w3d_core::kernel::Result<Vec<u8>> {
+        self.inner.export_step(bodies)
+    }
+}
+
+/// The tree the document is asked to build, and the smallest one with every
+/// case in it: an assembly inside an assembly, a body two levels down, a body
+/// one level down, and a body at the root beside the assembly.
+fn nested(k: &mut FakeKernel) -> Import {
+    let deep = k.create_box(Vec3::splat(1.0)).unwrap();
+    let shallow = k.create_box(Vec3::splat(2.0)).unwrap();
+    let loose = k.create_box(Vec3::splat(3.0)).unwrap();
+    Import {
+        assemblies: vec![
+            ImportedAssembly {
+                name: Some("Top".into()),
+                parent: None,
+            },
+            ImportedAssembly {
+                name: Some("Sub".into()),
+                parent: Some(0),
+            },
+        ],
+        bodies: vec![
+            ImportedBody {
+                body: deep,
+                name: Some("Deep".into()),
+                parent: Some(1),
+            },
+            ImportedBody {
+                body: shallow,
+                name: Some("Shallow".into()),
+                parent: Some(0),
+            },
+            ImportedBody {
+                body: loose,
+                name: Some("Loose".into()),
+                parent: None,
+            },
+        ],
+    }
+}
+
+#[test]
+fn an_import_builds_the_tree_the_file_had() {
+    let mut d = Document::new(Assembling::new(nested));
+    let ids = d.import_step(b"pretend this is STEP", "Imported").unwrap();
+
+    // Three solids, three nodes returned — the groups are not in the answer,
+    // because what a user selects after an import is the parts.
+    assert_eq!(ids.len(), 3);
+    // Three bodies and two groups.
+    assert_eq!(d.len(), 5);
+
+    let named = |name: &str| {
+        d.nodes()
+            .find(|(_, n)| n.name == name)
+            .map(|(id, _)| id)
+            .unwrap_or_else(|| panic!("no node called {name}"))
+    };
+    let (top, sub) = (named("Top"), named("Sub"));
+    assert_eq!(d.parent_of(top), None);
+    assert_eq!(d.parent_of(sub), Some(top));
+    assert_eq!(d.parent_of(named("Deep")), Some(sub));
+    assert_eq!(d.parent_of(named("Shallow")), Some(top));
+    assert_eq!(d.parent_of(named("Loose")), None);
+    // Both halves of the link, not just the child's: an Outliner walks down.
+    assert_eq!(d.children_of(sub), &[named("Deep")]);
+    assert_eq!(d.children_of(top), &[sub, named("Shallow")]);
+}
+
+#[test]
+fn undoing_an_import_takes_the_groups_with_it_and_redo_puts_them_back() {
+    let mut d = Document::new(Assembling::new(nested));
+    d.import_step(b"pretend this is STEP", "Imported").unwrap();
+    assert_eq!(d.len(), 5);
+
+    // One transaction, groups included: an import that undoes into two bodies
+    // and an empty group is an import that half-happened.
+    assert_eq!(d.undo(), Some("Import STEP"));
+    assert!(d.is_empty(), "{} nodes survived the undo", d.len());
+
+    assert_eq!(d.redo(), Some("Import STEP"));
+    assert_eq!(d.len(), 5);
+    // The point of recording the parent's side of the link as well: a redo that
+    // restores nodes but not the children lists looks right in the document and
+    // empty in the Outliner.
+    let named = |name: &str| {
+        d.nodes()
+            .find(|(_, n)| n.name == name)
+            .map(|(id, _)| id)
+            .unwrap_or_else(|| panic!("no node called {name}"))
+    };
+    let (top, sub) = (named("Top"), named("Sub"));
+    assert_eq!(d.children_of(top), &[sub, named("Shallow")]);
+    assert_eq!(d.children_of(sub), &[named("Deep")]);
+    assert_eq!(d.parent_of(sub), Some(top));
+}
+
+#[test]
+fn a_tree_that_is_not_one_is_refused_and_changes_nothing() {
+    fn broken(k: &mut FakeKernel) -> Import {
+        let body = k.create_box(Vec3::splat(1.0)).unwrap();
+        Import {
+            // One assembly, and a body claiming to sit in a second.
+            assemblies: vec![ImportedAssembly {
+                name: Some("Top".into()),
+                parent: None,
+            }],
+            bodies: vec![ImportedBody {
+                body,
+                name: Some("Nowhere".into()),
+                parent: Some(1),
+            }],
+        }
+    }
+
+    let mut d = Document::new(Assembling::new(broken));
+    let outcome = d.import_step(b"pretend this is STEP", "Imported");
+    let Err(e) = outcome else {
+        panic!("a body under an assembly that is not there was imported anyway");
+    };
+    assert!(
+        e.to_string().contains("not one"),
+        "the refusal does not say what was wrong: {e}"
+    );
+    // Nothing landed, and there is nothing to undo: the tree is checked before
+    // the transaction opens.
+    assert!(d.is_empty());
+    assert!(!d.history().can_undo());
+}
+
+#[test]
+fn a_node_cannot_be_put_inside_its_own_descendant() {
+    let mut d = doc();
+    let outer = d.add_group("Outer");
+    let inner = d.add_group("Inner");
+    let part = d.add_box("Part", Vec3::splat(1.0)).unwrap();
+    d.reparent(inner, Some(outer)).unwrap();
+    d.reparent(part, Some(inner)).unwrap();
+
+    // One step down is fine, two steps are the same question, and both must be
+    // refused: a ring of nodes has no root, and every walk over the tree —
+    // the Outliner's, and `parent_of` chasing upwards — runs forever.
+    for parent in [inner, part] {
+        let err = d
+            .reparent(outer, Some(parent))
+            .expect_err("a node was put inside its own descendant");
+        assert!(
+            matches!(err, w3d_core::DocumentError::Cycle { .. }),
+            "refused, but as {err}"
+        );
+    }
+    // And the tree is exactly as it was.
+    assert_eq!(d.parent_of(outer), None);
+    assert_eq!(d.parent_of(inner), Some(outer));
+    assert_eq!(d.parent_of(part), Some(inner));
+}
+
+#[test]
+fn moving_a_node_between_groups_is_one_undo_step() {
+    let mut d = doc();
+    let from = d.add_group("From");
+    let into = d.add_group("Into");
+    let part = d.add_box("Part", Vec3::splat(1.0)).unwrap();
+    d.reparent(part, Some(from)).unwrap();
+
+    d.reparent(part, Some(into)).unwrap();
+    assert_eq!(d.parent_of(part), Some(into));
+    assert_eq!(d.children_of(from), &[]);
+    assert_eq!(d.children_of(into), &[part]);
+
+    // Both sides of both links come back: the part's parent, the group it
+    // rejoins, and the group it leaves again.
+    assert_eq!(d.undo(), Some("Reparent"));
+    assert_eq!(d.parent_of(part), Some(from));
+    assert_eq!(d.children_of(from), &[part]);
+    assert_eq!(d.children_of(into), &[]);
+
+    assert_eq!(d.redo(), Some("Reparent"));
+    assert_eq!(d.parent_of(part), Some(into));
+    assert_eq!(d.children_of(from), &[]);
+    assert_eq!(d.children_of(into), &[part]);
+
+    // A move that changes nothing records nothing, so it does not leave an
+    // undo step that appears to do something.
+    let before = d.history().can_undo();
+    d.reparent(part, Some(into)).unwrap();
+    assert_eq!(
+        d.undo(),
+        Some("Reparent"),
+        "the real move is still the last step"
+    );
+    assert!(before);
 }

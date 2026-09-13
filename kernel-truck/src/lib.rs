@@ -16,7 +16,7 @@ use truck_meshalgo::tessellation::{MeshableShape, MeshedShape};
 use truck_modeling::*;
 use truck_polymesh::PolygonMesh;
 use w3d_kernel::{
-    Aabb, Body, BooleanOp, GeometryKernel, ImportedBody, KernelError, Mat4, Mesh, Profile, Quality,
+    Aabb, Body, BooleanOp, GeometryKernel, Import, KernelError, Mat4, Mesh, Profile, Quality,
     Result, SketchPlane, Tolerance, Topology, Vec3,
 };
 
@@ -706,7 +706,7 @@ impl GeometryKernel for TruckKernel {
         ))
     }
 
-    fn import_step(&mut self, _bytes: &[u8]) -> Result<Vec<ImportedBody>> {
+    fn import_step(&mut self, _bytes: &[u8]) -> Result<Import> {
         Err(KernelError::Unsupported(
             "step import not supported in truck backend",
         ))

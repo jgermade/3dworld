@@ -491,7 +491,8 @@ pub trait GeometryKernel {
     /// The bodies survive, like every other operation's operands.
     fn export_step(&self, bodies: &[Body]) -> Result<Vec<u8>>;
 
-    /// Reads a STEP file, producing one body per solid in it.
+    /// Reads a STEP file, producing one body per solid in it and the assembly
+    /// tree those solids sat in.
     ///
     /// One per *solid*, not one per file and not one per assembly node: the
     /// document above this crate has a node per body, and a user who imports
@@ -499,10 +500,28 @@ pub trait GeometryKernel {
     /// surfaces and free-standing shells are not solids and are dropped —
     /// this contract is about the solids.
     ///
-    /// **Never `Ok(vec![])`.** A file that imports into nothing at all is a
-    /// bug report about the modeller; if there is no solid to be had, say so
-    /// with [`KernelError::Failed`] and a message naming what was in the file
-    /// instead.
+    /// One per solid **placement**, which is not the same as one per part. An
+    /// assembly holding five parts placed eighteen times imports as eighteen
+    /// bodies, and the eighteen are independent: nothing here says that two of
+    /// them are the same part, and nothing shares geometry between them. That
+    /// is a decision rather than an oversight — a [`Body`] is what this seam
+    /// deals in, and an instance of one is not a thing the contract has — and
+    /// it is the reason a large assembly costs what it costs.
+    ///
+    /// **Never `Ok` with no bodies.** A file that imports into nothing at all
+    /// is a bug report about the modeller; if there is no solid to be had, say
+    /// so with [`KernelError::Failed`] and a message naming what was in the
+    /// file instead.
+    ///
+    /// **The tree is the file's, and a backend may honestly not have one.**
+    /// [`Import::assemblies`] empty with every [`ImportedBody::parent`] `None`
+    /// is a conforming answer: a flat file has no tree, and a backend whose
+    /// reader cannot see one says so this way rather than inventing a root.
+    /// What is *not* allowed is a tree that does not hold together, and
+    /// [`Import::validate`] is the whole of that rule — every index in range,
+    /// and every assembly's parent earlier in the list than itself, so the
+    /// structure is a forest a caller can walk in one pass without a visited
+    /// set. The conformance suite calls it on everything it imports.
     ///
     /// Errors:
     ///
@@ -511,14 +530,86 @@ pub trait GeometryKernel {
     ///   [`KernelError::Failed`], because a caller has to be able to tell "this
     ///   build cannot read STEP" from "this file is not STEP" and the two
     ///   sentences send a user to different places.
-    fn import_step(&mut self, bytes: &[u8]) -> Result<Vec<ImportedBody>>;
+    fn import_step(&mut self, bytes: &[u8]) -> Result<Import>;
 }
 
-/// A body imported from an exchange file (e.g. STEP), carrying an optional product name.
+/// What one exchange file held: a body per solid placement, and the assembly
+/// tree they sat in.
+///
+/// The two lists are separate because an assembly node is not a solid and has
+/// no [`Body`] to carry — an `ImportedBody` for it would be a body that does
+/// not exist. So the tree's interior lives in `assemblies`, its leaves in
+/// `bodies`, and a leaf names its parent by index.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Import {
+    pub bodies: Vec<ImportedBody>,
+    pub assemblies: Vec<ImportedAssembly>,
+}
+
+impl Import {
+    /// One solid, at the file's root, with no tree around it. What a backend
+    /// that reads a flat file has to say.
+    pub fn flat(bodies: Vec<ImportedBody>) -> Self {
+        Self {
+            bodies,
+            assemblies: Vec::new(),
+        }
+    }
+
+    /// The structural rule of the tree, and the whole of it.
+    ///
+    /// Returns the first breach as a sentence naming the index at fault, so a
+    /// failure points at the entry rather than at the file. It does *not* check
+    /// that the tree matches any particular file: whether the shape is right is
+    /// a question for a fixture with a known answer, not for an invariant.
+    pub fn validate(&self) -> core::result::Result<(), String> {
+        for (i, a) in self.assemblies.iter().enumerate() {
+            match a.parent {
+                // Earlier in the list than itself, which is stronger than
+                // "not itself": it makes a cycle unrepresentable rather than
+                // detectable, so a caller may walk parents without a visited
+                // set and know it terminates.
+                Some(p) if p >= i => {
+                    return Err(format!(
+                        "assembly {i} says its parent is assembly {p}, which is not earlier in                          the list, so the tree is not one"
+                    ));
+                }
+                _ => {}
+            }
+        }
+        for (i, b) in self.bodies.iter().enumerate() {
+            if let Some(p) = b.parent
+                && p >= self.assemblies.len()
+            {
+                return Err(format!(
+                    "body {i} says its parent is assembly {p}, and there are {} of them",
+                    self.assemblies.len()
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// A body imported from an exchange file (e.g. STEP), carrying an optional
+/// product name and where it sat in the file's assembly tree.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ImportedBody {
     pub body: Body,
     pub name: Option<String>,
+    /// The assembly this placement sits in, as an index into
+    /// [`Import::assemblies`], or `None` for a solid at the file's root.
+    pub parent: Option<usize>,
+}
+
+/// An interior node of an exchange file's assembly tree — an assembly or a
+/// subassembly, which is a name and a place and no geometry of its own.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ImportedAssembly {
+    pub name: Option<String>,
+    /// The assembly this one sits in, and always an *earlier* index into
+    /// [`Import::assemblies`] than this one — see [`Import::validate`].
+    pub parent: Option<usize>,
 }
 
 #[cfg(test)]
@@ -557,5 +648,69 @@ mod tests {
         assert_eq!(metrics.triangle_count, 2);
 
         assert_eq!(mesh.face_metrics(99), None);
+    }
+
+    /// `validate` is the only rule the tree has, so these are its negative
+    /// controls: each builds a tree that is wrong in one way and requires that
+    /// the sentence back names the entry at fault. A validator nothing has
+    /// ever seen reject is a validator nobody knows runs.
+    #[test]
+    fn import_tree_invariants_are_enforced() {
+        let body = |n: u32| ImportedBody {
+            body: Body::from_raw(n),
+            name: None,
+            parent: None,
+        };
+        let asm = |parent| ImportedAssembly { name: None, parent };
+
+        // A flat file: no tree at all, and conforming.
+        assert!(Import::flat(vec![body(1), body(2)]).validate().is_ok());
+
+        // The shape a real assembly has, and the only one of these that holds.
+        let good = Import {
+            bodies: vec![
+                ImportedBody {
+                    parent: Some(1),
+                    ..body(1)
+                },
+                ImportedBody {
+                    parent: Some(0),
+                    ..body(2)
+                },
+            ],
+            assemblies: vec![asm(None), asm(Some(0))],
+        };
+        assert!(good.validate().is_ok(), "{:?}", good.validate());
+
+        // A body under an assembly that is not there.
+        let err = Import {
+            bodies: vec![ImportedBody {
+                parent: Some(3),
+                ..body(1)
+            }],
+            assemblies: vec![asm(None)],
+        }
+        .validate()
+        .expect_err("a parent index past the end is not a tree");
+        assert!(err.contains("body 0"), "{err}");
+
+        // An assembly that is its own parent, and a pair that are each
+        // other's: both are cycles, and both are unrepresentable rather than
+        // merely detectable, because a parent must be *earlier*.
+        let err = Import {
+            bodies: vec![body(1)],
+            assemblies: vec![asm(Some(0))],
+        }
+        .validate()
+        .expect_err("an assembly cannot be its own parent");
+        assert!(err.contains("assembly 0"), "{err}");
+
+        let err = Import {
+            bodies: vec![body(1)],
+            assemblies: vec![asm(Some(1)), asm(Some(0))],
+        }
+        .validate()
+        .expect_err("two assemblies cannot hold each other");
+        assert!(err.contains("assembly 0"), "{err}");
     }
 }

@@ -176,6 +176,19 @@ pub struct SketchState {
     pub points: Vec<(f64, f64)>,
 }
 
+/// One line of the Outliner: a node, and where it sits in the tree.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OutlineRow {
+    pub id: NodeId,
+    /// 0 for a node at the document's root, 1 for a child of one, and so on.
+    pub depth: usize,
+    pub name: String,
+    /// A group carries no geometry, so the panel marks it differently and a
+    /// click on it selects structure rather than a solid.
+    pub group: bool,
+    pub children: usize,
+}
+
 pub struct Editor<K: GeometryKernel> {
     doc: Document<K>,
     /// Where this document came from and where `Save` writes. `None` for one
@@ -339,6 +352,47 @@ impl<K: GeometryKernel> Editor<K> {
 
     pub fn selection(&self) -> Vec<NodeId> {
         self.doc.selection().collect()
+    }
+
+    /// The Outliner's rows: every node, depth first from the roots, each with
+    /// how deep it sits.
+    ///
+    /// The panel used to draw the arena in insertion order and mark a node that
+    /// *had* a parent with one fixed indent, which reads as a tree exactly while
+    /// a tree is one level deep. An imported assembly is three, and a nut inside
+    /// a nut-and-bolt inside a bracket sat level with the bracket.
+    ///
+    /// Here rather than in the panel because this is the part that can be
+    /// tested: `shell.rs` draws what this returns, and a walk that loses a node
+    /// or draws one twice is a question about the document, not about egui.
+    pub fn outline_rows(&self) -> Vec<OutlineRow> {
+        fn walk<K: GeometryKernel>(
+            doc: &Document<K>,
+            id: NodeId,
+            depth: usize,
+            rows: &mut Vec<OutlineRow>,
+        ) {
+            if let Ok(node) = doc.node(id) {
+                rows.push(OutlineRow {
+                    id,
+                    depth,
+                    name: node.name.clone(),
+                    group: node.is_group(),
+                    children: node.children.len(),
+                });
+                for child in node.children.clone() {
+                    walk(doc, child, depth + 1, rows);
+                }
+            }
+        }
+
+        let mut rows = Vec::with_capacity(self.doc.len());
+        for (id, node) in self.doc.nodes() {
+            if node.parent.is_none() {
+                walk(&self.doc, id, 0, &mut rows);
+            }
+        }
+        rows
     }
 
     // ---- input --------------------------------------------------------
@@ -2089,5 +2143,37 @@ mod tests {
         e.run(Command::FinishSketch);
         assert!(!e.sketch_state().active);
         assert_eq!(e.doc.len(), 1, "sketched solid extruded into document");
+    }
+    #[test]
+    fn the_outliner_walks_the_tree_and_names_each_depth() {
+        // The shape an imported assembly has, built by hand because the fake
+        // kernel does not read STEP: a group inside a group, a body two levels
+        // down, and a body at the root that is nobody's child.
+        let mut e = editor();
+        let (outer, inner, deep, loose) = {
+            let d = e.document_mut();
+            let outer = d.add_group("Outer");
+            let inner = d.add_group("Inner");
+            let deep = d.add_box("Deep", Vec3::splat(1.0)).unwrap();
+            let loose = d.add_box("Loose", Vec3::splat(1.0)).unwrap();
+            d.reparent(inner, Some(outer)).unwrap();
+            d.reparent(deep, Some(inner)).unwrap();
+            (outer, inner, deep, loose)
+        };
+
+        let rows = e.outline_rows();
+        // Every node once, and in the order a reader expects: a parent, then
+        // what is inside it, then the next root.
+        assert_eq!(
+            rows.iter().map(|r| (r.id, r.depth)).collect::<Vec<_>>(),
+            vec![(outer, 0), (inner, 1), (deep, 2), (loose, 0)]
+        );
+        assert!(rows[0].group && rows[1].group, "a group is marked as one");
+        assert!(!rows[2].group, "a body is not a group");
+        assert_eq!(
+            rows.len(),
+            e.document().len(),
+            "a node was lost or drawn twice"
+        );
     }
 }

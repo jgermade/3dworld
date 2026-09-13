@@ -18,7 +18,7 @@
 
 use std::path::PathBuf;
 
-use w3d_kernel::{GeometryKernel, Quality};
+use w3d_kernel::{GeometryKernel, Import, Quality};
 use w3d_kernel_occt::OcctKernel;
 
 fn main() -> std::process::ExitCode {
@@ -50,11 +50,11 @@ fn main() -> std::process::ExitCode {
 
         if must_refuse {
             match outcome {
-                Ok(bodies) => {
+                Ok(imported) => {
                     println!(
                         "FAIL  {}: {} bodies out of a file that must be refused",
                         path.display(),
-                        bodies.len()
+                        imported.bodies.len()
                     );
                     failed += 1;
                 }
@@ -75,14 +75,17 @@ fn main() -> std::process::ExitCode {
         }
 
         match outcome {
-            Ok(bodies) => {
+            Ok(imported) => {
                 let mut faces = 0;
                 let mut triangles = 0;
                 let mut ok = true;
-                for body in &bodies {
-                    if let Some(name) = &body.name {
-                        println!("        part: {name}");
-                    }
+                if let Err(why) = imported.validate() {
+                    println!("FAIL  {}: {why}", path.display());
+                    failed += 1;
+                    continue;
+                }
+                print_tree(&imported);
+                for body in &imported.bodies {
                     match k.topology(body.body) {
                         Ok(t) => faces += t.faces,
                         Err(e) => {
@@ -113,10 +116,20 @@ fn main() -> std::process::ExitCode {
                     continue;
                 }
                 println!(
-                    "ok    {}: {} {} · {faces} faces · {triangles} triangles · {} KiB",
+                    "ok    {}: {} {} · {} {} · {faces} faces · {triangles} triangles · {} KiB",
                     path.display(),
-                    bodies.len(),
-                    if bodies.len() == 1 { "body" } else { "bodies" },
+                    imported.bodies.len(),
+                    if imported.bodies.len() == 1 {
+                        "body"
+                    } else {
+                        "bodies"
+                    },
+                    imported.assemblies.len(),
+                    if imported.assemblies.len() == 1 {
+                        "assembly"
+                    } else {
+                        "assemblies"
+                    },
                     bytes.len() / 1024
                 );
             }
@@ -132,4 +145,32 @@ fn main() -> std::process::ExitCode {
         return std::process::ExitCode::FAILURE;
     }
     std::process::ExitCode::SUCCESS
+}
+
+/// Prints the tree the file held, because a count cannot show an arrangement.
+///
+/// The flattening walk this replaced printed a name per solid and a total, and
+/// both were right while the structure behind them was wrong: eighteen
+/// placements read as thirty-six bodies, and nothing in the output said the
+/// file had a shape at all.
+fn print_tree(imported: &Import) {
+    fn walk(imported: &Import, parent: Option<usize>, depth: usize) {
+        let indent = "  ".repeat(depth + 4);
+        for (i, a) in imported.assemblies.iter().enumerate() {
+            if a.parent == parent {
+                println!(
+                    "{indent}+ {}",
+                    a.name.as_deref().unwrap_or("<unnamed assembly>")
+                );
+                walk(imported, Some(i), depth + 1);
+            }
+        }
+        for b in imported.bodies.iter().filter(|b| b.parent == parent) {
+            println!(
+                "{indent}- {}",
+                b.name.as_deref().unwrap_or("<unnamed part>")
+            );
+        }
+    }
+    walk(imported, None, 0);
 }

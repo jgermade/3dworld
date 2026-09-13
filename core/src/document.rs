@@ -25,7 +25,28 @@ pub struct Node {
     pub children: Vec<NodeId>,
 }
 
+/// The handle a group node carries where a body node carries geometry.
+///
+/// A group is a node with no solid in it, and this is how it says so. It is
+/// `u32::MAX` and not `0` for a blunt reason: `0` is the first id every backend
+/// here hands out — `OcctKernel`'s counter starts there — so a group used to
+/// carry the handle of the *first body in the document*. Ten groups from an
+/// imported assembly meant ten phantom copies of whatever that body was, drawn,
+/// measured by `visible_bounds`, and kept alive by `collect_garbage` forever.
+/// Nothing will allocate four billion bodies to collide with this one, and the
+/// kernel's own "no body is at fault" handle is already `u32::MAX`.
+pub const GROUP_BODY: Body = Body::from_raw(u32::MAX);
+
 impl Node {
+    /// Whether this node is a group — structure with no geometry of its own.
+    ///
+    /// Callers that walk every node and ask the kernel about each body want
+    /// this: the kernel will refuse [`GROUP_BODY`], and a refusal is a worse
+    /// answer than a question not asked.
+    pub fn is_group(&self) -> bool {
+        self.body == GROUP_BODY
+    }
+
     pub fn new(name: impl Into<String>, body: Body) -> Self {
         Self {
             name: name.into(),
@@ -42,6 +63,11 @@ pub enum DocumentError {
     UnknownNode(NodeId),
     HistoryNotEmpty,
     Kernel(KernelError),
+    /// A reparent that would put a node inside itself.
+    Cycle {
+        child: NodeId,
+        parent: NodeId,
+    },
 }
 
 impl core::fmt::Display for DocumentError {
@@ -50,6 +76,11 @@ impl core::fmt::Display for DocumentError {
             Self::UnknownNode(id) => write!(f, "no such node: {id:?}"),
             Self::HistoryNotEmpty => write!(f, "cannot compact arena while history is non-empty"),
             Self::Kernel(e) => write!(f, "{e}"),
+            Self::Cycle { child, parent } => write!(
+                f,
+                "{child:?} cannot go inside {parent:?}, because {parent:?} is already inside \
+                 {child:?}"
+            ),
         }
     }
 }
@@ -205,8 +236,7 @@ impl<K: GeometryKernel> Document<K> {
     // ---- construction -------------------------------------------------
 
     pub fn add_group(&mut self, name: impl Into<String>) -> NodeId {
-        let dummy_body = Body::from_raw(0);
-        self.insert("Add Group", Node::new(name, dummy_body))
+        self.insert("Add Group", Node::new(name, GROUP_BODY))
     }
 
     pub fn reparent(&mut self, child_id: NodeId, new_parent_id: Option<NodeId>) -> Result<()> {
@@ -220,6 +250,23 @@ impl<K: GeometryKernel> Document<K> {
             if child_id == parent_id {
                 return Ok(());
             }
+            // A node may not be put inside its own descendant. Refusing only
+            // `child == parent` leaves the two-step version — drag A onto B,
+            // then B onto A — and what it produces is a ring of nodes that no
+            // longer reaches the root: the Outliner walks down from the roots
+            // and would never terminate, and neither would anything else that
+            // followed `parent` up. It became reachable from the mouse when the
+            // Outliner learned to draw a tree.
+            let mut up = Some(parent_id);
+            while let Some(id) = up {
+                if id == child_id {
+                    return Err(DocumentError::Cycle {
+                        child: child_id,
+                        parent: parent_id,
+                    });
+                }
+                up = self.nodes.get(id).and_then(|n| n.parent);
+            }
         }
 
         let old_parent = self.nodes.get(child_id).and_then(|n| n.parent);
@@ -227,24 +274,52 @@ impl<K: GeometryKernel> Document<K> {
             return Ok(());
         }
 
-        if let Some(old_p) = old_parent
-            && let Some(p_node) = self.nodes.get_mut(old_p)
-        {
-            p_node.children.retain(|&id| id != child_id);
+        // One transaction over up to three nodes — the child, the parent it
+        // leaves, the parent it joins — because moving a node is one act and
+        // half of it is not a state to undo into.
+        //
+        // It records history at all as of 2026-09-13. Until then this was the
+        // one editing operation outside undo: a part dragged into the wrong
+        // group in the Outliner stayed there, and Ctrl-Z reversed whatever the
+        // user had done *before* the drag, which is worse than nothing
+        // happening. Nothing in the document noticed, because the tree was
+        // reachable from one button and nothing that could be undone used it.
+        self.history.begin("Reparent");
+        if let Some(old_p) = old_parent {
+            self.amend(old_p, |n| n.children.retain(|&id| id != child_id));
         }
-
-        if let Some(c_node) = self.nodes.get_mut(child_id) {
-            c_node.parent = new_parent_id;
+        self.amend(child_id, |n| n.parent = new_parent_id);
+        if let Some(new_p) = new_parent_id {
+            self.amend(new_p, |n| {
+                if !n.children.contains(&child_id) {
+                    n.children.push(child_id);
+                }
+            });
         }
-
-        if let Some(new_p) = new_parent_id
-            && let Some(p_node) = self.nodes.get_mut(new_p)
-            && !p_node.children.contains(&child_id)
-        {
-            p_node.children.push(child_id);
-        }
+        self.history.commit();
 
         Ok(())
+    }
+
+    /// Changes one node in place, recording the before and after so that undo
+    /// and redo can move between them.
+    ///
+    /// Assumes an open transaction. A node that is not there is not an error
+    /// here: every caller has already established that it is, and a silent
+    /// no-op is better than a panic in a tree walk.
+    fn amend(&mut self, id: NodeId, change: impl FnOnce(&mut Node)) {
+        let Some(before) = self.nodes.get(id).cloned() else {
+            return;
+        };
+        let mut after = before.clone();
+        change(&mut after);
+        if after == before {
+            return;
+        }
+        if let Some(slot) = self.nodes.get_mut(id) {
+            *slot = after.clone();
+        }
+        self.history.record(Edit::Replace { id, before, after });
     }
 
     pub fn parent_of(&self, id: NodeId) -> Option<NodeId> {
@@ -476,7 +551,8 @@ impl<K: GeometryKernel> Document<K> {
         Ok(self.kernel.export_step(&bodies)?)
     }
 
-    /// Adds one node per solid in a STEP file, named after `name`.
+    /// Adds one node per solid in a STEP file, in the assembly tree the file
+    /// held, named after `name` where the file names nothing.
     ///
     /// **One transaction**, so an import of forty solids is one undo and not
     /// forty. That is not a general fix for grouping — every other edit here
@@ -487,9 +563,34 @@ impl<K: GeometryKernel> Document<K> {
     /// replacing it, which is the opposite of opening a `.w3d` and is the
     /// difference between the two operations. A `.w3d` carries a whole
     /// document, kernel and all; a STEP file carries solids.
+    ///
+    /// **A group node per assembly**, and the bodies under the group they sat
+    /// in. A group is a node with no geometry, so an imported assembly costs
+    /// one node per interior node of the file's tree and buys the one thing a
+    /// flat import cannot offer: hiding, selecting or deleting a subassembly as
+    /// the thing it is. Where the file is flat, or where a backend's reader
+    /// cannot see a tree, nothing is grouped and this behaves as it did.
+    ///
+    /// What it does **not** do is share geometry between two placements of one
+    /// part: the seam hands over a body per placement, so an assembly holding
+    /// five parts eighteen times arrives as eighteen independent bodies that
+    /// happen to have the same shape. The tree says how they are arranged, not
+    /// that any two of them are the same thing.
+    ///
+    /// Returns the body nodes, not the groups — they are what a user selects,
+    /// and [`Document::parent_of`] reaches the groups from any of them.
     pub fn import_step(&mut self, bytes: &[u8], name: &str) -> Result<Vec<NodeId>> {
         let imported = self.kernel.import_step(bytes)?;
-        let one = imported.len() == 1;
+        // The seam's structural rule, re-checked on this side of it. A backend
+        // is obliged to hand over a tree that holds together, and this is the
+        // last place that can say so with the file still in hand rather than
+        // panicking on an index much later.
+        if let Err(why) = imported.validate() {
+            return Err(DocumentError::Kernel(KernelError::Failed(format!(
+                "the imported assembly tree is not one: {why}"
+            ))));
+        }
+        let one = imported.bodies.len() == 1;
 
         let is_generic = |s: &str| {
             let t = s.trim();
@@ -497,8 +598,24 @@ impl<K: GeometryKernel> Document<K> {
         };
 
         self.history.begin("Import STEP");
-        let mut ids = Vec::with_capacity(imported.len());
-        for (n, imp) in imported.into_iter().enumerate() {
+
+        // Assemblies first, and in order: the seam guarantees a parent appears
+        // before its children, so the parent's `NodeId` is always already here
+        // by the time a child needs it. That is the whole reason the contract
+        // asks for that ordering.
+        let mut groups: Vec<NodeId> = Vec::with_capacity(imported.assemblies.len());
+        for (n, asm) in imported.assemblies.iter().enumerate() {
+            let group_name = match &asm.name {
+                Some(pname) if !is_generic(pname) => pname.clone(),
+                _ => format!("{name} assembly {}", n + 1),
+            };
+            let parent = asm.parent.map(|p| groups[p]);
+            let id = self.insert_child(Node::new(group_name, GROUP_BODY), parent);
+            groups.push(id);
+        }
+
+        let mut ids = Vec::with_capacity(imported.bodies.len());
+        for (n, imp) in imported.bodies.into_iter().enumerate() {
             self.created.push(imp.body);
             let node_name = match imp.name {
                 Some(pname) if !is_generic(&pname) => pname,
@@ -510,13 +627,32 @@ impl<K: GeometryKernel> Document<K> {
                     }
                 }
             };
-            let node = Node::new(node_name, imp.body);
-            let id = self.nodes.insert(node.clone());
-            self.history.record(Edit::Insert { id, node });
-            ids.push(id);
+            let parent = imp.parent.map(|p| groups[p]);
+            ids.push(self.insert_child(Node::new(node_name, imp.body), parent));
         }
         self.history.commit();
         Ok(ids)
+    }
+
+    /// Inserts `node` under `parent`, recording enough for undo to reverse the
+    /// link as well as the node.
+    ///
+    /// The link is two facts in two nodes — the child's `parent` and the
+    /// parent's `children` — and both are recorded: the child's by inserting it
+    /// already linked, so its `Insert` edit carries it, and the parent's as a
+    /// `Replace` of the parent against itself. Undoing an import therefore
+    /// leaves no group holding a child id that has been removed, which is the
+    /// state that would outlive the transaction otherwise.
+    ///
+    /// Assumes an open transaction; the callers here all open one.
+    fn insert_child(&mut self, mut node: Node, parent: Option<NodeId>) -> NodeId {
+        node.parent = parent;
+        let id = self.nodes.insert(node.clone());
+        self.history.record(Edit::Insert { id, node });
+        if let Some(parent) = parent {
+            self.amend(parent, |n| n.children.push(id));
+        }
+        id
     }
 
     // ---- history ------------------------------------------------------
@@ -616,7 +752,7 @@ impl<K: GeometryKernel> Document<K> {
     pub fn visible_bounds(&self) -> Aabb {
         self.nodes
             .iter()
-            .filter(|(_, n)| n.visible)
+            .filter(|(_, n)| n.visible && !n.is_group())
             .filter_map(|(_, n)| self.kernel.bounds(n.body).ok())
             .fold(Aabb::EMPTY, |acc, b| acc.union(&b))
     }
@@ -648,6 +784,7 @@ impl<K: GeometryKernel> Document<K> {
         let referenced: HashSet<u32> = self
             .nodes
             .iter()
+            .filter(|(_, n)| !n.is_group())
             .map(|(_, n)| n.body.raw())
             .chain(self.history.bodies().map(|b| b.raw()))
             .collect();

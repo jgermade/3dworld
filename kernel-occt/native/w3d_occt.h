@@ -137,15 +137,34 @@ int32_t w3d_occt_load_body(W3dOcctContext *ctx, const uint8_t *data, uint32_t le
 
 void w3d_occt_bytes_free(W3dOcctBytes *bytes);
 
-/* Several body ids, owned by the C++ side until w3d_occt_bodies_free. A STEP
- * file holds any number of solids and the caller cannot know how many before
- * reading it, so this is the one place a call answers with a list. */
+/* No parent: a solid at the file's root, or an assembly nobody contains. Chosen
+ * over a signed index because every other count across this boundary is a
+ * uint32_t, and a negative one would be the only place a caller had to look
+ * twice. */
+#define W3D_OCCT_NO_PARENT UINT32_MAX
+
+/* What one STEP file held, owned by the C++ side until w3d_occt_import_free: a
+ * body per solid *placement*, and the assembly tree those placements sat in.
+ * A STEP file holds any number of solids and the caller cannot know how many
+ * before reading it, so this is the one place a call answers with a list.
+ *
+ * The tree's interior is a second pair of arrays rather than more columns on
+ * the first: an assembly node has a name and a parent and no solid, so an
+ * entry in `ids` for one would be a body that does not exist. `parents[i]` is
+ * an index into the assembly arrays, or W3D_OCCT_NO_PARENT, and an assembly's
+ * own parent is always an *earlier* index than itself — the walk that fills
+ * these emits a parent before its children, which is what lets the Rust side
+ * build the tree in one pass. */
 typedef struct {
   const uint32_t *ids;
   const char *const *names; /* Nullable array of null-terminated strings for product names */
+  const uint32_t *parents;  /* len entries; W3D_OCCT_NO_PARENT for a root solid */
   uint32_t len;
-  void *owner; /* opaque; pass the struct back to bodies_free */
-} W3dOcctBodies;
+  const char *const *assembly_names;   /* assemblies entries, nullable strings */
+  const uint32_t *assembly_parents;    /* assemblies entries; earlier index or NO_PARENT */
+  uint32_t assemblies;
+  void *owner; /* opaque; pass the struct back to import_free */
+} W3dOcctImport;
 
 /* ---- STEP -----------------------------------------------------------------
  *
@@ -177,9 +196,9 @@ int32_t w3d_occt_export_step(W3dOcctContext *ctx, const uint32_t *bodies, uint32
  * build reserves for "this program cannot read STEP at all" and never says,
  * because it can. */
 int32_t w3d_occt_import_step(W3dOcctContext *ctx, const uint8_t *data, uint32_t len,
-                             W3dOcctBodies *out);
+                             W3dOcctImport *out);
 
-void w3d_occt_bodies_free(W3dOcctBodies *bodies);
+void w3d_occt_import_free(W3dOcctImport *imported);
 
 /* The message behind the last W3D_OCCT_ERR_FAILED, for a log. Never for a
  * caller to match on. Valid until the next call on this thread. */

@@ -246,6 +246,11 @@ step-check:
 	    `python3 tools/step_samples.py --list import`
 	$(CARGO) run -q -p w3d-kernel-occt --example import_step -- --must-refuse \
 	    `python3 tools/step_samples.py --list refuse`
+	@# The one sample whose *arrangement* is known, weighed against it: five
+	@# parts placed eighteen times, three levels deep. `import_step` above
+	@# reports whatever came out; this one knows what should.
+	$(CARGO) run -q -p w3d-kernel-occt --example assembly_tree -- \
+	    samples/step/as1_pe_203.stp
 
 ## Fetches those files into a gitignored samples/, pinned by SHA-256. Not run
 ## from any build: a build that reaches the network is not one anybody can
