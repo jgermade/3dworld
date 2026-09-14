@@ -913,14 +913,21 @@ impl<K: GeometryKernel> Editor<K> {
         }
         self.doc.begin_transaction("Fillet");
         let mut count = 0;
+        // The kernel's own reason, kept for the status bar. Since 2026-09-14 a
+        // backend may honestly not blend an edge at all — the pure-Rust one
+        // says so rather than returning the body unchanged — and "fillet failed on
+        // selected objects" would send a user looking for a fault in their
+        // model instead of at the build they are running.
+        let mut why = None;
         for id in selected {
-            if self.doc.fillet(id, radius).is_ok() {
-                count += 1;
+            match self.doc.fillet(id, radius) {
+                Ok(()) => count += 1,
+                Err(e) => why = Some(e.to_string()),
             }
         }
         self.doc.commit_transaction();
         if count == 0 {
-            Err(String::from("fillet failed on selected objects"))
+            Err(why.unwrap_or_else(|| String::from("fillet failed on selected objects")))
         } else {
             Ok(format!("filleted {count} object(s)"))
         }
@@ -933,14 +940,21 @@ impl<K: GeometryKernel> Editor<K> {
         }
         self.doc.begin_transaction("Chamfer");
         let mut count = 0;
+        // The kernel's own reason, kept for the status bar. Since 2026-09-14 a
+        // backend may honestly not blend an edge at all — the pure-Rust one
+        // says so rather than returning the body unchanged — and "chamfer failed on
+        // selected objects" would send a user looking for a fault in their
+        // model instead of at the build they are running.
+        let mut why = None;
         for id in selected {
-            if self.doc.chamfer(id, distance).is_ok() {
-                count += 1;
+            match self.doc.chamfer(id, distance) {
+                Ok(()) => count += 1,
+                Err(e) => why = Some(e.to_string()),
             }
         }
         self.doc.commit_transaction();
         if count == 0 {
-            Err(String::from("chamfer failed on selected objects"))
+            Err(why.unwrap_or_else(|| String::from("chamfer failed on selected objects")))
         } else {
             Ok(format!("chamfered {count} object(s)"))
         }
@@ -2219,6 +2233,33 @@ mod tests {
             rows.len(),
             e.document().len(),
             "a node was lost or drawn twice"
+        );
+    }
+    #[test]
+    fn a_finished_sketch_extrudes_the_shape_that_was_drawn() {
+        // The path this whole session was about, end to end through the app: a
+        // user clicks points, presses Finish, and gets a solid of *that* shape.
+        // Until 2026-09-14 every sketch became a 20 x 20 slab, on every backend,
+        // because a `Profile::Polygon` was thrown away and replaced with two
+        // hard-coded numbers. The fake kernel does not do geometry, so what can
+        // be asserted here is the extent and the placement — which is exactly
+        // what was wrong.
+        let mut e = editor();
+        e.run(Command::EnterSketchMode);
+        for (x, y) in [(0.0, 0.0), (6.0, 0.0), (6.0, 3.0), (0.0, 3.0)] {
+            e.run(Command::AddSketchPoint(x, y));
+        }
+        e.run(Command::FinishSketch);
+
+        assert_eq!(e.document().len(), 1, "{}", e.status());
+        let id = e.document().nodes().next().expect("the sketched solid").0;
+        let bounds = e.document().bounds(id).expect("bounds");
+        // 6 by 3, drawn away from the origin, standing on the plane it was
+        // sketched on and 20 deep — not a 20 x 20 slab centred on it.
+        assert!(
+            (bounds.min - Vec3::new(0.0, 0.0, 0.0)).length() < 1e-9
+                && (bounds.max - Vec3::new(6.0, 3.0, 20.0)).length() < 1e-9,
+            "a 6 x 3 sketch extruded 20 came out as {bounds:?}"
         );
     }
 }

@@ -321,9 +321,18 @@ pub fn run<K: GeometryKernel>(k: &mut K, tol: Tolerance, quality: Quality) -> Re
         checks,
         "fillet creates a new body and leaves original untouched",
         {
+            // Blending is declinable: a rolling-ball surface is a feature a
+            // kernel either has or has not, and `TruckKernel` has not. What is
+            // *not* conforming is answering with the body unchanged, which is
+            // what it did until 2026-09-14 — see the geometry half, where a
+            // fillet is weighed.
             let a = k.create_box(Vec3::splat(4.0)).map_err(|e| e.to_string())?;
             let before = k.bounds(a).map_err(|e| e.to_string())?;
-            let filleted = k.fillet(a, 0.5).map_err(|e| e.to_string())?;
+            let filleted = match k.fillet(a, 0.5) {
+                Ok(b) => b,
+                Err(KernelError::Unsupported(_)) => return Ok(()),
+                Err(e) => return Err(format!("filleting a 4-cube at 0.5 failed: {e}")),
+            };
             require(
                 filleted != a,
                 "fillet returned the same body handle".to_string(),
@@ -340,6 +349,9 @@ pub fn run<K: GeometryKernel>(k: &mut K, tol: Tolerance, quality: Quality) -> Re
         checks,
         "fillet with non-positive radius returns Degenerate",
         {
+            // A backend that cannot blend at all still has to tell a bad radius
+            // from a missing feature, because the two send a user to different
+            // places — the same rule STEP's two directions follow.
             let a = k.create_box(Vec3::splat(2.0)).map_err(|e| e.to_string())?;
             match k.fillet(a, 0.0) {
                 Err(KernelError::Degenerate(_)) => Ok(()),
@@ -536,10 +548,21 @@ pub fn run<K: GeometryKernel>(k: &mut K, tol: Tolerance, quality: Quality) -> Re
                 "excessive distance chamfer accepted",
             )?;
 
-            let f = k.fillet(b, 1.0).map_err(|e| e.to_string())?;
-            require(f != b, "fillet returned same handle")?;
-            let c = k.chamfer(b, 1.0).map_err(|e| e.to_string())?;
-            require(c != b, "chamfer returned same handle")
+            // Declinable, like STEP: a backend with no blending answers
+            // `Unsupported` from both. What it may not do is refuse one and
+            // offer the other, which would leave a user able to round an edge
+            // and not to cut it, or the reverse.
+            match (k.fillet(b, 1.0), k.chamfer(b, 1.0)) {
+                (Ok(f), Ok(c)) => {
+                    require(f != b, "fillet returned same handle")?;
+                    require(c != b, "chamfer returned same handle")
+                }
+                (Err(KernelError::Unsupported(_)), Err(KernelError::Unsupported(_))) => Ok(()),
+                (f, c) => Err(format!(
+                    "one of the two edge operations is offered and the other is not: \
+                     fillet {f:?}, chamfer {c:?}"
+                )),
+            }
         }
     );
 
@@ -560,12 +583,21 @@ pub fn run<K: GeometryKernel>(k: &mut K, tol: Tolerance, quality: Quality) -> Re
                 "negative distance extrusion accepted",
             )?;
 
-            let b = k.extrude(&rect, 20.0).map_err(|e| e.to_string())?;
+            let b = match k.extrude(&rect, 20.0) {
+                Ok(b) => b,
+                Err(KernelError::Unsupported(_)) => return Ok(()),
+                Err(e) => return Err(format!("extruding a 10 x 10 by 20 failed: {e}")),
+            };
             let bounds = k.bounds(b).map_err(|e| e.to_string())?;
+            // On the plane, not straddling it: the trait extrudes a profile on
+            // the XY plane along +Z, so a 20-deep extrusion runs from 0 to 20.
+            // This check asserted the centred box until 2026-09-14, which is
+            // what both backends happened to do because both called
+            // `create_box` with the profile's numbers.
             require(
                 boxes_close(
                     &bounds,
-                    &Aabb::centered(Vec3::new(10.0, 10.0, 20.0)),
+                    &Aabb::new(Vec3::new(-5.0, -5.0, 0.0), Vec3::new(5.0, 5.0, 20.0)),
                     tol.linear,
                 ),
                 format!("extrusion bounds mismatch: got {bounds:?}"),
@@ -822,9 +854,22 @@ pub fn run<K: GeometryKernel>(k: &mut K, tol: Tolerance, quality: Quality) -> Re
                 width: 10.0,
                 height: 20.0,
             };
-            let body = k
-                .revolve(&prof, Vec3::ZERO, Vec3::Y, std::f64::consts::PI * 2.0)
-                .map_err(|e| e.to_string())?;
+            // The axis stands clear of the profile. It ran through the middle
+            // until 2026-09-14, which sweeps each half of the profile over the
+            // other: the result covers itself twice and is not a solid.
+            // OpenCASCADE refuses it outright — correctly — and the only reason
+            // this check ever passed is that the backend was substituting a
+            // cylinder for the profile and never revolving anything.
+            let body = match k.revolve(
+                &prof,
+                Vec3::new(-20.0, 0.0, 0.0),
+                Vec3::Y,
+                std::f64::consts::PI * 2.0,
+            ) {
+                Ok(body) => body,
+                Err(KernelError::Unsupported(_)) => return Ok(()),
+                Err(e) => return Err(format!("revolving a 10 x 20 rectangle failed: {e}")),
+            };
             let bounds = k.bounds(body).map_err(|e| e.to_string())?;
             require(!bounds.is_empty(), "revolved body bounds are empty")?;
             let mesh = k
@@ -866,7 +911,11 @@ pub fn run<K: GeometryKernel>(k: &mut K, tol: Tolerance, quality: Quality) -> Re
                     y_axis: Vec3::Y,
                 },
             ];
-            let body = k.loft(&profiles, &planes).map_err(|e| e.to_string())?;
+            let body = match k.loft(&profiles, &planes) {
+                Ok(body) => body,
+                Err(KernelError::Unsupported(_)) => return Ok(()),
+                Err(e) => return Err(format!("lofting two discs failed: {e}")),
+            };
             let bounds = k.bounds(body).map_err(|e| e.to_string())?;
             require(!bounds.is_empty(), "lofted body bounds are empty")?;
             let mesh = k
@@ -1294,6 +1343,327 @@ fn geometry_checks<K: GeometryKernel>(
         }
     );
 
+    // -- Operations that have to have happened ------------------------------
+    //
+    // The contract half already asks whether `extrude`, `revolve`, `sweep` and
+    // `loft` answer with a body that has bounds and a mesh. That is worth
+    // asking and it is not enough, and what it missed is worth writing down:
+    // **every backend here reduced a `Profile` to a rectangle or a circle and
+    // threw a polygon away**, substituting a 20 x 20 slab for whatever the user
+    // had drawn, and both `fillet` and `chamfer` on the pure-Rust backend
+    // returned a copy of the body. All of it passed, because a copy has bounds
+    // and a slab has a mesh.
+    //
+    // So these weigh the answer against arithmetic, the same way the boolean
+    // checks do. Arithmetic is what a placeholder cannot fake: the area of an
+    // L is not the area of its bounding box, a cone is not a cylinder, and a
+    // rounded cube weighs less than a cube.
+    //
+    // Every one of them is declinable — `Unsupported` from a backend that does
+    // not do the operation is a conforming answer, and `TruckKernel` gives it
+    // for three of them. What none of them may do is answer with the wrong
+    // solid.
+
+    check!(
+        checks,
+        "an extrusion is the profile it was given, in the place the contract says",
+        {
+            // The L is the case that matters: its area, 12, is neither its
+            // bounding box's 16 nor anything a rectangle or a circle can stand
+            // in for, so a backend that substitutes a primitive is caught by
+            // the number rather than by the shape.
+            let l_shape = Profile::Polygon {
+                vertices: vec![
+                    (0.0, 0.0),
+                    (4.0, 0.0),
+                    (4.0, 2.0),
+                    (2.0, 2.0),
+                    (2.0, 4.0),
+                    (0.0, 4.0),
+                ],
+            };
+            for (profile, distance, volume, size, what) in [
+                (
+                    Profile::Rectangle {
+                        width: 6.0,
+                        height: 4.0,
+                    },
+                    3.0,
+                    72.0,
+                    Vec3::new(6.0, 4.0, 3.0),
+                    "6 x 4 by 3",
+                ),
+                (
+                    Profile::Circle { radius: 5.0 },
+                    4.0,
+                    core::f64::consts::PI * 25.0 * 4.0,
+                    Vec3::new(10.0, 10.0, 4.0),
+                    "a disc of radius 5 by 4",
+                ),
+                (
+                    l_shape,
+                    3.0,
+                    36.0,
+                    Vec3::new(4.0, 4.0, 3.0),
+                    "an L of area 12 by 3",
+                ),
+            ] {
+                let body = match k.extrude(&profile, distance) {
+                    Ok(body) => body,
+                    Err(KernelError::Unsupported(_)) => continue,
+                    Err(e) => return Err(format!("extruding {what} failed: {e}")),
+                };
+                let bounds = k.bounds(body).map_err(|e| e.to_string())?;
+                // A curved profile is only as exact as its tessellation, so the
+                // disc is held to a fiftieth where the straight ones are held
+                // to a thousandth.
+                let slack = if matches!(profile, Profile::Circle { .. }) {
+                    2.0e-2
+                } else {
+                    1.0e-3
+                };
+                let got = volume_of(k, body, quality)?;
+                require(
+                    within(got, volume, slack),
+                    format!("extruding {what} encloses {got}, not {volume}"),
+                )?;
+                let drawn = bounds.size();
+                require(
+                    (drawn - size).length() <= size.length() * slack,
+                    format!("extruding {what} spans {drawn:?}, not {size:?}"),
+                )?;
+                // `+Z by distance` is what the trait says, so the solid sits on
+                // the plane the profile was drawn on rather than straddling it.
+                require(
+                    close(bounds.min.z, 0.0, distance * 1.0e-3)
+                        && close(bounds.max.z, distance, distance * 1.0e-3),
+                    format!(
+                        "extruding {what} put the solid between z = {} and z = {}, and the \
+                         contract extrudes a profile on the XY plane along +Z",
+                        bounds.min.z, bounds.max.z
+                    ),
+                )?;
+            }
+            Ok(())
+        }
+    );
+
+    check!(
+        checks,
+        "a revolution is the profile turned about the axis it was given",
+        {
+            // The axis is deliberately *beside* the profile rather than through
+            // it. A profile is centred on the origin, says the contract, so an
+            // axis through the origin cuts it in half and a full turn sweeps
+            // each half over the other: the result covers itself twice, which is
+            // not a solid and not a thing to hold a kernel to. The first draft
+            // of this check did exactly that, and asked for a sphere.
+            //
+            // Beside the axis, Pappus gives the answer exactly: a shape of area
+            // A whose centroid is R from the axis sweeps 2 pi R A. A disc of
+            // radius 2 turned about a line 5 away is a torus of 40 pi^2; a
+            // 4 x 6 rectangle turned about a line 5 from its centre is a tube
+            // with radii 7 and 3, which is 240 pi. Both are also the check that
+            // the *axis* was read: ignore `axis_origin` and a torus becomes a
+            // sphere.
+            let turn = core::f64::consts::PI * 2.0;
+            let pi = core::f64::consts::PI;
+            for (profile, origin, volume, size, what) in [
+                (
+                    Profile::Circle { radius: 2.0 },
+                    Vec3::new(5.0, 0.0, 0.0),
+                    40.0 * pi * pi,
+                    Vec3::new(14.0, 4.0, 14.0),
+                    "a disc of radius 2 about a line 5 away",
+                ),
+                (
+                    Profile::Rectangle {
+                        width: 4.0,
+                        height: 6.0,
+                    },
+                    Vec3::new(-5.0, 0.0, 0.0),
+                    240.0 * pi,
+                    Vec3::new(14.0, 6.0, 14.0),
+                    "a 4 x 6 rectangle about a line 5 away",
+                ),
+                (
+                    Profile::Polygon {
+                        vertices: vec![(-2.0, -3.0), (2.0, -3.0), (2.0, 3.0), (-2.0, 3.0)],
+                    },
+                    Vec3::new(-5.0, 0.0, 0.0),
+                    240.0 * pi,
+                    Vec3::new(14.0, 6.0, 14.0),
+                    "the same rectangle written as a polygon",
+                ),
+            ] {
+                let body = match k.revolve(&profile, origin, Vec3::Y, turn) {
+                    Ok(body) => body,
+                    Err(KernelError::Unsupported(_)) => continue,
+                    Err(e) => return Err(format!("revolving {what} failed: {e}")),
+                };
+                let got = volume_of(k, body, quality)?;
+                require(
+                    within(got, volume, 2.0e-2),
+                    format!("revolving {what} encloses {got}, not {volume}"),
+                )?;
+                let drawn = k.bounds(body).map_err(|e| e.to_string())?.size();
+                require(
+                    (drawn - size).length() <= size.length() * 2.0e-2,
+                    format!("revolving {what} spans {drawn:?}, not {size:?}"),
+                )?;
+            }
+            Ok(())
+        }
+    );
+
+    check!(checks, "a sweep is the profile carried along the path", {
+        // A disc of radius 2 taken 10 along z is a cylinder: pi * 4 * 10. The
+        // path is given, so unlike a revolution this needs nothing from the
+        // contract about where a profile sits — and a backend that ignores the
+        // path is caught by the length rather than by the volume alone.
+        let path = [Vec3::ZERO, Vec3::new(0.0, 0.0, 10.0)];
+        for (profile, volume, size, what) in [
+            (
+                Profile::Circle { radius: 2.0 },
+                core::f64::consts::PI * 4.0 * 10.0,
+                Vec3::new(4.0, 4.0, 10.0),
+                "a disc of radius 2",
+            ),
+            (
+                Profile::Polygon {
+                    vertices: vec![(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)],
+                },
+                40.0,
+                Vec3::new(2.0, 2.0, 10.0),
+                "a 2 x 2 square as a polygon",
+            ),
+        ] {
+            let body = match k.sweep(&profile, &path) {
+                Ok(body) => body,
+                Err(KernelError::Unsupported(_)) => continue,
+                Err(e) => return Err(format!("sweeping {what} failed: {e}")),
+            };
+            let got = volume_of(k, body, quality)?;
+            require(
+                within(got, volume, 2.0e-2),
+                format!("sweeping {what} 10 along z encloses {got}, not {volume}"),
+            )?;
+            let drawn = k.bounds(body).map_err(|e| e.to_string())?.size();
+            require(
+                (drawn - size).length() <= size.length() * 2.0e-2,
+                format!("sweeping {what} 10 along z spans {drawn:?}, not {size:?}"),
+            )?;
+        }
+        Ok(())
+    });
+
+    check!(
+        checks,
+        "a loft is a cone between two circles, not a cylinder",
+        {
+            // Two discs, 10 and 5, twenty apart: a truncated cone, and
+            // pi * h * (r1^2 + r1 r2 + r2^2) / 3 is 3665.19. A cylinder of either
+            // radius is 6283 or 1571, so the shape of the answer is in the number —
+            // which is the whole reason the radii differ.
+            let profiles = [
+                Profile::Circle { radius: 10.0 },
+                Profile::Circle { radius: 5.0 },
+            ];
+            let planes = [
+                crate::SketchPlane::default(),
+                crate::SketchPlane {
+                    origin: Vec3::new(0.0, 0.0, 20.0),
+                    x_axis: Vec3::X,
+                    y_axis: Vec3::Y,
+                },
+            ];
+            let body = match k.loft(&profiles, &planes) {
+                Ok(body) => body,
+                Err(KernelError::Unsupported(_)) => return Ok(()),
+                Err(e) => return Err(format!("lofting two discs failed: {e}")),
+            };
+            let want = core::f64::consts::PI * 20.0 * (100.0 + 50.0 + 25.0) / 3.0;
+            let got = volume_of(k, body, quality)?;
+            require(
+                within(got, want, 3.0e-2),
+                format!(
+                    "a cone from a disc of 10 to a disc of 5, twenty apart, encloses {got}, not {want}"
+                ),
+            )?;
+            let drawn = k.bounds(body).map_err(|e| e.to_string())?.size();
+            let size = Vec3::new(20.0, 20.0, 20.0);
+            require(
+                (drawn - size).length() <= size.length() * 3.0e-2,
+                format!("the cone spans {drawn:?}, not {size:?}"),
+            )
+        }
+    );
+
+    check!(
+        checks,
+        "a fillet takes material off, and a chamfer of the same size takes more",
+        {
+            // The check that a placeholder cannot pass: `fillet` and `chamfer`
+            // returned a *copy of the body* on the pure-Rust backend, and every
+            // check before this one — a new handle, an untouched original,
+            // bounds that are not empty — passed on a copy.
+            //
+            // Rounding the twelve edges of a 10-cube at radius 1 removes
+            // (1 - pi/4) of each corner's square, about 21 of 1000; cutting them
+            // flat at the same setback removes half of it, about 48. So the
+            // absolute numbers depend on how a kernel blends the eight
+            // three-edge corners and the *order* does not: a chamfer takes more
+            // than a fillet, and both take something. Neither may touch the
+            // bounding box.
+            let cube = k.create_box(Vec3::splat(10.0)).map_err(|e| e.to_string())?;
+            let before = k.bounds(cube).map_err(|e| e.to_string())?;
+            let plain = volume_of(k, cube, quality)?;
+
+            let rounded = match k.fillet(cube, 1.0) {
+                Ok(b) => Some(volume_of(k, b, quality).map(|v| (b, v))?),
+                Err(KernelError::Unsupported(_)) => None,
+                Err(e) => return Err(format!("filleting a 10-cube at radius 1 failed: {e}")),
+            };
+            let cut = match k.chamfer(cube, 1.0) {
+                Ok(b) => Some(volume_of(k, b, quality).map(|v| (b, v))?),
+                Err(KernelError::Unsupported(_)) => None,
+                Err(e) => return Err(format!("chamfering a 10-cube at 1 failed: {e}")),
+            };
+
+            for (body, got, what) in [(rounded, "fillet"), (cut, "chamfer")]
+                .into_iter()
+                .filter_map(|(r, what)| r.map(|(b, v)| (b, v, what)))
+            {
+                require(
+                    got < plain * (1.0 - 1.0e-3),
+                    format!(
+                        "a {what} of a 10-cube left {got} of the {plain} it started with, so it \
+                         removed nothing — a copy of the body is not a {what}"
+                    ),
+                )?;
+                require(
+                    got > plain * 0.9,
+                    format!("a {what} of a 10-cube at 1 left only {got} of {plain}"),
+                )?;
+                require(
+                    boxes_close(&k.bounds(body).map_err(|e| e.to_string())?, &before, 1.0e-6),
+                    format!("a {what} changed the bounding box of a 10-cube"),
+                )?;
+            }
+            if let (Some((_, round)), Some((_, flat))) = (rounded, cut) {
+                require(
+                    flat < round,
+                    format!(
+                        "a chamfer left {flat} and a fillet left {round}: cutting a corner flat \
+                         removes more than rounding it does, so one of them is not doing what it \
+                         is named after"
+                    ),
+                )?;
+            }
+            Ok(())
+        }
+    );
+
     // -- Degenerate operands that overlap -----------------------------------
     //
     // Everything above is the *separable* half: operands that share no volume,
@@ -1445,6 +1815,46 @@ fn geometry_checks<K: GeometryKernel>(
                 )?;
             }
             Ok(())
+        }
+    );
+
+    check!(
+        checks,
+        "a profile that crosses itself is refused, or makes something that can be drawn",
+        {
+            // A bowtie: the outline crosses itself in the middle, so "inside"
+            // is not a thing the profile defines. Refusing is the better answer
+            // and what both backends now do, through `Profile::validate` — one
+            // rule, in the seam, rather than each backend's sweeper deciding for
+            // itself. What this forbids is the third outcome, an `Ok` carrying a
+            // body that cannot be measured or drawn, which is how a modeller
+            // ends up with a node in the Outliner and nothing in the viewport.
+            // Before 2026-09-14 the pure-Rust backend answered this with a
+            // 20 x 20 x 1 slab enclosing 400 — a hundred times the profile's own
+            // bounding prism — and that is what found all of this.
+            //
+            // The bound is the profile's own bounding prism, 2 x 2 x 1: whatever
+            // a backend decides the inside is, it cannot be more material than
+            // that.
+            let bowtie = Profile::Polygon {
+                vertices: vec![(0.0, 0.0), (2.0, 2.0), (2.0, 0.0), (0.0, 2.0)],
+            };
+            match k.extrude(&bowtie, 1.0) {
+                Err(_) => Ok(()),
+                Ok(b) => {
+                    let got = volume_of(k, b, quality).map_err(|e| {
+                        format!(
+                            "a self-intersecting profile extruded into a body that cannot be                              measured or drawn ({e}); refusing it would have been an answer"
+                        )
+                    })?;
+                    require(
+                        got > 0.0 && got <= 4.0 + 4.0 * 1.0e-3,
+                        format!(
+                            "a bowtie 2 x 2 extruded 1 encloses {got}, and its own bounding                              prism is 4"
+                        ),
+                    )
+                }
+            }
         }
     );
 

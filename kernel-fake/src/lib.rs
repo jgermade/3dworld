@@ -296,17 +296,43 @@ impl GeometryKernel for FakeKernel {
         Ok(self.insert(shape))
     }
 
+    /// A box of the profile's extent, standing on the plane — which is what the
+    /// contract says an extrusion does, and what this got wrong in the same way
+    /// both real backends did until 2026-09-14: it centred the solid on the
+    /// plane instead of standing it on it.
+    ///
+    /// A bounding box is the honest answer *here*, because this backend's whole
+    /// contract with the suite is that it does not do geometry: `does_geometry`
+    /// is `false` and the geometry half — which weighs an L against its own
+    /// area — is not run against it. What it still owes is the extent and the
+    /// placement, and a polygon's extent comes from its vertices rather than
+    /// from a number invented on the spot.
     fn extrude(&mut self, profile: &Profile, distance: f64) -> Result<Body> {
         if distance <= 0.0 {
             return Err(KernelError::Degenerate("extrude distance must be positive"));
         }
-        match profile {
-            Profile::Rectangle { width, height } => {
-                self.create_box(Vec3::new(*width, *height, distance))
+        profile.validate()?;
+        let (size, centre) = match profile {
+            Profile::Rectangle { width, height } => (Vec3::new(*width, *height, distance), None),
+            Profile::Circle { radius } => (Vec3::new(2.0 * radius, 2.0 * radius, distance), None),
+            Profile::Polygon { vertices } => {
+                let (mut lo, mut hi) = ((f64::MAX, f64::MAX), (f64::MIN, f64::MIN));
+                for (x, y) in vertices {
+                    lo = (lo.0.min(*x), lo.1.min(*y));
+                    hi = (hi.0.max(*x), hi.1.max(*y));
+                }
+                (
+                    Vec3::new(hi.0 - lo.0, hi.1 - lo.1, distance),
+                    Some(Vec3::new((lo.0 + hi.0) / 2.0, (lo.1 + hi.1) / 2.0, 0.0)),
+                )
             }
-            Profile::Circle { radius } => self.create_cylinder(*radius, distance),
-            Profile::Polygon { .. } => self.create_box(Vec3::new(10.0, 10.0, distance)),
-        }
+        };
+        let body = self.create_box(size)?;
+        // Up by half the depth, so the solid runs from the plane to `distance`
+        // rather than straddling it; and across to where the profile actually
+        // is, for a polygon that was not drawn around the origin.
+        let offset = centre.unwrap_or(Vec3::ZERO) + Vec3::new(0.0, 0.0, distance / 2.0);
+        self.transform(body, &Mat4::from_translation(offset))
     }
 
     fn revolve(

@@ -59,6 +59,61 @@ struct RawImport {
     owner: *mut core::ffi::c_void,
 }
 
+/// A profile and the plane it sits on, as the shim takes it.
+///
+/// Mirrors `W3dOcctProfile` in `native/w3d_occt.h`, field for field. The
+/// `vertices` pointer borrows a buffer the caller keeps alive for the length of
+/// the call and no longer, which is why [`RawProfile::new`] returns it beside
+/// the struct rather than hiding it.
+#[repr(C)]
+struct RawProfile {
+    kind: i32,
+    p1: f64,
+    p2: f64,
+    vertices: *const f64,
+    vertex_count: u32,
+    origin: [f64; 3],
+    x_axis: [f64; 3],
+    y_axis: [f64; 3],
+}
+
+impl RawProfile {
+    /// The descriptor, and the vertex buffer it points into.
+    ///
+    /// Validated first, in `w3d-kernel`, so that a sketch that is not a region
+    /// — fewer than three corners, no area, an outline that crosses itself — is
+    /// refused by the same rule in every backend rather than by whatever each
+    /// one's sweeper happens to do with it.
+    fn new(profile: &Profile, plane: &SketchPlane) -> Result<(Self, Vec<f64>)> {
+        profile.validate()?;
+        let (kind, p1, p2, flat) = match profile {
+            Profile::Rectangle { width, height } => (0, *width, *height, Vec::new()),
+            Profile::Circle { radius } => (1, *radius, 0.0, Vec::new()),
+            Profile::Polygon { vertices } => (
+                2,
+                0.0,
+                0.0,
+                vertices.iter().flat_map(|(u, v)| [*u, *v]).collect(),
+            ),
+        };
+        let raw = Self {
+            kind,
+            p1,
+            p2,
+            vertices: if flat.is_empty() {
+                core::ptr::null()
+            } else {
+                flat.as_ptr()
+            },
+            vertex_count: u32::try_from(flat.len() / 2).unwrap_or(0),
+            origin: [plane.origin.x, plane.origin.y, plane.origin.z],
+            x_axis: [plane.x_axis.x, plane.x_axis.y, plane.x_axis.z],
+            y_axis: [plane.y_axis.x, plane.y_axis.y, plane.y_axis.z],
+        };
+        Ok((raw, flat))
+    }
+}
+
 /// The shim's `W3D_OCCT_NO_PARENT`: a solid at the file's root, or an assembly
 /// nobody contains.
 const NO_PARENT: u32 = u32::MAX;
@@ -139,36 +194,31 @@ unsafe extern "C" {
         thickness: f64,
         out: *mut u32,
     ) -> i32;
+    fn w3d_occt_extrude(
+        ctx: *mut Context,
+        profile: *const RawProfile,
+        distance: f64,
+        out: *mut u32,
+    ) -> i32;
     fn w3d_occt_revolve(
         ctx: *mut Context,
-        profile_kind: i32,
-        p1: f64,
-        p2: f64,
-        ax_ox: f64,
-        ax_oy: f64,
-        ax_oz: f64,
-        ax_dx: f64,
-        ax_dy: f64,
-        ax_dz: f64,
+        profile: *const RawProfile,
+        axis_origin: *const f64,
+        axis_dir: *const f64,
         angle_rad: f64,
         out: *mut u32,
     ) -> i32;
     fn w3d_occt_sweep(
         ctx: *mut Context,
-        profile_kind: i32,
-        p1: f64,
-        p2: f64,
+        profile: *const RawProfile,
         pts: *const f64,
         pt_count: u32,
         out: *mut u32,
     ) -> i32;
     fn w3d_occt_loft(
         ctx: *mut Context,
-        profile_kind: i32,
-        p1: f64,
-        p2: f64,
-        planes: *const f64,
-        plane_count: u32,
+        profiles: *const RawProfile,
+        profile_count: u32,
         out: *mut u32,
     ) -> i32;
     fn w3d_occt_topology(ctx: *mut Context, body: u32, out4: *mut u32) -> i32;
@@ -356,24 +406,20 @@ impl GeometryKernel for OcctKernel {
         Ok(Body::from_raw(id))
     }
 
+    /// A prism over the profile's own outline, standing on the plane it was
+    /// drawn on — which is what the trait says and what this did not do. It
+    /// called `create_box` or `create_cylinder` with the profile's two numbers,
+    /// so a sketched polygon became a 20 x 20 slab, centred on the plane
+    /// instead of standing on it.
     fn extrude(&mut self, profile: &Profile, distance: f64) -> Result<Body> {
         if distance <= 0.0 {
             return Err(KernelError::Degenerate("extrude distance must be positive"));
         }
-        match profile {
-            Profile::Rectangle { width, height } => {
-                self.create_box(Vec3::new(*width, *height, distance))
-            }
-            Profile::Circle { radius } => self.create_cylinder(*radius, distance),
-            Profile::Polygon { vertices } => {
-                if vertices.len() < 3 {
-                    return Err(KernelError::Degenerate(
-                        "polygon profile needs at least 3 vertices",
-                    ));
-                }
-                self.create_box(Vec3::new(20.0, 20.0, distance))
-            }
-        }
+        let (raw, _vertices) = RawProfile::new(profile, &SketchPlane::default())?;
+        let mut id = 0u32;
+        // SAFETY: `raw` borrows `_vertices`, which outlives the call.
+        check_new(unsafe { w3d_occt_extrude(self.ctx, &raw, distance, &mut id) })?;
+        Ok(Body::from_raw(id))
     }
 
     fn revolve(
@@ -386,24 +432,20 @@ impl GeometryKernel for OcctKernel {
         if angle_rad <= 0.0 {
             return Err(KernelError::Degenerate("revolve angle must be positive"));
         }
-        let (kind, p1, p2) = match profile {
-            Profile::Rectangle { width, height } => (0i32, *width, *height),
-            Profile::Circle { radius } => (1i32, *radius, 0.0),
-            Profile::Polygon { .. } => (0i32, 10.0, 10.0),
-        };
+        if axis_dir.length() <= 0.0 {
+            return Err(KernelError::Degenerate("revolve axis has no direction"));
+        }
+        let (raw, _vertices) = RawProfile::new(profile, &SketchPlane::default())?;
+        let origin = [axis_origin.x, axis_origin.y, axis_origin.z];
+        let dir = [axis_dir.x, axis_dir.y, axis_dir.z];
         let mut id = 0u32;
+        // SAFETY: `raw` borrows `_vertices`; all three outlive the call.
         check_new(unsafe {
             w3d_occt_revolve(
                 self.ctx,
-                kind,
-                p1,
-                p2,
-                axis_origin.x,
-                axis_origin.y,
-                axis_origin.z,
-                axis_dir.x,
-                axis_dir.y,
-                axis_dir.z,
+                &raw,
+                origin.as_ptr(),
+                dir.as_ptr(),
                 angle_rad,
                 &mut id,
             )
@@ -417,45 +459,69 @@ impl GeometryKernel for OcctKernel {
                 "sweep path requires at least 2 points",
             ));
         }
-        let (kind, p1, p2) = match profile {
-            Profile::Rectangle { width, height } => (0i32, *width, *height),
-            Profile::Circle { radius } => (1i32, *radius, 0.0),
-            Profile::Polygon { .. } => (0i32, 10.0, 10.0),
+        // The profile is taken to sit at the path's first point, which is where
+        // a sketch plane's origin is when a user draws one there.
+        let plane = SketchPlane {
+            origin: path_points[0],
+            ..SketchPlane::default()
         };
+        let (raw, _vertices) = RawProfile::new(profile, &plane)?;
         let flat_pts: Vec<f64> = path_points.iter().flat_map(|p| [p.x, p.y, p.z]).collect();
         let mut id = 0u32;
+        // SAFETY: `raw` borrows `_vertices`; both, and `flat_pts`, outlive the call.
         check_new(unsafe {
             w3d_occt_sweep(
                 self.ctx,
-                kind,
-                p1,
-                p2,
+                &raw,
                 flat_pts.as_ptr(),
-                path_points.len() as u32,
+                u32::try_from(path_points.len()).unwrap_or(u32::MAX),
                 &mut id,
             )
         })?;
         Ok(Body::from_raw(id))
     }
 
-    fn loft(&mut self, profiles: &[Profile], _planes: &[SketchPlane]) -> Result<Body> {
+    /// Through the sections, each on the plane it was given. Both the profiles
+    /// and the planes were thrown away until 2026-09-14 — a loft of anything was
+    /// a box 20 tall — so a cone between two discs came out a cylinder.
+    fn loft(&mut self, profiles: &[Profile], planes: &[SketchPlane]) -> Result<Body> {
         if profiles.is_empty() {
             return Err(KernelError::Degenerate("loft requires at least 1 profile"));
         }
-        let (kind, p1, p2) = match profiles.first().unwrap() {
-            Profile::Rectangle { width, height } => (0i32, *width, *height),
-            Profile::Circle { radius } => (1i32, *radius, 0.0),
-            Profile::Polygon { .. } => (0i32, 10.0, 10.0),
-        };
+        if profiles.len() < 2 {
+            return Err(KernelError::Degenerate(
+                "a loft needs at least two sections",
+            ));
+        }
+        if planes.len() < profiles.len() {
+            return Err(KernelError::Degenerate("a loft needs a plane per profile"));
+        }
+        // The vertex buffers are collected first and kept until the call
+        // returns: each descriptor borrows one.
+        let mut buffers = Vec::with_capacity(profiles.len());
+        let mut raws = Vec::with_capacity(profiles.len());
+        for (profile, plane) in profiles.iter().zip(planes) {
+            let (raw, vertices) = RawProfile::new(profile, plane)?;
+            buffers.push(vertices);
+            raws.push(raw);
+        }
+        // The pointers were taken before the buffers moved into `buffers`, so
+        // they are rebuilt here against their final addresses.
+        for (raw, buffer) in raws.iter_mut().zip(&buffers) {
+            raw.vertices = if buffer.is_empty() {
+                core::ptr::null()
+            } else {
+                buffer.as_ptr()
+            };
+        }
         let mut id = 0u32;
+        // SAFETY: every descriptor's `vertices` points into `buffers`, which
+        // outlives the call.
         check_new(unsafe {
             w3d_occt_loft(
                 self.ctx,
-                kind,
-                p1,
-                p2,
-                std::ptr::null(),
-                profiles.len() as u32,
+                raws.as_ptr(),
+                u32::try_from(raws.len()).unwrap_or(u32::MAX),
                 &mut id,
             )
         })?;

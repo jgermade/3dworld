@@ -97,14 +97,39 @@ int32_t w3d_occt_delete(W3dOcctContext *ctx, uint32_t body);
 int32_t w3d_occt_fillet(W3dOcctContext *ctx, uint32_t body, double radius, uint32_t *out);
 int32_t w3d_occt_chamfer(W3dOcctContext *ctx, uint32_t body, double distance, uint32_t *out);
 int32_t w3d_occt_shell(W3dOcctContext *ctx, uint32_t body, uint32_t face_id, double thickness, uint32_t *out);
-int32_t w3d_occt_revolve(W3dOcctContext *ctx, int32_t profile_kind, double p1, double p2,
-                         double ax_ox, double ax_oy, double ax_oz,
-                         double ax_dx, double ax_dy, double ax_dz,
-                         double angle_rad, uint32_t *out);
-int32_t w3d_occt_sweep(W3dOcctContext *ctx, int32_t profile_kind, double p1, double p2,
-                       const double *pts, uint32_t pt_count, uint32_t *out);
-int32_t w3d_occt_loft(W3dOcctContext *ctx, int32_t profile_kind, double p1, double p2,
-                      const double *planes, uint32_t plane_count, uint32_t *out);
+/* A 2D profile and the plane it is drawn on, as the four operations that take
+ * one all need it.
+ *
+ * It carries the *outline*, which is the whole point: until 2026-09-14 these
+ * functions took `(kind, p1, p2)` — two numbers — so a polygon could not be
+ * expressed at all and became a hard-coded 20 x 20 or 10 x 10 primitive. The
+ * plane is here rather than in each function's arguments because a loft needs
+ * one per profile. */
+typedef struct {
+  int32_t kind;           /* 0 rectangle, 1 circle, 2 polygon */
+  double p1;              /* rectangle width, or circle radius */
+  double p2;              /* rectangle height; ignored otherwise */
+  const double *vertices; /* polygon only: 2 * vertex_count doubles, u then v */
+  uint32_t vertex_count;
+  double origin[3];
+  double x_axis[3];
+  double y_axis[3];
+} W3dOcctProfile;
+
+/* The profile, swept along its plane's normal by `distance`. */
+int32_t w3d_occt_extrude(W3dOcctContext *ctx, const W3dOcctProfile *profile, double distance,
+                         uint32_t *out);
+int32_t w3d_occt_revolve(W3dOcctContext *ctx, const W3dOcctProfile *profile,
+                         const double *axis_origin, const double *axis_dir, double angle_rad,
+                         uint32_t *out);
+/* `pts` is 3 * pt_count doubles. Two points sweep in a straight line; more
+ * build a spine and run the profile along it as a pipe. The profile is taken to
+ * sit at the first point. */
+int32_t w3d_occt_sweep(W3dOcctContext *ctx, const W3dOcctProfile *profile, const double *pts,
+                       uint32_t pt_count, uint32_t *out);
+/* One profile per section, each carrying the plane it sits on. */
+int32_t w3d_occt_loft(W3dOcctContext *ctx, const W3dOcctProfile *profiles, uint32_t profile_count,
+                      uint32_t *out);
 
 /* out4: solids, faces, edges, vertices — unique, not per-face duplicates. */
 int32_t w3d_occt_topology(W3dOcctContext *ctx, uint32_t body, uint32_t *out4);
