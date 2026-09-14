@@ -878,3 +878,28 @@ fn a_file_that_is_not_a_tree_is_refused_entry() {
         Err(DocumentError::NotATree(_))
     ));
 }
+
+#[test]
+fn compaction_keeps_the_tree_pointing_at_the_right_nodes() {
+    let mut d = doc();
+    let doomed = d.add_box("Doomed", Vec3::splat(1.0)).unwrap();
+    let group = d.add_group("Assembly");
+    let part = d.add_box("Piston", Vec3::splat(1.0)).unwrap();
+    d.reparent(part, Some(group)).unwrap();
+    d.remove(doomed).unwrap();
+    d.clear_history();
+
+    assert!(d.compact().unwrap() > 0, "nothing was compacted");
+
+    let rows: Vec<_> = d
+        .depth_first()
+        .into_iter()
+        .map(|(id, depth)| (d.node(id).unwrap().name.clone(), depth))
+        .collect();
+    assert_eq!(
+        rows,
+        vec![(String::from("Assembly"), 0), (String::from("Piston"), 1)],
+        "compaction renumbered the arena and left the tree pointing at the old slots"
+    );
+    assert_eq!(d.depth_first().len(), d.len());
+}

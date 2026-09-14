@@ -1000,6 +1000,27 @@ impl<K: GeometryKernel> Document<K> {
         let freed_slots = self.nodes.slot_count() - self.nodes.len();
         let id_map = self.nodes.compact();
 
+        // Compaction renumbers every slot, and a `NodeId` is not only held by
+        // the arena: each node holds its parent's and its children's. Left
+        // unremapped they name whatever now sits in the old slot — so a walk
+        // from the roots reaches a node that is not there, which since the file
+        // grew a tree is a document that cannot be saved. A child whose parent
+        // did not survive cannot happen — `remove` detaches, and everything
+        // live is in the map — but it is written as `None` rather than
+        // panicking, because the alternative to a root is an unreachable node.
+        let ids: Vec<NodeId> = self.nodes.iter().map(|(id, _)| id).collect();
+        for id in ids {
+            let Some(node) = self.nodes.get_mut(id) else {
+                continue;
+            };
+            node.parent = node.parent.and_then(|p| id_map.get(&p).copied());
+            node.children = node
+                .children
+                .iter()
+                .filter_map(|c| id_map.get(c).copied())
+                .collect();
+        }
+
         // Remap selection set
         let mut new_selection = Vec::with_capacity(self.selection.len());
         for old_id in &self.selection {
