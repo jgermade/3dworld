@@ -1294,6 +1294,249 @@ fn geometry_checks<K: GeometryKernel>(
         }
     );
 
+    // -- Degenerate operands that overlap -----------------------------------
+    //
+    // Everything above is the *separable* half: operands that share no volume,
+    // or share a boundary and nothing else. That half was written first because
+    // a defect in it deletes a part, and it is not the half where a B-rep kernel
+    // is hard. These five are the other side of that line — coplanar faces with
+    // material behind both of them, tangency along a whole curve, a gap too
+    // narrow to see, an operand that is not a solid at all, and a part far
+    // enough from the origin for the mesh's own arithmetic to run out.
+    //
+    // Declining still conforms, and for these it is often the honest answer:
+    // `TruckKernel` declines several and each decline is recorded rather than
+    // excused. What no backend may do is answer with the wrong body, and what
+    // none may do on a result that is *meant* to hold material is answer with
+    // one that will not mesh.
+
+    check!(
+        checks,
+        "two boxes overlapping with four pairs of faces in the same plane",
+        {
+            // The combination a boolean has to resolve rather than route
+            // around: a 4-cube and a 4-cube offset two along x share a 2x4x4
+            // slab of material, *and* their top, bottom, front and back faces
+            // are pairwise coplanar, because the other two extents are equal.
+            // Coplanar faces with volume behind both of them is where a kernel
+            // has to decide which of two identical planes bounds the result.
+            //
+            // All three answers are arithmetic and none of them is a bounding
+            // box: 64 + 64 - 32 for the union, the shared slab for the
+            // intersection, and what is left of the first cube for the
+            // difference — which is the same number as the intersection, so a
+            // backend that returns one for the other passes only by luck and is
+            // caught by the union.
+            for (op, want, what) in [
+                (BooleanOp::Union, 96.0, "64 + 64 less the 32 they share"),
+                (
+                    BooleanOp::Intersection,
+                    32.0,
+                    "the 2 x 4 x 4 slab they share",
+                ),
+                (
+                    BooleanOp::Difference,
+                    32.0,
+                    "what is left of the first cube",
+                ),
+            ] {
+                let a = k.create_box(Vec3::splat(4.0)).map_err(|e| e.to_string())?;
+                let b = k.create_box(Vec3::splat(4.0)).map_err(|e| e.to_string())?;
+                let b = k
+                    .transform(b, &Mat4::from_translation(Vec3::new(2.0, 0.0, 0.0)))
+                    .map_err(|e| e.to_string())?;
+                let Ok(r) = k.boolean(op, a, b, tol) else {
+                    continue;
+                };
+                // Every one of these three holds material, so a body that will
+                // not mesh is the defect and not an excuse for one.
+                let got = volume_of(k, r, quality).map_err(|e| {
+                    format!("{op:?} of two cubes with coplanar faces gave a body that will not mesh ({e})")
+                })?;
+                require(
+                    within(got, want, 1.0e-3),
+                    format!("{op:?} encloses {got}, not {want} — {what}"),
+                )?;
+            }
+            Ok(())
+        }
+    );
+
+    check!(
+        checks,
+        "a tool tangent to a face along a whole line, rather than crossing it",
+        {
+            // A cylinder of radius 5 whose axis stands 15 from the centre of a
+            // 20-cube: its wall meets the plane x = 10 along a line 20 long,
+            // and the two solids share no material at all. Tangency is the case
+            // that produces a face of zero area, or an intersection curve a
+            // kernel cannot parameterise, and `TruckKernel` was measured
+            // declining exactly this on 2026-09-05.
+            //
+            // So a decline conforms. What does not is a union that has lost the
+            // cylinder, or a difference that has eaten into the box along a
+            // line where nothing was removed.
+            let volume = 8000.0 + core::f64::consts::PI * 25.0 * 20.0;
+            for (op, want, what) in [
+                (BooleanOp::Union, volume, "the box and the whole cylinder"),
+                (BooleanOp::Difference, 8000.0, "the box, untouched"),
+            ] {
+                let cube = k.create_box(Vec3::splat(20.0)).map_err(|e| e.to_string())?;
+                let tool = k.create_cylinder(5.0, 20.0).map_err(|e| e.to_string())?;
+                let tool = k
+                    .transform(tool, &Mat4::from_translation(Vec3::new(15.0, 0.0, 0.0)))
+                    .map_err(|e| e.to_string())?;
+                let Ok(r) = k.boolean(op, cube, tool, tol) else {
+                    continue;
+                };
+                let got = volume_of(k, r, quality).map_err(|e| {
+                    format!("{op:?} with a tangent cylinder gave a body that will not mesh ({e})")
+                })?;
+                // Looser than the flat cases by design: the cylinder's volume
+                // is only as exact as its tessellation, and a coarse display
+                // quality under-reports a curved wall.
+                require(
+                    within(got, want, 2.0e-2),
+                    format!("{op:?} with a tangent cylinder encloses {got}, not {want} — {what}"),
+                )?;
+            }
+            Ok(())
+        }
+    );
+
+    check!(
+        checks,
+        "faces a thousandth of a degree away from coincident",
+        {
+            // Two 4-cubes abutting on the plane x = 2, the second turned
+            // 0.001 degrees about its own centre first. The two faces that were
+            // coincident now meet in a wedge: one corner crosses into the first
+            // cube by 2 * theta = 3.5e-5, the other pulls away by as much. That
+            // is three hundred times the document's linear tolerance and a
+            // thousand times less than anything a user can see, which is the
+            // definition of a sliver — and a sliver is what a boolean turns
+            // into a zero-area face, a self-intersecting result, or a crash.
+            //
+            // The material involved is 1.4e-4, so the arithmetic is the same as
+            // for the clean case to well within the tolerance asserted: what is
+            // being checked is that the *near*-coincident case answers like the
+            // coincident one instead of falling over.
+            let theta = 0.001_f64.to_radians();
+            let spin = Mat4::from_axis_angle(Vec3::Z, theta, tol.linear);
+            let out = Mat4::from_translation(Vec3::new(4.0, 0.0, 0.0));
+            for (op, want, what) in [
+                (BooleanOp::Union, 128.0, "both cubes"),
+                (BooleanOp::Difference, 64.0, "the first cube, less a sliver"),
+            ] {
+                let a = k.create_box(Vec3::splat(4.0)).map_err(|e| e.to_string())?;
+                let b = k.create_box(Vec3::splat(4.0)).map_err(|e| e.to_string())?;
+                let b = k.transform(b, &out.mul(&spin)).map_err(|e| e.to_string())?;
+                let Ok(r) = k.boolean(op, a, b, tol) else {
+                    continue;
+                };
+                let got = volume_of(k, r, quality).map_err(|e| {
+                    format!(
+                        "{op:?} across a sliver gave a body that will not mesh ({e}) — the                          answer is {want}, so there is nothing here that is meant to be empty"
+                    )
+                })?;
+                require(
+                    within(got, want, 1.0e-3),
+                    format!("{op:?} across a sliver encloses {got}, not {want} — {what}"),
+                )?;
+            }
+            Ok(())
+        }
+    );
+
+    check!(
+        checks,
+        "a part a kilometre from the origin still measures, and its mesh says how much that costs",
+        {
+            // A millimetre document with a part a kilometre out — a building, a
+            // survey, a machine placed in a site plan. The kernel's own numbers
+            // are `f64` and have no trouble with it; `Mesh::positions` are
+            // `f32` and **absolute**, so the mesh of a small part out there is
+            // quantised to the spacing of an `f32` at that distance, which is
+            // `1e6 * f32::EPSILON` — about 0.12 mm.
+            //
+            // This check does not pretend that is zero. It states it: the
+            // kernel's bounds must be exact, the body must still mesh, and the
+            // mesh must land within a few multiples of that spacing.
+            //
+            // It stops at a kilometre because that is as far as a *backend* can
+            // be held responsible for. Beyond it the limit is this crate's own
+            // `Mesh`, and it was measured on 2026-09-14 with OpenCASCADE, which
+            // has the geometry exactly right in `f64` at every distance:
+            //
+            //     1.2e6 (1 km)     drawn 0.016 mm from where it is, volume exact
+            //     8.4e6 (8 km)     drawn 0.2 mm off
+            //     1.7e7 (17 km)    drawn 0.6 mm off
+            //     3.4e7 (34 km)    **volume 0** — the spacing is 4 mm and the
+            //                      cube is 2 mm, so both of its faces land on
+            //                      one grid line and the part is drawn as
+            //                      nothing at all
+            //
+            // A part that vanishes from the viewport while the kernel still
+            // holds it is the failure this check is pointed at; at a kilometre
+            // every backend must be well clear of it.
+            // Not a round number, and that is the point. The first draft of this
+            // check put the cube at exactly 1e6 and it passed with the volume
+            // *exact*: an integer is representable in an `f32` up to 2^24, so
+            // every corner landed on a grid point and nothing was lost. A
+            // fixture that cannot fail is not one. This distance and this
+            // offset put every corner between two representable values.
+            const FAR: f64 = 1_234_567.891;
+            let spacing = FAR * f64::from(f32::EPSILON);
+            let a = k.create_box(Vec3::splat(2.0)).map_err(|e| e.to_string())?;
+            let a = k
+                .transform(a, &Mat4::from_translation(Vec3::new(FAR, 0.0, 0.0)))
+                .map_err(|e| e.to_string())?;
+
+            let bounds = k.bounds(a).map_err(|e| e.to_string())?;
+            let wanted = Aabb::new(
+                Vec3::new(FAR - 1.0, -1.0, -1.0),
+                Vec3::new(FAR + 1.0, 1.0, 1.0),
+            );
+            // The kernel's own arithmetic is `f64` and a million is nothing to
+            // it, so this half is asserted tightly.
+            require(
+                boxes_close(&bounds, &wanted, 1.0e-6),
+                format!(
+                    "the kernel puts a 2 mm cube a kilometre out at {bounds:?}, not {wanted:?};                      these are `f64` and the distance is nothing to them"
+                ),
+            )?;
+
+            let mesh = k
+                .tessellate(a, quality)
+                .map_err(|e| format!("a body a kilometre from the origin will not mesh: {e}"))?;
+            check_mesh(&mesh, &bounds, spacing * 4.0)?;
+            let (mut lo, mut hi) = (Vec3::splat(f64::MAX), Vec3::splat(f64::MIN));
+            for p in &mesh.positions {
+                let v = Vec3::new(f64::from(p[0]), f64::from(p[1]), f64::from(p[2]));
+                lo = Vec3::new(lo.x.min(v.x), lo.y.min(v.y), lo.z.min(v.z));
+                hi = Vec3::new(hi.x.max(v.x), hi.y.max(v.y), hi.z.max(v.z));
+            }
+            let drawn = Aabb::new(lo, hi);
+            require(
+                boxes_close(&drawn, &bounds, spacing * 4.0),
+                format!(
+                    "the mesh of a 2 mm cube a kilometre out spans {drawn:?} where the body is                      {bounds:?}; an `f32` there is spaced {spacing} apart, and this is more than                      four of those"
+                ),
+            )?;
+            // A cube 2 mm on a side, with every vertex quantised to 0.12 mm,
+            // cannot weigh 8 to better than about a fifth. The number is the
+            // finding; what would make this fail is a collapse, which weighs
+            // nothing at all.
+            let got = enclosed_volume(&mesh);
+            require(
+                within(got, 8.0, 0.25),
+                format!(
+                    "the mesh of a 2 mm cube a kilometre out encloses {got}, and 8 quantised to                      {spacing} is still within a fifth of 8 — a number near zero is the cube                      collapsing"
+                ),
+            )
+        }
+    );
+
     check!(
         checks,
         "a difference of a body with a copy of itself is empty or refused",
