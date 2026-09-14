@@ -12,15 +12,17 @@ wheel to zoom, click to select. The viewport also runs in a browser, on WebGL2, 
 names a face.
 
 Ctrl-S writes a `.w3d` — a zip you can open with `unzip`, specified in
-[FORMAT.md](FORMAT.md) — and `--open` reads one back.
+[FORMAT.md](FORMAT.md) — and `--open` reads one back. Version 2 of that file carries the assembly
+tree, an identity per node that survives the save, and the unit its numbers are in; a version-1
+file still opens, as what it is — flat, and stating no unit.
 
 **Work leaves.** Ctrl-E writes a STEP file — AP214, millimetres — and `--import-step FILE` brings
 one back in, a body per solid **and the assembly tree they sat in**: an imported subassembly is a
-group in the Outliner, named after the product, and the whole import is one undo step. What a
-version-1 `.w3d` cannot yet hold is that tree, so saving an imported assembly and reopening it gives
-the parts, flat. It needs a kernel that does STEP: OpenCASCADE does, the fake kernel says so and
-refuses. There is no file dialogue yet, so export writes beside the document and import is a
-command-line option.
+group in the Outliner, named after the product, and the whole import is one undo step. Since
+version 2 of the `.w3d` that tree **survives being saved** — a node has an identity a parent can
+name, a group is an entry with no geometry, and the file says what one of its numbers means. It
+needs a kernel that does STEP: OpenCASCADE does, the fake kernel says so and refuses. There is no
+file dialogue yet, so export writes beside the document and import is a command-line option.
 
 `make step-check` is what stops that from being OpenCASCADE agreeing with OpenCASCADE. A parser
 with no OCCT in it (`pip install steputils`) resolves every reference in a file we wrote and counts

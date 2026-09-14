@@ -251,6 +251,11 @@ step-check:
 	@# reports whatever came out; this one knows what should.
 	$(CARGO) run -q -p w3d-kernel-occt --example assembly_tree -- \
 	    samples/step/as1_pe_203.stp
+	@# And the next claim along: that the tree survives being written down.
+	@# Eighteen bodies in ten assemblies through a `.w3d` and back, with real
+	@# geometry under every leaf — the shape a four-node fixture cannot have.
+	$(CARGO) run -q -p w3d-kernel-occt --example assembly_file -- \
+	    samples/step/as1_pe_203.stp
 
 ## Fetches those files into a gitignored samples/, pinned by SHA-256. Not run
 ## from any build: a build that reaches the network is not one anybody can
