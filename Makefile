@@ -58,7 +58,7 @@ occt-headers:
 ## AGENTS.md has required since the licence was settled and nothing checked
 ## until there was a check. Reads both targets, because the dependency sets
 ## differ. Carries its own negative controls and runs them first.
-.PHONY: licences notice notice-check benchmark-step
+.PHONY: licences notice notice-check
 licences:
 	python3 tools/licences.py
 
@@ -67,9 +67,6 @@ notice:
 
 notice-check:
 	python3 tools/notice.py --check
-
-benchmark-step:
-	python3 tools/benchmark_step.py
 
 clippy:
 	$(CARGO) clippy --all-targets -- -D warnings
@@ -234,7 +231,7 @@ app-test-step:
 ## Needs OCCT, steputils, and `make step-samples` having been run.
 STEP_OUT := .tmp/ours.step
 
-.PHONY: step-check step-samples
+.PHONY: step-check step-samples step-samples-big measure measure-big
 step-check:
 	@mkdir -p $(dir $(STEP_OUT))
 	$(CARGO) run -q -p w3d-kernel-occt --example export_step -- $(STEP_OUT)
@@ -262,6 +259,36 @@ step-check:
 ## reproduce. Same rule as `make occt-headers`.
 step-samples:
 	python3 tools/step_samples.py --fetch
+
+## The one sample that is not a check: the biggest assembly that upstream has,
+## 15 MB, fetched separately because no check needs it and `make step-check`
+## runs on every push.
+step-samples-big:
+	python3 tools/step_samples.py --fetch --measure
+
+## What an assembly costs, phase by phase, on the thread that asked: STEP
+## import, a mesh per body, the 28-byte packing a worker would post, and a
+## `.w3d` written — twice, because a document that has been drawn does not
+## weigh what one that has not weighs — and opened again.
+##
+## **Not a check.** There is no golden number for a duration, a busy machine
+## would fail one, and nothing here asserts. It is the only place in this
+## repository where a performance number is this program's own rather than
+## somebody else's, and the register has wanted it since the first session.
+##
+## Release always: a debug timing is a number somebody quotes six months later,
+## so the example refuses to print one without `--debug-anyway`.
+##
+## Needs OCCT and `make step-samples`. `MEASURE_STEP=path` measures something
+## else; `make measure-big` is the 15 MB one, after `make step-samples-big`.
+MEASURE_STEP ?= samples/step/as1_pe_203.stp
+MEASURE_BIG := samples/step/RC_Buggy_2_front_suspension.stp
+
+measure:
+	$(CARGO) run -q --release -p w3d-kernel-occt --example assembly_cost -- $(MEASURE_STEP)
+
+measure-big:
+	$(CARGO) run -q --release -p w3d-kernel-occt --example assembly_cost -- $(MEASURE_BIG)
 
 ## Another *program* opens a file this one wrote, and weighs what comes out
 ## against arithmetic — a plate of 40x40x10 with a 12 mm hole is

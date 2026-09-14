@@ -56,6 +56,8 @@ make step-samples  # fetch STEP files other programs wrote, pinned by checksum
 make step-check    # ours read by a parser that is not OCCT, and theirs by ours
 make app-test-step # a STEP file out of one process and drawn by another
 make freecad-check # FreeCAD opens ours and weighs it against arithmetic
+
+make measure       # what an assembly costs: import, mesh, pack, save, open
 ```
 
 The deployed page is on [GitHub Pages](https://jgermade.github.io/3dworld/), which serves static

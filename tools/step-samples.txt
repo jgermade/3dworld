@@ -19,7 +19,13 @@
 # verdict `refuse` — must be refused, by name, with what was in the file
 #   instead. A negative control found in the wild rather than invented: a
 #   modeller for solids meeting a file that legitimately has none.
+# verdict `measure` — not a check and asserts nothing. A workload: the biggest
+#   assembly this upstream has, which is what `make measure` costs the program
+#   on. **Not fetched by `make step-samples`** — it is 15 MB and no check needs
+#   it, so it would be 15 MB downloaded on every CI run to sit unopened.
+#   `make step-samples-big` gets it.
 
 e14f7a52b3f0c53e36730c0f56654b01a17822f1b864dc6c42657223c54cafb6 import as1_pe_203.stp https://raw.githubusercontent.com/tpaviot/pythonocc-demos/master/assets/models/as1_pe_203.stp
 de7b8a513ae923cd11de2323e798ac084cc94f9aa7d7a2a8adab65fc592f8d0b import face_recognition_sample_part.stp https://raw.githubusercontent.com/tpaviot/pythonocc-demos/master/assets/models/face_recognition_sample_part.stp
 e6d3c25c4a3777de1cb71c4988fc1a5cbb9fb5587e4085273d1844a479ddfe33 refuse splinecage.stp https://raw.githubusercontent.com/tpaviot/pythonocc-demos/master/assets/models/splinecage.stp
+7640da77c19d10c3373b15cbbf40c39755ab4047166aca6d5293cb3efb79ed8b measure RC_Buggy_2_front_suspension.stp https://raw.githubusercontent.com/tpaviot/pythonocc-demos/master/assets/models/RC_Buggy_2_front_suspension.stp

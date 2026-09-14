@@ -129,12 +129,15 @@ NON_CARGO = [
         "and nothing links to it.",
     ),
     (
-        "STEP sample files (as1_pe_203, face_recognition_sample_part, splinecage)",
+        "STEP sample files (as1_pe_203, face_recognition_sample_part, "
+        "splinecage, RC_Buggy_2_front_suspension)",
         "GPL-3.0-or-later, as distributed in tpaviot/pythonocc-demos",
         "fetched by `make step-samples`, never committed, never distributed",
         "Input to a check, not part of the program: files written by "
         "Pro/ENGINEER, Siemens NX and ST-Developer, which is the whole reason "
-        "they are worth having. Pinned by SHA-256 in tools/step-samples.txt.",
+        "they are worth having — and one that is not a check at all, the "
+        "workload `make measure` runs on. Pinned by SHA-256 in "
+        "tools/step-samples.txt.",
     ),
     (
         "Playwright",

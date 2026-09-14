@@ -16,6 +16,7 @@ promise nobody made. A file whose hash does not match is not kept — the one
 upstream changed, and that is a thing to look at rather than a hash to edit.
 
     python3 tools/step_samples.py --fetch
+    python3 tools/step_samples.py --fetch --measure
     python3 tools/step_samples.py --list import
 """
 
@@ -42,10 +43,17 @@ def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def fetch():
+# What the checks need. The `measure` workload is deliberately not in it: it is
+# 15 MB, nothing asserts anything about it, and `make step-check` runs on every
+# push.
+CHECKS = ("import", "refuse")
+
+
+def fetch(verdicts):
     INTO.mkdir(parents=True, exist_ok=True)
     failures = 0
-    for sha, _verdict, name, url in manifest():
+    wanted = [row for row in manifest() if row[1] in verdicts]
+    for sha, _verdict, name, url in wanted:
         target = INTO / name
         if target.exists() and digest(target) == sha:
             print(f"have  {name}")
@@ -70,8 +78,9 @@ def fetch():
             failures += 1
     if failures:
         return 1
-    for _sha, verdict, name, _url in manifest():
-        print(f"      {name} — must {verdict}")
+    for _sha, verdict, name, _url in wanted:
+        print(f"      {name} — must {verdict}" if verdict in CHECKS
+              else f"      {name} — a workload, and it asserts nothing")
     # Who actually wrote each one is a question for a parser, and there is one
     # in `step_check.py --describe`. A header field pulled out with string
     # surgery here got it wrong on two of these three files, which is a fair
@@ -94,7 +103,9 @@ def listing(verdict):
 
 if __name__ == "__main__":
     if len(sys.argv) == 2 and sys.argv[1] == "--fetch":
-        sys.exit(fetch())
+        sys.exit(fetch(CHECKS))
+    if len(sys.argv) == 3 and sys.argv[1] == "--fetch" and sys.argv[2] == "--measure":
+        sys.exit(fetch(("measure",)))
     if len(sys.argv) == 3 and sys.argv[1] == "--list":
         sys.exit(listing(sys.argv[2]))
     raise SystemExit(__doc__)
