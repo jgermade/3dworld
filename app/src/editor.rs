@@ -366,33 +366,24 @@ impl<K: GeometryKernel> Editor<K> {
     /// tested: `shell.rs` draws what this returns, and a walk that loses a node
     /// or draws one twice is a question about the document, not about egui.
     pub fn outline_rows(&self) -> Vec<OutlineRow> {
-        fn walk<K: GeometryKernel>(
-            doc: &Document<K>,
-            id: NodeId,
-            depth: usize,
-            rows: &mut Vec<OutlineRow>,
-        ) {
-            if let Ok(node) = doc.node(id) {
-                rows.push(OutlineRow {
+        // The walk itself is the document's — the same one the writer uses to
+        // put parents before children in a file, and iterative because the
+        // depth of this tree is the depth of whatever file was opened. What is
+        // left here is turning nodes into rows, which is the half a panel owns.
+        self.doc
+            .depth_first()
+            .into_iter()
+            .filter_map(|(id, depth)| {
+                let node = self.doc.node(id).ok()?;
+                Some(OutlineRow {
                     id,
                     depth,
                     name: node.name.clone(),
                     group: node.is_group(),
                     children: node.children.len(),
-                });
-                for child in node.children.clone() {
-                    walk(doc, child, depth + 1, rows);
-                }
-            }
-        }
-
-        let mut rows = Vec::with_capacity(self.doc.len());
-        for (id, node) in self.doc.nodes() {
-            if node.parent.is_none() {
-                walk(&self.doc, id, 0, &mut rows);
-            }
-        }
-        rows
+                })
+            })
+            .collect()
     }
 
     // ---- input --------------------------------------------------------
@@ -887,12 +878,29 @@ impl<K: GeometryKernel> Editor<K> {
         self.drag = None;
         self.camera = Camera::default();
         self.camera.fit(&self.doc.visible_bounds());
-        let bodies = self.doc.len();
-        let message = format!(
+        // Bodies and groups counted apart, because since version 2 a file can
+        // hold both and "opened 28 bodies" for eighteen parts in ten
+        // assemblies is a number a user cannot check against anything. The
+        // unit comes with them: a document that states none is every file
+        // written before version 2, and that is worth seeing rather than
+        // assuming.
+        let bodies = self.doc.nodes().filter(|(_, n)| !n.is_group()).count();
+        let groups = self.doc.len() - bodies;
+        let mut message = format!(
             "opened {} — {bodies} {}",
             path.display(),
             if bodies == 1 { "body" } else { "bodies" }
         );
+        if groups > 0 {
+            message.push_str(&format!(
+                " in {groups} {}",
+                if groups == 1 { "group" } else { "groups" }
+            ));
+        }
+        message.push_str(&match self.doc.unit() {
+            Some(unit) => format!(" · {}", unit.symbol()),
+            None => String::from(" · no unit stated"),
+        });
         self.path = Some(path);
         self.status = message.clone();
         Ok(message)
@@ -1828,6 +1836,43 @@ mod tests {
         assert_eq!(other.path(), Some(path.as_path()));
         // Opening frames what was opened, or the file appears to be empty.
         assert!(other.camera().distance > 0.0);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_assembly_saved_is_an_assembly_when_it_is_opened() {
+        // The claim at the level a user meets it: the Outliner draws the same
+        // tree after a round trip through a file, and the status line says how
+        // many of the nodes are structure rather than parts.
+        let dir = std::env::temp_dir().join(format!("w3d-tree-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("assembly.w3d");
+
+        let mut e = editor();
+        let group = e.document_mut().add_group("Engine");
+        e.run(Command::AddBox);
+        let part = e.document().nodes().map(|(id, _)| id).last().unwrap();
+        e.document_mut().reparent(part, Some(group)).unwrap();
+        let before: Vec<_> = e
+            .outline_rows()
+            .iter()
+            .map(|r| (r.name.clone(), r.depth, r.group))
+            .collect();
+        e.save(Some(path.clone())).unwrap();
+
+        let mut other = editor();
+        let message = other.open(path.clone(), FakeKernel::default()).unwrap();
+        let after: Vec<_> = other
+            .outline_rows()
+            .iter()
+            .map(|r| (r.name.clone(), r.depth, r.group))
+            .collect();
+        assert_eq!(after, before, "the tree did not survive the file");
+        assert!(
+            message.contains("1 body in 1 group") && message.ends_with("· mm"),
+            "the status line counts groups as bodies: {message}"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

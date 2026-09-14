@@ -63,6 +63,44 @@ fn the_manifest_names_opencascade_so_another_build_can_refuse_it() {
     );
 }
 
+/// Version 2's tree, with real geometry under it. The format's own tests prove
+/// the manifest against a kernel that does no geometry; this proves that a
+/// document with groups in it writes OpenCASCADE blobs for the nodes that have
+/// geometry and asks the kernel for nothing on behalf of the nodes that do not.
+#[test]
+fn an_assembly_of_real_solids_survives_a_save() {
+    let mut before = Document::new(OcctKernel::new());
+    let group = before.add_group("Engine");
+    let part = before.add_box("Piston", Vec3::new(2.0, 2.0, 4.0)).unwrap();
+    before.reparent(part, Some(group)).unwrap();
+    let uid = before.node(part).unwrap().uid;
+    let bounds = before.bounds(part).unwrap();
+
+    let bytes = save(&before).unwrap();
+    let entries = w3d_format::zip::read(&bytes).unwrap();
+    assert_eq!(
+        entries
+            .keys()
+            .filter(|k| k.starts_with("geometry/"))
+            .count(),
+        1,
+        "a group was asked for geometry it does not have"
+    );
+
+    let after = load(OcctKernel::new(), &bytes).unwrap();
+    let part = after
+        .by_uid(uid)
+        .expect("the part came back under another identity");
+    let parent = after.parent_of(part).expect("the part left its assembly");
+    assert!(after.node(parent).unwrap().is_group());
+    assert_eq!(after.node(parent).unwrap().name, "Engine");
+    assert_eq!(
+        after.bounds(part).unwrap(),
+        bounds,
+        "the solid changed under the tree"
+    );
+}
+
 /// The other half of the refusal: a file written by the fake kernel must not
 /// open here either. Both directions matter — a one-way check would pass while
 /// half the failure mode is live.

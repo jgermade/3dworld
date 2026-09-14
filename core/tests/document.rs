@@ -2,11 +2,11 @@
 //! `.wasm`. If this file needs a real kernel to say something, the seam has a
 //! hole in it.
 
-use w3d_core::Document;
 use w3d_core::kernel::{
     Aabb, Body, BooleanOp, GeometryKernel, Import, ImportedAssembly, ImportedBody, Mat4, Mesh,
     Profile, Quality, SketchPlane, Tolerance, Topology, Vec3,
 };
+use w3d_core::{Document, DocumentError, Loaded, LoadedNode, Uid, Unit};
 use w3d_kernel_fake::FakeKernel;
 
 fn doc() -> Document<FakeKernel> {
@@ -616,4 +616,290 @@ fn moving_a_node_between_groups_is_one_undo_step() {
         "the real move is still the last step"
     );
     assert!(before);
+}
+
+// ---- identity, the tree, and the unit --------------------------------------
+//
+// What a version-2 `.w3d` needs from the document, tested with no file
+// anywhere near it: an identity that a parent can name and that a save can
+// carry, a tree that holds together, and a document that says what its numbers
+// mean.
+
+#[test]
+fn every_node_gets_an_identity_and_no_two_share_one() {
+    let mut d = doc();
+    let a = d.add_box("A", Vec3::splat(1.0)).unwrap();
+    let group = d.add_group("Assembly");
+    let b = d.add_sphere("B", 1.0).unwrap();
+
+    let uids: Vec<Uid> = [a, group, b]
+        .iter()
+        .map(|id| d.node(*id).unwrap().uid)
+        .collect();
+    assert!(
+        uids.iter().all(|u| *u != Uid::UNASSIGNED),
+        "a node in a document has an identity: {uids:?}"
+    );
+    let mut sorted = uids.clone();
+    sorted.sort();
+    sorted.dedup();
+    assert_eq!(sorted.len(), 3, "two nodes share an identity: {uids:?}");
+    assert!(
+        uids.iter().all(|u| *u < d.next_uid()),
+        "the counter is behind an identity it handed out"
+    );
+
+    assert_eq!(d.by_uid(uids[1]), Some(group), "a uid finds its node");
+}
+
+#[test]
+fn an_identity_survives_undo_and_is_never_handed_out_twice() {
+    let mut d = doc();
+    let a = d.add_box("A", Vec3::splat(1.0)).unwrap();
+    let before = d.node(a).unwrap().uid;
+
+    d.undo().unwrap();
+    d.redo().unwrap();
+    assert_eq!(
+        d.node(a).unwrap().uid,
+        before,
+        "undo and redo must put the same node back, not a new one"
+    );
+
+    // And the counter does not rewind. Undoing the node away and creating
+    // another gives the new one an identity of its own: the old one may
+    // already be written down somewhere this document cannot see.
+    d.undo().unwrap();
+    let b = d.add_sphere("B", 1.0).unwrap();
+    assert_ne!(
+        d.node(b).unwrap().uid,
+        before,
+        "an identity that was handed out was handed out again"
+    );
+}
+
+#[test]
+fn depth_first_is_parents_before_children_and_reaches_every_node() {
+    let mut d = doc();
+    let outer = d.add_group("Outer");
+    let inner = d.add_group("Inner");
+    let deep = d.add_box("Deep", Vec3::splat(1.0)).unwrap();
+    let loose = d.add_sphere("Loose", 1.0).unwrap();
+    d.reparent(inner, Some(outer)).unwrap();
+    d.reparent(deep, Some(inner)).unwrap();
+
+    assert_eq!(
+        d.depth_first(),
+        vec![(outer, 0), (inner, 1), (deep, 2), (loose, 0)]
+    );
+    assert_eq!(d.depth_first().len(), d.len(), "a node was lost or doubled");
+}
+
+/// The bug a file with a tree in it turns from a display fault into data loss.
+#[test]
+fn deleting_a_group_promotes_what_was_inside_it() {
+    let mut d = doc();
+    let group = d.add_group("Assembly");
+    let part = d.add_box("Piston", Vec3::splat(1.0)).unwrap();
+    d.reparent(part, Some(group)).unwrap();
+
+    d.remove(group).unwrap();
+
+    assert_eq!(d.parent_of(part), None, "the part is left inside a hole");
+    assert_eq!(
+        d.depth_first().len(),
+        d.len(),
+        "a walk from the roots cannot reach every node"
+    );
+
+    // And the whole shape comes back, because the promotion is part of the
+    // same undo step as the deletion.
+    d.undo().unwrap();
+    assert_eq!(d.parent_of(part), Some(group));
+    assert_eq!(d.children_of(group), [part]);
+}
+
+#[test]
+fn a_boolean_leaves_its_result_where_the_first_operand_was() {
+    let mut d = doc();
+    let group = d.add_group("Assembly");
+    let a = d.add_box("A", Vec3::splat(2.0)).unwrap();
+    let b = d.add_sphere("B", 1.0).unwrap();
+    d.reparent(a, Some(group)).unwrap();
+    d.reparent(b, Some(group)).unwrap();
+
+    let result = d.boolean(BooleanOp::Difference, a, b).unwrap();
+
+    assert_eq!(
+        d.parent_of(result),
+        Some(group),
+        "the result left the group"
+    );
+    assert_eq!(
+        d.children_of(group),
+        [result],
+        "the group still lists nodes that are gone"
+    );
+    assert_eq!(d.depth_first().len(), d.len());
+}
+
+#[test]
+fn a_document_says_what_its_numbers_mean() {
+    let mut d = doc();
+    assert_eq!(
+        d.unit(),
+        Some(Unit::Millimetre),
+        "a new document states the unit this program has always assumed"
+    );
+
+    d.set_unit(Some(Unit::Inch));
+    assert_eq!(d.unit().map(Unit::symbol), Some("in"));
+    assert_eq!(Unit::from_symbol("in"), Some(Unit::Inch));
+    assert_eq!(Unit::from_symbol("furlong"), None);
+    assert_eq!(
+        Unit::Inch.millimetres(),
+        25.4,
+        "the inch is defined, not measured"
+    );
+
+    // And an export that states millimetres refuses rather than writing
+    // numbers that mean something else.
+    let id = d.add_box("A", Vec3::splat(1.0)).unwrap();
+    assert!(matches!(
+        d.export_step(&[id]),
+        Err(DocumentError::NotMillimetres(Unit::Inch))
+    ));
+}
+
+#[test]
+fn a_loaded_tree_is_built_with_its_children_lists() {
+    let mut kernel = FakeKernel::new();
+    let body = kernel.create_box(Vec3::splat(1.0)).unwrap();
+    let node = |uid: u64, name: &str, body: Option<Body>, parent: Option<u64>| LoadedNode {
+        uid: Uid::from_raw(uid),
+        name: String::from(name),
+        body,
+        visible: true,
+        parent: parent.map(Uid::from_raw),
+    };
+
+    let d = Document::from_loaded(
+        kernel,
+        Loaded {
+            tolerance: Tolerance::document_default(),
+            quality: Quality::display_default(),
+            unit: Some(Unit::Metre),
+            next_uid: Uid::from_raw(9),
+            nodes: vec![
+                node(3, "Outer", None, None),
+                node(5, "Inner", None, Some(3)),
+                node(8, "Part", Some(body), Some(5)),
+            ],
+        },
+    )
+    .unwrap();
+
+    let outer = d.by_uid(Uid::from_raw(3)).unwrap();
+    let inner = d.by_uid(Uid::from_raw(5)).unwrap();
+    let part = d.by_uid(Uid::from_raw(8)).unwrap();
+
+    assert_eq!(d.children_of(outer), [inner], "the parent does not list it");
+    assert_eq!(d.children_of(inner), [part]);
+    assert_eq!(d.depth_first(), vec![(outer, 0), (inner, 1), (part, 2)]);
+    assert!(
+        d.node(outer).unwrap().is_group(),
+        "a node with no body is a group"
+    );
+    assert_eq!(d.unit(), Some(Unit::Metre));
+    assert_eq!(
+        d.next_uid(),
+        Uid::from_raw(9),
+        "the counter came from the file"
+    );
+
+    // The counter is where it was told, so the next node created does not
+    // collide with one that is already here.
+    let mut d = d;
+    let fresh = d.add_group("New");
+    assert_eq!(d.node(fresh).unwrap().uid, Uid::from_raw(9));
+}
+
+/// `Loaded::validate` is the only rule the tree has, so these are its negative
+/// controls: each is a file that must not become a document.
+#[test]
+fn a_file_that_is_not_a_tree_is_refused_entry() {
+    let node = |uid: u64, parent: Option<u64>| LoadedNode {
+        uid: Uid::from_raw(uid),
+        name: String::from("n"),
+        body: None,
+        visible: true,
+        parent: parent.map(Uid::from_raw),
+    };
+    let loaded = |next_uid: u64, nodes: Vec<LoadedNode>| Loaded {
+        tolerance: Tolerance::document_default(),
+        quality: Quality::display_default(),
+        unit: None,
+        next_uid: Uid::from_raw(next_uid),
+        nodes,
+    };
+
+    assert!(
+        loaded(3, vec![node(1, None), node(2, Some(1))])
+            .validate()
+            .is_ok()
+    );
+
+    // A node with no identity.
+    assert!(loaded(2, vec![node(0, None)]).validate().is_err());
+    // Two nodes with one identity.
+    assert!(
+        loaded(3, vec![node(1, None), node(1, None)])
+            .validate()
+            .is_err()
+    );
+    // A parent that is not there at all.
+    assert!(loaded(3, vec![node(1, Some(7))]).validate().is_err());
+    // A parent that is there, but later — which is how a cycle would have to
+    // be written, and the reason it cannot be.
+    assert!(
+        loaded(3, vec![node(1, Some(2)), node(2, None)])
+            .validate()
+            .is_err()
+    );
+    // Its own parent.
+    assert!(loaded(3, vec![node(1, Some(1))]).validate().is_err());
+    // A counter behind an identity in the file: the next node created would be
+    // given one that is already taken.
+    assert!(loaded(1, vec![node(1, None)]).validate().is_err());
+
+    // And nothing lands from a refused one.
+    assert!(matches!(
+        Document::from_loaded(FakeKernel::new(), loaded(9, vec![node(1, Some(7))])),
+        Err(DocumentError::NotATree(_))
+    ));
+}
+
+#[test]
+fn compaction_keeps_the_tree_pointing_at_the_right_nodes() {
+    let mut d = doc();
+    let doomed = d.add_box("Doomed", Vec3::splat(1.0)).unwrap();
+    let group = d.add_group("Assembly");
+    let part = d.add_box("Piston", Vec3::splat(1.0)).unwrap();
+    d.reparent(part, Some(group)).unwrap();
+    d.remove(doomed).unwrap();
+    d.clear_history();
+
+    assert!(d.compact().unwrap() > 0, "nothing was compacted");
+
+    let rows: Vec<_> = d
+        .depth_first()
+        .into_iter()
+        .map(|(id, depth)| (d.node(id).unwrap().name.clone(), depth))
+        .collect();
+    assert_eq!(
+        rows,
+        vec![(String::from("Assembly"), 0), (String::from("Piston"), 1)],
+        "compaction renumbered the arena and left the tree pointing at the old slots"
+    );
+    assert_eq!(d.depth_first().len(), d.len());
 }

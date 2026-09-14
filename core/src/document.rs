@@ -15,9 +15,113 @@ use w3d_kernel::{
 
 pub type NodeId = Id<Node>;
 
+/// A node's identity **in a file**, and the only one that survives being
+/// written down.
+///
+/// [`NodeId`] is an arena slot and a generation. It is exactly right for as
+/// long as this document is in memory and worth nothing the moment it leaves:
+/// two sessions that build the same document hand out the same slots for
+/// different reasons, and a slot an undo is holding must not be handed out at
+/// all. A `Uid` is what a parent in a `.w3d` file refers to, and what anything
+/// outside the document — a selection remembered between sessions, a reference
+/// from another file — has to hold.
+///
+/// It is a counter rather than a random number, for the property the container
+/// was chosen for: two saves of the same document must produce identical
+/// bytes. The counter is saved with the document and never rewinds, not even
+/// when an undo takes the node that spent it — an identity handed out once may
+/// already be written down somewhere this program cannot see. What it costs is
+/// that two documents cannot be merged without renumbering one of them, and
+/// merging documents is a feature that does not exist.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub struct Uid(u64);
+
+impl Uid {
+    /// A node that is not in a document yet. [`Document`] stamps a real one on
+    /// the way into the arena, and that is the only place identities are made.
+    pub const UNASSIGNED: Uid = Uid(0);
+
+    pub const fn from_raw(raw: u64) -> Self {
+        Self(raw)
+    }
+
+    /// For a writer. Readers in languages whose numbers are doubles are exact
+    /// to 2^53, which is more nodes than anything here will create.
+    pub const fn raw(self) -> u64 {
+        self.0
+    }
+}
+
+impl core::fmt::Display for Uid {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+/// What one unit of this document's numbers means.
+///
+/// A document used to be unitless: `tolerance` implied a scale and nothing
+/// stated one, while STEP export wrote millimetres regardless — so the
+/// assumption existed, it was just nowhere anybody could read it. This is that
+/// assumption written down, and a version-2 file states it.
+///
+/// **Nothing converts.** Changing a document's unit relabels its numbers; it
+/// does not scale its geometry, which would be a rebuild. What the unit buys
+/// today is that a file says what it means and that an export which cannot
+/// honour it refuses — see [`Document::export_step`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Unit {
+    Millimetre,
+    Centimetre,
+    Metre,
+    Inch,
+    Foot,
+}
+
+impl Unit {
+    /// The symbol a file and a status line both use. Stable: it is written
+    /// into documents, so changing one of these strings is changing the format.
+    pub const fn symbol(self) -> &'static str {
+        match self {
+            Self::Millimetre => "mm",
+            Self::Centimetre => "cm",
+            Self::Metre => "m",
+            Self::Inch => "in",
+            Self::Foot => "ft",
+        }
+    }
+
+    pub fn from_symbol(symbol: &str) -> Option<Self> {
+        [
+            Self::Millimetre,
+            Self::Centimetre,
+            Self::Metre,
+            Self::Inch,
+            Self::Foot,
+        ]
+        .into_iter()
+        .find(|u| u.symbol() == symbol)
+    }
+
+    /// How many millimetres one of these is. Exact for the imperial pair
+    /// because the inch *is* 25.4 mm by definition, not by measurement.
+    pub const fn millimetres(self) -> f64 {
+        match self {
+            Self::Millimetre => 1.0,
+            Self::Centimetre => 10.0,
+            Self::Metre => 1000.0,
+            Self::Inch => 25.4,
+            Self::Foot => 304.8,
+        }
+    }
+}
+
 /// One solid in the document, with the things a user gave it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Node {
+    /// The identity that survives a save. [`Uid::UNASSIGNED`] until the node
+    /// is in a document, which is the only thing that hands them out.
+    pub uid: Uid,
     pub name: String,
     pub body: Body,
     pub visible: bool,
@@ -49,6 +153,7 @@ impl Node {
 
     pub fn new(name: impl Into<String>, body: Body) -> Self {
         Self {
+            uid: Uid::UNASSIGNED,
             name: name.into(),
             body,
             visible: true,
@@ -68,6 +173,12 @@ pub enum DocumentError {
         child: NodeId,
         parent: NodeId,
     },
+    /// A file's nodes do not make a tree. Carries the first breach, naming the
+    /// entry at fault rather than the file.
+    NotATree(String),
+    /// A STEP file states millimetres and this document says it is in
+    /// something else. Refused rather than written wrong.
+    NotMillimetres(Unit),
 }
 
 impl core::fmt::Display for DocumentError {
@@ -80,6 +191,13 @@ impl core::fmt::Display for DocumentError {
                 f,
                 "{child:?} cannot go inside {parent:?}, because {parent:?} is already inside \
                  {child:?}"
+            ),
+            Self::NotATree(why) => write!(f, "these nodes are not a tree: {why}"),
+            Self::NotMillimetres(unit) => write!(
+                f,
+                "a STEP file states millimetres and this document is in {}. Exporting it would \
+                 write numbers that mean something else.",
+                unit.symbol()
             ),
         }
     }
@@ -101,6 +219,13 @@ pub struct Document<K: GeometryKernel> {
     selection: Vec<NodeId>,
     tolerance: Tolerance,
     quality: Quality,
+    /// What one of this document's numbers means, or `None` where nobody has
+    /// said — which is every version-1 file, because version 1 had nowhere to
+    /// write it.
+    unit: Option<Unit>,
+    /// The identity the next node to arrive will take. Saved with the document
+    /// and never rewound: see [`Uid`].
+    next_uid: u64,
     history: History,
     /// Every body this document has ever asked the kernel for. The kernel
     /// deliberately cannot enumerate its own bodies — a narrow trait is a
@@ -121,6 +246,11 @@ impl<K: GeometryKernel> Document<K> {
             selection: Vec::new(),
             tolerance: Tolerance::document_default(),
             quality: Quality::display_default(),
+            // Millimetres because that is what this program already assumed
+            // everywhere it had to choose — `export_step` writes them — and an
+            // assumption stated is one a user can disagree with.
+            unit: Some(Unit::Millimetre),
+            next_uid: 1,
             history: History::default(),
             created: Vec::new(),
             meshes: HashMap::new(),
@@ -149,10 +279,56 @@ impl<K: GeometryKernel> Document<K> {
         doc.tolerance = tolerance;
         doc.quality = quality;
         for node in nodes {
-            doc.created.push(node.body);
-            doc.nodes.insert(node);
+            // A group is structure and carries no solid, so there is nothing
+            // for the kernel to be asked about later.
+            if !node.is_group() {
+                doc.created.push(node.body);
+            }
+            doc.place(node);
         }
         doc
+    }
+
+    /// Rebuilds a document from a file that has a tree in it.
+    ///
+    /// [`Document::from_parts`] is this without the structure: it takes nodes
+    /// that are all roots and hands each a fresh identity. This one takes the
+    /// file's own identities and its parents, and is fallible because a file is
+    /// not something this program gets to assume anything about — the whole of
+    /// what it may assume is [`Loaded::validate`], and it is checked before the
+    /// arena is touched so that a refused file leaves nothing half-built.
+    ///
+    /// **History starts empty**, for the reason in [`Document::from_parts`].
+    pub fn from_loaded(kernel: K, loaded: Loaded) -> Result<Self> {
+        loaded.validate().map_err(DocumentError::NotATree)?;
+
+        let mut doc = Self::new(kernel);
+        doc.tolerance = loaded.tolerance;
+        doc.quality = loaded.quality;
+        doc.unit = loaded.unit;
+        doc.next_uid = loaded.next_uid.raw();
+
+        // One pass, because `validate` has already established that a parent
+        // appears before its children: the parent's `NodeId` is always in this
+        // map by the time a child asks for it. That is the same rule, and for
+        // the same reason, as the one the kernel seam's `Import` carries.
+        let mut by_uid: HashMap<Uid, NodeId> = HashMap::new();
+        for entry in loaded.nodes {
+            let parent = entry.parent.map(|uid| by_uid[&uid]);
+            let mut node = Node::new(entry.name, entry.body.unwrap_or(GROUP_BODY));
+            node.uid = entry.uid;
+            node.visible = entry.visible;
+            node.parent = parent;
+            if !node.is_group() {
+                doc.created.push(node.body);
+            }
+            let (id, _) = doc.place(node);
+            by_uid.insert(entry.uid, id);
+            if let Some(slot) = parent.and_then(|parent| doc.nodes.get_mut(parent)) {
+                slot.children.push(id);
+            }
+        }
+        Ok(doc)
     }
 
     pub fn kernel(&self) -> &K {
@@ -177,6 +353,66 @@ impl<K: GeometryKernel> Document<K> {
 
     pub fn quality(&self) -> Quality {
         self.quality
+    }
+
+    /// What one of this document's numbers means, or `None` where nothing has
+    /// said. A version-1 file is the second case, and so is anything built
+    /// before units existed; a new document is millimetres.
+    pub fn unit(&self) -> Option<Unit> {
+        self.unit
+    }
+
+    /// Relabels the document's numbers. It does **not** scale any geometry —
+    /// see [`Unit`] — so this says what the numbers already meant, and a user
+    /// who wanted a conversion did not get one.
+    pub fn set_unit(&mut self, unit: Option<Unit>) {
+        self.unit = unit;
+    }
+
+    /// The identity the next node created here will be given. Saved with the
+    /// document, because a reader that resumed from the largest identity
+    /// *present* would hand a deleted node's identity to a new node.
+    pub fn next_uid(&self) -> Uid {
+        Uid(self.next_uid)
+    }
+
+    /// Finds a node by the identity that survives a save.
+    ///
+    /// Linear, deliberately: a document is a few thousand nodes and an index
+    /// is another thing undo would have to keep right.
+    pub fn by_uid(&self, uid: Uid) -> Option<NodeId> {
+        self.nodes
+            .iter()
+            .find(|(_, n)| n.uid == uid)
+            .map(|(id, _)| id)
+    }
+
+    /// Every node, parents before children and siblings in their own order —
+    /// which is the order a file must list them in, and the order an outliner
+    /// draws. The `usize` beside each is its depth, zero at a root.
+    ///
+    /// Iterative rather than recursive on purpose: the depth of this tree is
+    /// the depth of whatever file was opened, so a deep one is a stack
+    /// overflow in a recursive walk and a few more pushes here.
+    pub fn depth_first(&self) -> Vec<(NodeId, usize)> {
+        let mut out = Vec::with_capacity(self.nodes.len());
+        let mut stack: Vec<(NodeId, usize)> = self
+            .nodes
+            .iter()
+            .filter(|(_, n)| n.parent.is_none())
+            .map(|(id, _)| (id, 0usize))
+            .collect();
+        stack.reverse();
+        while let Some((id, depth)) = stack.pop() {
+            out.push((id, depth));
+            let Some(node) = self.nodes.get(id) else {
+                continue;
+            };
+            for &child in node.children.iter().rev() {
+                stack.push((child, depth + 1));
+            }
+        }
+        out
     }
 
     pub fn set_quality(&mut self, quality: Quality) {
@@ -207,6 +443,28 @@ impl<K: GeometryKernel> Document<K> {
         self.node(id).map(|n| n.body)
     }
 
+    /// Hands out an identity that survives a save, and spends it.
+    fn mint(&mut self) -> Uid {
+        let uid = Uid(self.next_uid);
+        self.next_uid += 1;
+        uid
+    }
+
+    /// Stamps a node with an identity unless it arrived with one, and puts it
+    /// in the arena.
+    ///
+    /// **Every way a node enters this document goes through here**, which is
+    /// what makes "every node in a document has an identity" a property rather
+    /// than a hope. A node that arrives with one keeps it: that is a file being
+    /// loaded, and the identities in a file are the file's.
+    fn place(&mut self, mut node: Node) -> (NodeId, Node) {
+        if node.uid == Uid::UNASSIGNED {
+            node.uid = self.mint();
+        }
+        let id = self.nodes.insert(node.clone());
+        (id, node)
+    }
+
     fn track(&mut self, body: Body) -> Body {
         self.created.push(body);
         body
@@ -227,7 +485,7 @@ impl<K: GeometryKernel> Document<K> {
 
     fn insert(&mut self, label: &'static str, node: Node) -> NodeId {
         self.history.begin(label);
-        let id = self.nodes.insert(node.clone());
+        let (id, node) = self.place(node);
         self.history.record(Edit::Insert { id, node });
         self.history.commit();
         id
@@ -424,14 +682,19 @@ impl<K: GeometryKernel> Document<K> {
             BooleanOp::Intersection => "Intersection",
         };
 
+        // The result takes the place of the first operand: a boolean between
+        // two parts of an assembly leaves one part in that assembly, not a
+        // loose body at the document's root.
+        let parent = na.parent;
+
         self.history.begin(label);
+        self.detach(a, &na);
         self.nodes.remove(a);
         self.history.record(Edit::Remove { id: a, node: na });
+        self.detach(b, &nb);
         self.nodes.remove(b);
         self.history.record(Edit::Remove { id: b, node: nb });
-        let node = Node::new(name, body);
-        let id = self.nodes.insert(node.clone());
-        self.history.record(Edit::Insert { id, node });
+        let id = self.insert_child(Node::new(name, body), parent);
         self.history.commit();
         Ok(id)
     }
@@ -529,10 +792,47 @@ impl<K: GeometryKernel> Document<K> {
     pub fn remove(&mut self, id: NodeId) -> Result<()> {
         let node = self.node(id)?.clone();
         self.history.begin("Delete");
+        self.detach(id, &node);
         self.nodes.remove(id);
         self.history.record(Edit::Remove { id, node });
         self.history.commit();
         Ok(())
+    }
+
+    /// Takes a node out of the tree before it leaves the arena: its parent
+    /// stops listing it, and whatever was inside it is promoted into its place.
+    ///
+    /// Until 2026-09-14 neither happened, and the state it left is one nothing
+    /// downstream survives. A removed group's children kept a `parent` naming a
+    /// slot that is no longer there, so every walk that starts at the roots —
+    /// the Outliner's, and now the writer's — could not reach them: nodes that
+    /// were still in the document, still drawn in the viewport, and invisible
+    /// to the one panel that lists what a document contains. It became
+    /// load-bearing when a file grew a tree, because a node a walk cannot reach
+    /// is a node a save would silently drop.
+    ///
+    /// Promotion rather than deleting the subtree: a delete that takes bodies
+    /// the user did not select with it is the worse of the two surprises, and
+    /// this one is reversible by the same undo step.
+    ///
+    /// Assumes an open transaction.
+    fn detach(&mut self, id: NodeId, node: &Node) {
+        let promoted = node.children.clone();
+        for child in &promoted {
+            self.amend(*child, |n| n.parent = node.parent);
+        }
+        if let Some(parent) = node.parent {
+            self.amend(parent, move |n| {
+                match n.children.iter().position(|&c| c == id) {
+                    // In its place, so that the order siblings are drawn in is
+                    // the order they were in.
+                    Some(at) => {
+                        n.children.splice(at..=at, promoted);
+                    }
+                    None => n.children.extend(promoted),
+                }
+            });
+        }
     }
 
     // ---- interchange --------------------------------------------------
@@ -544,6 +844,17 @@ impl<K: GeometryKernel> Document<K> {
     /// of them are in a STEP file. What comes back from a round-trip is
     /// solids, in order, and that is the trade the format is for.
     pub fn export_step(&self, ids: &[NodeId]) -> Result<Vec<u8>> {
+        // A STEP file states its unit and this writer states millimetres, so a
+        // document that says it is in something else would be exported as
+        // numbers meaning something they do not. Nothing here scales geometry
+        // — that is a rebuild — so the honest answer is to refuse. A document
+        // that states nothing is the case this program has always been in, and
+        // millimetres is the assumption it has always made.
+        if let Some(unit) = self.unit
+            && unit != Unit::Millimetre
+        {
+            return Err(DocumentError::NotMillimetres(unit));
+        }
         let bodies = ids
             .iter()
             .map(|id| self.body_of(*id))
@@ -647,7 +958,7 @@ impl<K: GeometryKernel> Document<K> {
     /// Assumes an open transaction; the callers here all open one.
     fn insert_child(&mut self, mut node: Node, parent: Option<NodeId>) -> NodeId {
         node.parent = parent;
-        let id = self.nodes.insert(node.clone());
+        let (id, node) = self.place(node);
         self.history.record(Edit::Insert { id, node });
         if let Some(parent) = parent {
             self.amend(parent, |n| n.children.push(id));
@@ -688,6 +999,27 @@ impl<K: GeometryKernel> Document<K> {
         }
         let freed_slots = self.nodes.slot_count() - self.nodes.len();
         let id_map = self.nodes.compact();
+
+        // Compaction renumbers every slot, and a `NodeId` is not only held by
+        // the arena: each node holds its parent's and its children's. Left
+        // unremapped they name whatever now sits in the old slot — so a walk
+        // from the roots reaches a node that is not there, which since the file
+        // grew a tree is a document that cannot be saved. A child whose parent
+        // did not survive cannot happen — `remove` detaches, and everything
+        // live is in the map — but it is written as `None` rather than
+        // panicking, because the alternative to a root is an unreachable node.
+        let ids: Vec<NodeId> = self.nodes.iter().map(|(id, _)| id).collect();
+        for id in ids {
+            let Some(node) = self.nodes.get_mut(id) else {
+                continue;
+            };
+            node.parent = node.parent.and_then(|p| id_map.get(&p).copied());
+            node.children = node
+                .children
+                .iter()
+                .filter_map(|c| id_map.get(c).copied())
+                .collect();
+        }
 
         // Remap selection set
         let mut new_selection = Vec::with_capacity(self.selection.len());
@@ -800,5 +1132,100 @@ impl<K: GeometryKernel> Document<K> {
             }
         }
         deleted
+    }
+}
+
+/// A document as a file holds it, before anything has been built from it.
+///
+/// The counterpart of [`w3d_kernel::Import`] one level up: something arrived
+/// from outside claiming to be a tree, and there is exactly one rule it has to
+/// satisfy before any of it lands. Keeping that rule here rather than in the
+/// reader is deliberate — the document is what must not be built broken, and
+/// this is testable with no file, no zip and no JSON anywhere near it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Loaded {
+    pub tolerance: Tolerance,
+    pub quality: Quality,
+    /// What the file said one of its numbers means, or `None` where it did not
+    /// say — which is every version-1 file.
+    pub unit: Option<Unit>,
+    /// The identity the next node created in the rebuilt document must take.
+    pub next_uid: Uid,
+    /// **Parents before children**, and in the order they are to be drawn.
+    pub nodes: Vec<LoadedNode>,
+}
+
+/// One node as a file holds it: an identity, a place in the tree, and the
+/// geometry it stands for — or none, where it is a group.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LoadedNode {
+    pub uid: Uid,
+    pub name: String,
+    /// `None` for a group: structure, with no solid under it. A body must be
+    /// one this document's kernel just produced, because a [`Body`] means
+    /// nothing to any other kernel.
+    pub body: Option<Body>,
+    pub visible: bool,
+    /// The node this one sits inside, by identity, and always one that appears
+    /// **earlier in the list** — see [`Loaded::validate`].
+    pub parent: Option<Uid>,
+}
+
+impl Loaded {
+    /// The structural rule of a document's tree, and the whole of it.
+    ///
+    /// Returns the first breach as a sentence naming the entry at fault, so
+    /// that a refusal points at a node rather than at the file. Four things,
+    /// and each of them is a way a document could be built that nothing
+    /// downstream survives:
+    ///
+    /// - **Every node has an identity.** `0` is what an unplaced node carries,
+    ///   so a file offering it is offering a node with no name to be referred
+    ///   to by.
+    /// - **No two nodes share one.** Identity that is not unique is not
+    ///   identity, and the second node would take the first's children.
+    /// - **A parent appears earlier in the list than its children.** Stronger
+    ///   than "a parent exists", and stronger on purpose: it makes a cycle
+    ///   *unrepresentable* rather than detectable, so the tree can be built in
+    ///   one pass with no visited set and no recursion. It is the same rule,
+    ///   for the same reason, that [`w3d_kernel::Import`] carries at the seam.
+    /// - **The counter is ahead of every identity present.** A file whose
+    ///   counter is behind one would hand a live node's identity to the next
+    ///   node created, which is the bug identity exists to prevent.
+    pub fn validate(&self) -> core::result::Result<(), String> {
+        let mut seen: HashMap<Uid, usize> = HashMap::with_capacity(self.nodes.len());
+        for (i, node) in self.nodes.iter().enumerate() {
+            if node.uid == Uid::UNASSIGNED {
+                return Err(format!("node {i} has no identity"));
+            }
+            // The parent is looked for **before** this node is put in `seen`,
+            // which is what makes "earlier in the list" exclude the node
+            // itself. Doing it the other way round let a node be its own
+            // parent — a one-node cycle, which is exactly the thing this rule
+            // exists to make unwritable, and which the negative control caught.
+            if let Some(parent) = node.parent
+                && !seen.contains_key(&parent)
+            {
+                return Err(format!(
+                    "node {i} says it is inside {parent}, which is not a node earlier in the \
+                     list, so these are not a tree"
+                ));
+            }
+            if let Some(first) = seen.insert(node.uid, i) {
+                return Err(format!(
+                    "node {i} and node {first} are both {}, and an identity that is not unique \
+                     is not one",
+                    node.uid
+                ));
+            }
+            if node.uid >= self.next_uid {
+                return Err(format!(
+                    "node {i} is {} and the next identity to hand out is {}, so the next node \
+                     created would be given one that is already taken",
+                    node.uid, self.next_uid
+                ));
+            }
+        }
+        Ok(())
     }
 }

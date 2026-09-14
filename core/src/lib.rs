@@ -10,7 +10,7 @@ pub mod document;
 pub mod history;
 
 pub use arena::{Arena, Id};
-pub use document::{Document, DocumentError, Node, NodeId};
+pub use document::{Document, DocumentError, Loaded, LoadedNode, Node, NodeId, Uid, Unit};
 pub use history::History;
 
 /// Re-exported so callers need one dependency, not two, and so that the

@@ -19,19 +19,37 @@
 //! - **This is a separate crate from `w3d-core`** so that the document keeps
 //!   its no-dependency property. The document does not know what a file is,
 //!   and the format does not know what a GPU is.
+//!
+//! **Version 2** is what this writes. It adds the three things a version-1
+//! file had nowhere to put, and they are one conversation rather than three:
+//! a node identity that survives a save, the tree those identities let a
+//! parent name, and the unit that says what the document's numbers mean. A
+//! version-1 file still loads — flat, with fresh identities, and stating no
+//! unit, which is exactly what it is.
 
 pub mod zip;
 
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
+use w3d_core::Document;
 use w3d_core::kernel::{GeometryKernel, Quality, Tolerance};
-use w3d_core::{Document, Node};
 
 /// Bumped when a reader that understands version *n* could not read a file.
 /// Adding an optional field does not bump it; changing what an existing field
 /// means does.
-pub const VERSION: u32 = 1;
+///
+/// Version 2 changed one: `nodes[].geometry` became optional, because a group
+/// is a node with no geometry and a version-1 reader has no idea what to do
+/// with an entry that has none. Everything else it added is new — `unit`,
+/// `next_uid`, `nodes[].uid`, `nodes[].parent` — and would not have needed a
+/// number of its own.
+pub const VERSION: u32 = 2;
+
+/// The oldest version this build can still read. A file below it is not
+/// refused by this constant — nothing is that old — it is here so that the
+/// reader's version arithmetic says what it means.
+pub const OLDEST_UNDERSTOOD: u32 = 1;
 
 /// The manifest's `format`, so that a zip full of something else is refused
 /// before anything is interpreted.
@@ -55,6 +73,11 @@ pub enum FormatError {
         kernel: &'static str,
     },
     Malformed(String),
+    /// The nodes do not make a tree — on the way in, a file's; on the way out,
+    /// a document's. One variant for both because it is one property, and a
+    /// writer that cannot reach every node from the roots is as broken as a
+    /// file that cannot be built from.
+    NotATree(String),
     Kernel(String),
 }
 
@@ -73,6 +96,7 @@ impl core::fmt::Display for FormatError {
                  `{kernel}`. Export it to STEP from a build that can open it."
             ),
             Self::Malformed(what) => write!(f, "damaged document: {what}"),
+            Self::NotATree(why) => write!(f, "these nodes are not a tree: {why}"),
             Self::Kernel(what) => write!(f, "the kernel refused the geometry: {what}"),
         }
     }
@@ -113,6 +137,17 @@ struct Manifest {
     geometry: String,
     tolerance: ToleranceEntry,
     quality: QualityEntry,
+    /// Version 2. What one of this document's numbers means, as a symbol —
+    /// `mm`, `cm`, `m`, `in`, `ft`. Absent where the document states nothing,
+    /// which is what every version-1 file is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    unit: Option<String>,
+    /// Version 2, and required there. The identity the next node created in
+    /// this document must take — saved rather than derived, because a reader
+    /// resuming from the largest identity *present* would hand a deleted
+    /// node's identity to a new node.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    next_uid: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     camera: Option<CameraPose>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -138,9 +173,22 @@ struct QualityEntry {
 
 #[derive(Serialize, Deserialize)]
 struct NodeEntry {
+    /// Version 2, and required there: the identity that survives the save, and
+    /// the thing `parent` refers to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    uid: Option<u64>,
     name: String,
     visible: bool,
-    geometry: String,
+    /// Version 2. The `uid` of the node this one sits inside, and always one
+    /// that appears **earlier** in `nodes` — which is what makes a cycle
+    /// unrepresentable rather than something a reader has to detect.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    parent: Option<u64>,
+    /// Version 2 made this optional: a group is a node with no geometry. A
+    /// version-1 entry without it is damaged, because version 1 had no groups
+    /// in it to be.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    geometry: Option<String>,
 }
 
 /// Writes a document with default options.
@@ -157,43 +205,68 @@ pub fn save_with_options<K: GeometryKernel>(
     let mut paths: BTreeMap<u32, String> = BTreeMap::new();
     let mut nodes = Vec::new();
 
-    for (_, node) in doc.nodes() {
+    // Parents before children, which is the order the format requires and the
+    // order a reader needs to build the tree in one pass. It is also a check:
+    // a walk from the roots that does not reach every node means the document
+    // holds a node nothing can see, and writing the ones it did reach would
+    // lose the others quietly. Refusing to save is the visible failure.
+    let order = doc.depth_first();
+    if order.len() != doc.len() {
+        return Err(FormatError::NotATree(format!(
+            "this document has {} nodes and a walk from its roots reaches {}, so {} of them are \
+             inside something that is not there",
+            doc.len(),
+            order.len(),
+            doc.len() - order.len()
+        )));
+    }
+
+    for (id, _) in order {
+        let node = doc
+            .node(id)
+            .map_err(|e| FormatError::Malformed(e.to_string()))?;
+
         // A group is structure and carries no solid, so there is nothing here
-        // to serialise: asking the kernel to save `GROUP_BODY` would refuse the
-        // whole document, and asking it to save the `0` a group used to carry
-        // would have written the first body in the document a second time under
-        // the group's name.
-        //
-        // Skipping it means **a version-1 file has no tree in it**. That is a
-        // loss and it is deliberate: putting one in is a change to the format,
-        // which has its own specification and its own version rule, and it
-        // arrives with the other things a version 2 owes — units, and a node
-        // identity that survives a save. Until then an imported assembly saves
-        // as the parts it is made of, which is every solid, flat.
-        // `a_group_does_not_survive_a_save` in `tests/roundtrip.rs` is that
-        // sentence as a check, so this cannot quietly start meaning something
-        // else.
-        if node.is_group() {
-            continue;
-        }
-        let raw = node.body.raw();
-        let path = match paths.get(&raw) {
-            Some(path) => path.clone(),
-            None => {
-                let bytes = doc
-                    .kernel()
-                    .save_body(node.body)
-                    .map_err(|e| FormatError::Kernel(e.to_string()))?;
-                let path = format!("geometry/{}.bin", paths.len());
-                entries.insert(path.clone(), bytes);
-                paths.insert(raw, path.clone());
-                path
-            }
+        // to serialise — asking the kernel to save `GROUP_BODY` would refuse
+        // the whole document. Since version 2 it is still *written*: an entry
+        // with a name, an identity and no `geometry`. That is the whole of what
+        // a tree in a file needs, and it is why `geometry` had to become
+        // optional and the version had to move.
+        let geometry = if node.is_group() {
+            None
+        } else {
+            let raw = node.body.raw();
+            Some(match paths.get(&raw) {
+                Some(path) => path.clone(),
+                None => {
+                    let bytes = doc
+                        .kernel()
+                        .save_body(node.body)
+                        .map_err(|e| FormatError::Kernel(e.to_string()))?;
+                    let path = format!("geometry/{}.bin", paths.len());
+                    entries.insert(path.clone(), bytes);
+                    paths.insert(raw, path.clone());
+                    path
+                }
+            })
         };
+
+        let parent = match doc.parent_of(id) {
+            Some(parent) => Some(
+                doc.node(parent)
+                    .map_err(|e| FormatError::Malformed(e.to_string()))?
+                    .uid
+                    .raw(),
+            ),
+            None => None,
+        };
+
         nodes.push(NodeEntry {
+            uid: Some(node.uid.raw()),
             name: node.name.clone(),
             visible: node.visible,
-            geometry: path,
+            parent,
+            geometry,
         });
     }
 
@@ -211,6 +284,8 @@ pub fn save_with_options<K: GeometryKernel>(
         format: String::from(MAGIC),
         version: VERSION,
         geometry: String::from(doc.kernel().geometry_format()),
+        unit: doc.unit().map(|u| String::from(u.symbol())),
+        next_uid: Some(doc.next_uid().raw()),
         tolerance: ToleranceEntry {
             linear: tolerance.linear,
             angular: tolerance.angular,
@@ -271,33 +346,101 @@ pub fn load_with_metadata<K: GeometryKernel>(
         .as_ref()
         .and_then(|path| entries.get(path).cloned());
 
+    // The version selects the shape of what follows. A version-1 file has no
+    // identities, no tree and no unit in it, and the honest thing to do with
+    // one is to read it as what it is rather than to invent the three: fresh
+    // identities, every node a root, and a document that states no unit —
+    // because a version-1 document did not state one and claiming millimetres
+    // on its behalf is a guess with somebody's dimensions attached.
+    let version_two = manifest.version >= 2;
+
+    let unit = match (version_two, &manifest.unit) {
+        (true, Some(symbol)) => Some(w3d_core::Unit::from_symbol(symbol).ok_or_else(|| {
+            FormatError::Malformed(format!(
+                "this document is in `{symbol}`, which this build does not know"
+            ))
+        })?),
+        _ => None,
+    };
+
     let mut bodies: BTreeMap<String, w3d_core::kernel::Body> = BTreeMap::new();
     let mut nodes = Vec::new();
-    for entry in &manifest.nodes {
-        let body = match bodies.get(&entry.geometry) {
-            Some(body) => *body,
+    for (i, entry) in manifest.nodes.iter().enumerate() {
+        let body = match &entry.geometry {
+            Some(path) => {
+                let body = match bodies.get(path) {
+                    Some(body) => *body,
+                    None => {
+                        let blob = entries
+                            .get(path)
+                            .ok_or_else(|| FormatError::Malformed(format!("{path} is missing")))?;
+                        let body = kernel
+                            .load_body(blob)
+                            .map_err(|e| FormatError::Kernel(e.to_string()))?;
+                        bodies.insert(path.clone(), body);
+                        body
+                    }
+                };
+                Some(body)
+            }
+            // A node with no geometry is a group, and version 1 had none: an
+            // entry without geometry in a version-1 file is damage, not a
+            // group, and reading it as one would invent structure.
+            None if version_two => None,
             None => {
-                let blob = entries.get(&entry.geometry).ok_or_else(|| {
-                    FormatError::Malformed(format!("{} is missing", entry.geometry))
-                })?;
-                let body = kernel
-                    .load_body(blob)
-                    .map_err(|e| FormatError::Kernel(e.to_string()))?;
-                bodies.insert(entry.geometry.clone(), body);
-                body
+                return Err(FormatError::Malformed(format!(
+                    "node {i} names no geometry, and a version-1 document has nothing else a \
+                     node can be"
+                )));
             }
         };
-        let mut node = Node::new(entry.name.clone(), body);
-        node.visible = entry.visible;
-        nodes.push(node);
+
+        let uid = if version_two {
+            w3d_core::Uid::from_raw(entry.uid.ok_or_else(|| {
+                FormatError::Malformed(format!("node {i} has no `uid`, and version 2 requires one"))
+            })?)
+        } else {
+            // One-based, so that `0` keeps meaning "not in a document yet".
+            w3d_core::Uid::from_raw(i as u64 + 1)
+        };
+
+        nodes.push(w3d_core::LoadedNode {
+            uid,
+            name: entry.name.clone(),
+            body,
+            visible: entry.visible,
+            parent: if version_two {
+                entry.parent.map(w3d_core::Uid::from_raw)
+            } else {
+                None
+            },
+        });
     }
 
-    let document = Document::from_parts(
+    let next_uid = if version_two {
+        w3d_core::Uid::from_raw(manifest.next_uid.ok_or_else(|| {
+            FormatError::Malformed(String::from(
+                "this document has no `next_uid`, and version 2 requires one",
+            ))
+        })?)
+    } else {
+        w3d_core::Uid::from_raw(manifest.nodes.len() as u64 + 1)
+    };
+
+    let document = Document::from_loaded(
         kernel,
-        Tolerance::new(manifest.tolerance.linear, manifest.tolerance.angular),
-        Quality::new(manifest.quality.sag, manifest.quality.max_angle),
-        nodes,
-    );
+        w3d_core::Loaded {
+            tolerance: Tolerance::new(manifest.tolerance.linear, manifest.tolerance.angular),
+            quality: Quality::new(manifest.quality.sag, manifest.quality.max_angle),
+            unit,
+            next_uid,
+            nodes,
+        },
+    )
+    .map_err(|e| match e {
+        w3d_core::DocumentError::NotATree(why) => FormatError::NotATree(why),
+        other => FormatError::Malformed(other.to_string()),
+    })?;
 
     Ok(LoadedDocument {
         document,
