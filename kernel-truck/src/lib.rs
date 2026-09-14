@@ -280,6 +280,127 @@ fn append_face(out: &mut Mesh, face: Mesh) {
         .extend(face.line_indices.into_iter().map(|i| i + line_base));
 }
 
+/// The face a [`Profile`] describes, on the XY plane at z = 0.
+///
+/// This is what `extrude`, `revolve` and `sweep` all needed and none of them
+/// had: until 2026-09-14 each of them matched on the profile and called
+/// `create_box` or `create_cylinder`, so a `Polygon` — the only thing the
+/// app's sketcher produces — was thrown away and replaced with a 20 x 20 slab.
+///
+/// Counter-clockwise, always. A sketch is drawn in whichever direction the
+/// user's mouse went, and a clockwise wire attaches a plane whose normal points
+/// the other way: sweeping it along +Z then gives a solid that is inside out.
+fn profile_wire(profile: &Profile, plane: &SketchPlane) -> Result<Wire> {
+    profile.validate()?;
+    let at = |u: f64, v: f64| {
+        let p = plane.origin + plane.x_axis * u + plane.y_axis * v;
+        Point3::new(p.x, p.y, p.z)
+    };
+    let corners = |points: &[(f64, f64)]| {
+        let verts: Vec<Vertex> = points
+            .iter()
+            .map(|(u, v)| builder::vertex(at(*u, *v)))
+            .collect();
+        let mut wire = Wire::new();
+        for i in 0..verts.len() {
+            wire.push_back(builder::line(&verts[i], &verts[(i + 1) % verts.len()]));
+        }
+        wire
+    };
+    let wire = match profile {
+        Profile::Rectangle { width, height } => {
+            let (w, h) = (width / 2.0, height / 2.0);
+            corners(&[(-w, -h), (w, -h), (w, h), (-w, h)])
+        }
+        Profile::Circle { radius } => {
+            let normal = plane.x_axis.cross(plane.y_axis);
+            let rim = builder::vertex(at(*radius, 0.0));
+            builder::rsweep(
+                &rim,
+                Point3::new(plane.origin.x, plane.origin.y, plane.origin.z),
+                Vector3::new(normal.x, normal.y, normal.z),
+                FULL_TURN,
+            )
+        }
+        Profile::Polygon { vertices } => {
+            let mut points: Vec<(f64, f64)> = vertices.clone();
+            if profile.signed_area() < 0.0 {
+                points.reverse();
+            }
+            corners(&points)
+        }
+    };
+    Ok(wire)
+}
+
+/// The face that wire bounds, facing along the plane's normal.
+///
+/// Asking the face which way it faces, rather than assuming. Each profile kind
+/// is built by a different route — a polygon from its own vertices, a disc from
+/// `rsweep` about the normal — and the routes do not agree on which way round
+/// they go. It did not matter while `tsweep` was the only consumer, because
+/// sweeping a face along its own normal comes out right either way. `rsweep` is
+/// not so forgiving: a revolved disc enclosed **-393.2** where the answer is
+/// 394.8, inside out, while a revolved rectangle beside it was correct.
+///
+/// Measuring the wire's winding does not settle it either — a full-turn
+/// `rsweep` produces a circle whose two vertices have no winding to measure. The
+/// face's own oriented surface does.
+fn profile_face_on(profile: &Profile, plane: &SketchPlane) -> Result<Face> {
+    let wire = profile_wire(profile, plane)?;
+    let face =
+        builder::try_attach_plane(&[wire]).map_err(|e| KernelError::Failed(format!("{e:?}")))?;
+    let wanted = plane.x_axis.cross(plane.y_axis);
+    let normal = match face.oriented_surface() {
+        Surface::Plane(p) => p.normal(),
+        // Every profile here attaches a plane; anything else is not this
+        // function's to interpret, so it is left as it came.
+        _ => return Ok(face),
+    };
+    let along = normal.x * wanted.x + normal.y * wanted.y + normal.z * wanted.z;
+    if along < 0.0 {
+        Ok(face.inverse())
+    } else {
+        Ok(face)
+    }
+}
+
+fn profile_face(profile: &Profile) -> Result<Face> {
+    profile_face_on(profile, &SketchPlane::default())
+}
+
+/// Turns a solid the right way out, by weighing it.
+///
+/// `rsweep`'s sense depends on which side of the axis the profile sits: the same
+/// face revolved about a line 5 to its left and 5 to its right comes out facing
+/// outwards once and inwards once. So neither always inverting nor never
+/// inverting is right, and the only honest test is the answer itself — a coarse
+/// triangulation's signed volume, which is negative exactly when every normal
+/// points at the interior.
+///
+/// Measured on 2026-09-14: a disc revolved about a line 5 away enclosed
+/// **-393.2** where the answer is 394.8, while a rectangle revolved about a line
+/// 5 the other way was already correct. An inside-out solid is lit from within
+/// and, since nothing here is back-face culled, looks like a hole.
+fn faced_outwards(mut solid: Solid) -> Solid {
+    let mut volume = 0.0;
+    let mesh = solid.triangulation(BOUNDS_SAG).to_polygon();
+    let points = mesh.positions();
+    for face in mesh.tri_faces() {
+        let (a, b, c) = (
+            points[face[0].pos],
+            points[face[1].pos],
+            points[face[2].pos],
+        );
+        volume += a.x * (b.y * c.z - b.z * c.y) - a.y * (b.x * c.z - b.z * c.x)
+            + a.z * (b.x * c.y - b.y * c.x);
+    }
+    if volume < 0.0 {
+        solid.not();
+    }
+    solid
+}
+
 impl GeometryKernel for TruckKernel {
     fn name(&self) -> &'static str {
         "truck-0.6.0"
@@ -498,7 +619,15 @@ impl GeometryKernel for TruckKernel {
                 "fillet radius exceeds solid dimensions",
             ));
         }
-        self.copy(body)
+        // A copy of the body is what this returned until 2026-09-14, and every
+        // check it passed asked only whether a *different handle* came back with
+        // bounds and a mesh. A user pressed Fillet and nothing happened, on the
+        // backend the browser runs. Blending an edge needs a rolling-ball
+        // surface, which `truck` has no builder for; the OpenCASCADE build has
+        // `BRepFilletAPI_MakeFillet`.
+        Err(KernelError::Unsupported(
+            "this backend has no edge blending, so it cannot fillet",
+        ))
     }
 
     fn chamfer(&mut self, body: Body, distance: f64) -> Result<Body> {
@@ -512,79 +641,161 @@ impl GeometryKernel for TruckKernel {
                 "chamfer distance exceeds solid dimensions",
             ));
         }
-        self.copy(body)
+        // As with `fillet`: a copy, until 2026-09-14. Cutting a corner flat is
+        // the easier of the two — a plane, and a boolean against it — but the
+        // boolean this backend would need is the coincident-face case it
+        // declines, so claiming it would be claiming the same thing twice.
+        Err(KernelError::Unsupported(
+            "this backend has no edge blending, so it cannot chamfer",
+        ))
     }
 
+    /// The profile, swept along +Z — which is what the trait says and what this
+    /// did not do. It called `create_box` or `create_cylinder` with the
+    /// profile's two numbers, so a polygon became a 20 x 20 slab and every
+    /// extrusion straddled the plane it was drawn on instead of standing on it.
     fn extrude(&mut self, profile: &Profile, distance: f64) -> Result<Body> {
         if distance <= 0.0 {
             return Err(KernelError::Degenerate("extrude distance must be positive"));
         }
-        match profile {
-            Profile::Rectangle { width, height } => {
-                self.create_box(Vec3::new(*width, *height, distance))
-            }
-            Profile::Circle { radius } => self.create_cylinder(*radius, distance),
-            Profile::Polygon { vertices } => {
-                if vertices.len() < 3 {
-                    return Err(KernelError::Degenerate(
-                        "polygon profile needs at least 3 vertices",
-                    ));
-                }
-                self.create_box(Vec3::new(20.0, 20.0, distance))
-            }
-        }
+        let face = profile_face(profile)?;
+        let solid = builder::tsweep(&face, Vector3::unit_z() * distance);
+        Ok(self.alloc(solid))
     }
 
+    /// The profile, turned about the axis it was given. The axis was ignored
+    /// entirely until 2026-09-14, and the profile with it: a rectangle became a
+    /// cylinder of the rectangle's own two numbers, at the origin, whatever axis
+    /// the caller named.
+    ///
+    /// **A full turn leaves a seam**, and that is worth knowing at the call
+    /// site: one closed edge that begins and ends at the same vertex, which
+    /// `truck-shapeops` cannot split. `create_cylinder` sweeps a disc along the
+    /// axis instead of revolving a rectangle about it for exactly this reason —
+    /// the note there records a revolved cylinder taking 25 seconds to subtract
+    /// and returning the plug rather than the plate. So a revolved solid is
+    /// marked `singular`: it is a body this backend can draw and measure and
+    /// will not put into a boolean.
     fn revolve(
         &mut self,
         profile: &Profile,
-        _axis_origin: Vec3,
-        _axis_dir: Vec3,
+        axis_origin: Vec3,
+        axis_dir: Vec3,
         angle_rad: f64,
     ) -> Result<Body> {
         if angle_rad <= 0.0 {
             return Err(KernelError::Degenerate("revolve angle must be positive"));
         }
-        match profile {
-            Profile::Rectangle { width, height } => self.create_cylinder(*width, *height),
-            Profile::Circle { radius } => self.create_sphere(*radius),
-            Profile::Polygon { .. } => self.create_cylinder(10.0, 10.0),
+        if axis_dir.length() <= 0.0 {
+            return Err(KernelError::Degenerate("revolve axis has no direction"));
         }
+        let face = profile_face(profile)?;
+        let solid = faced_outwards(builder::rsweep(
+            &face,
+            Point3::new(axis_origin.x, axis_origin.y, axis_origin.z),
+            Vector3::new(axis_dir.x, axis_dir.y, axis_dir.z),
+            Rad(angle_rad),
+        ));
+        let body = self.alloc(solid);
+        self.singular.insert(body);
+        Ok(body)
     }
 
+    /// The profile, carried along a **straight** path. It ignored the path
+    /// completely until 2026-09-14 and made a solid 30 long whatever was asked
+    /// for.
+    ///
+    /// A bent path is refused rather than approximated. `builder::tsweep` takes
+    /// a vector, not a spine: following a polyline would mean sweeping each
+    /// segment and unioning the results, and this backend's boolean declines
+    /// exactly the coincident-face case those unions are made of. An honest
+    /// `Unsupported` sends a caller to the OpenCASCADE build, which does have a
+    /// pipe.
     fn sweep(&mut self, profile: &Profile, path_points: &[Vec3]) -> Result<Body> {
         if path_points.len() < 2 {
             return Err(KernelError::Degenerate(
                 "sweep path requires at least 2 points",
             ));
         }
-        match profile {
-            Profile::Rectangle { width, height } => {
-                self.create_box(Vec3::new(*width, *height, 30.0))
-            }
-            Profile::Circle { radius } => self.create_cylinder(*radius, 30.0),
-            Profile::Polygon { .. } => self.create_box(Vec3::new(15.0, 15.0, 30.0)),
+        if path_points.len() > 2 {
+            return Err(KernelError::Unsupported(
+                "this backend sweeps along a straight path only",
+            ));
         }
+        let along = path_points[1] - path_points[0];
+        if along.length() <= 0.0 {
+            return Err(KernelError::Degenerate("a sweep path of no length"));
+        }
+        let face = profile_face(profile)?;
+        let solid = builder::tsweep(&face, Vector3::new(along.x, along.y, along.z));
+        Ok(self.alloc(solid))
     }
 
-    fn loft(&mut self, profiles: &[Profile], _planes: &[SketchPlane]) -> Result<Body> {
+    /// Two profiles, on their two planes, joined edge by edge — where it used
+    /// to answer any loft at all with a 20-cube.
+    ///
+    /// Two and no more: `try_wire_homotopy` pairs the edges of one wire with the
+    /// edges of another, so both profiles must be the same *kind* of outline as
+    /// well as the same count. A chain of three would be two shells to stitch,
+    /// and stitching is what this backend's boolean is worst at.
+    fn loft(&mut self, profiles: &[Profile], planes: &[SketchPlane]) -> Result<Body> {
         if profiles.is_empty() {
             return Err(KernelError::Degenerate("loft requires at least 1 profile"));
         }
-        self.create_box(Vec3::new(20.0, 20.0, 20.0))
+        if profiles.len() != 2 {
+            return Err(KernelError::Unsupported(
+                "this backend lofts between two profiles only",
+            ));
+        }
+        if planes.len() < profiles.len() {
+            return Err(KernelError::Degenerate("a loft needs a plane per profile"));
+        }
+        let wires = [
+            profile_wire(&profiles[0], &planes[0])?,
+            profile_wire(&profiles[1], &planes[1])?,
+        ];
+        let mut shell = builder::try_wire_homotopy(&wires[0], &wires[1]).map_err(|e| {
+            KernelError::Failed(format!(
+                "the two profiles could not be joined edge to edge: {e:?}"
+            ))
+        })?;
+        // The walls, and then the two ends: the first cap faces back along the
+        // loft and so goes in inverted, which is what makes the shell closed
+        // rather than a tube.
+        let caps = [
+            builder::try_attach_plane(&[wires[0].clone()])
+                .map_err(|e| KernelError::Failed(format!("{e:?}")))?
+                .inverse(),
+            builder::try_attach_plane(&[wires[1].clone()])
+                .map_err(|e| KernelError::Failed(format!("{e:?}")))?,
+        ];
+        shell.push(caps[0].clone());
+        shell.push(caps[1].clone());
+        let solid = Solid::try_new(vec![shell])
+            .map_err(|e| KernelError::Failed(format!("the loft did not close: {e:?}")))?;
+        Ok(self.alloc(solid))
     }
 
+    /// Refused, because this backend has no offset surface to build a wall out
+    /// of.
+    ///
+    /// What it did until 2026-09-14 was return a *smaller box*: not a hollow
+    /// solid, not the body that was asked about, and not even the same shape —
+    /// a hollowed sphere came back as a cube. Nothing about it was true, and
+    /// every check it passed was a check that only asked whether a body came
+    /// back. Offsetting a B-rep surface is a feature, not a workaround, and
+    /// `truck` does not have one: the OpenCASCADE build does
+    /// (`BRepOffsetAPI_MakeThickSolid`).
     fn shell(&mut self, body: Body, _face_id: u32, thickness: f64) -> Result<Body> {
         if thickness <= 0.0 {
             return Err(KernelError::Degenerate("shell thickness must be positive"));
         }
-        let bounds = self.bounds(body)?;
-        let shrunk = Vec3::new(
-            (bounds.max.x - bounds.min.x - thickness * 2.0).max(1.0),
-            (bounds.max.y - bounds.min.y - thickness * 2.0).max(1.0),
-            (bounds.max.z - bounds.min.z - thickness * 2.0).max(1.0),
-        );
-        self.create_box(shrunk)
+        // Still an error for a handle that is not ours, so a caller cannot tell
+        // "no such body" from "not implemented" by accident.
+        self.get(body)?;
+        Err(KernelError::Unsupported(
+            "this backend cannot offset a surface, so it cannot hollow a solid",
+        ))
     }
 
     fn topology(&self, body: Body) -> Result<Topology> {

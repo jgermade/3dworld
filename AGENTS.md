@@ -297,6 +297,22 @@ something, because a skipped check reads as a passed one on the backend it was w
   its topology and its bounds" is true of any correct kernel, so it lives in
   `kernel/src/conformance.rs` with everything else that is.
 
+### An operation a backend cannot perform says so
+
+`Unsupported` is not only STEP's escape hatch. It is the conforming answer from every operation a
+backend does not have — `fillet`, `chamfer`, `shell`, a bent `sweep`, a loft of more than two
+sections — and **substituting is not**. Returning the body unchanged, or a primitive of roughly the
+right size, is the one failure mode a suite cannot see by asking whether an answer arrived, and on
+2026-09-14 every profile operation on *both* real backends was doing exactly that: a `Profile`
+reduced to two numbers, a sketched polygon replaced by a hard-coded 20 x 20 slab, `fillet` and
+`chamfer` returning a copy of the body, `shell` returning a smaller box. Every check passed, because
+a copy has bounds and a slab has a mesh.
+
+So the geometry half now **weighs each operation against arithmetic**: the area of an L is not the
+area of its bounding box, a cone is not a cylinder, a rounded cube weighs less than a cube and a
+chamfered one less again. Arithmetic is what a placeholder cannot fake. A new operation on this seam
+arrives with a number attached, or it arrives untested.
+
 ## Licensing
 
 **This repository is GPL-3.0-or-later**, and the reasoning is in the 2026-08-25 record file under

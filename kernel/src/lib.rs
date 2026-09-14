@@ -102,11 +102,145 @@ pub enum BooleanOp {
 }
 
 /// A 2D planar profile on the XY plane centred at origin, suitable for linear extrusion or revolution.
+///
+/// `Rectangle` and `Circle` are centred on the origin; a `Polygon`'s vertices
+/// say where it is, in the same plane.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Profile {
     Rectangle { width: f64, height: f64 },
     Circle { radius: f64 },
     Polygon { vertices: Vec<(f64, f64)> },
+}
+
+impl Profile {
+    /// Whether this describes a region at all, checked once here rather than
+    /// once per backend.
+    ///
+    /// Every operation that takes a profile — [`GeometryKernel::extrude`],
+    /// `revolve`, `sweep`, `loft` — needs the same three things of it, and none
+    /// of them is about the backend: a positive size, at least three corners,
+    /// and an outline that does not cross itself. The last is the one worth
+    /// having in one place. A bowtie has no inside: the two halves wind
+    /// opposite ways, its signed area is zero, and what a kernel builds from it
+    /// is whatever its sweeper happens to do — a solid with no volume, or one
+    /// folded through itself. "Inside" is the thing a profile is *for*, so a
+    /// profile that does not define one is [`KernelError::Degenerate`] and the
+    /// contract says so.
+    pub fn validate(&self) -> Result<()> {
+        match self {
+            Self::Rectangle { width, height } => {
+                if *width <= 0.0 || *height <= 0.0 || width.is_nan() || height.is_nan() {
+                    return Err(KernelError::Degenerate(
+                        "a profile's width and height must be positive",
+                    ));
+                }
+            }
+            Self::Circle { radius } => {
+                if *radius <= 0.0 || radius.is_nan() {
+                    return Err(KernelError::Degenerate(
+                        "a profile's radius must be positive",
+                    ));
+                }
+            }
+            Self::Polygon { vertices } => {
+                if vertices.len() < 3 {
+                    return Err(KernelError::Degenerate(
+                        "a polygon profile needs at least three vertices",
+                    ));
+                }
+                if polygon_area(vertices).abs() <= 0.0 {
+                    return Err(KernelError::Degenerate(
+                        "a polygon profile encloses no area",
+                    ));
+                }
+                if polygon_crosses_itself(vertices) {
+                    return Err(KernelError::Degenerate(
+                        "a polygon profile crosses itself, so it has no inside",
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Twice the signed area of a polygon profile, and zero for the others.
+    /// Positive is counter-clockwise, which is the winding a backend wants
+    /// before it sweeps the profile into a solid — a sketch is drawn in
+    /// whichever direction the user's mouse went.
+    pub fn signed_area(&self) -> f64 {
+        match self {
+            Self::Polygon { vertices } => polygon_area(vertices) / 2.0,
+            _ => 0.0,
+        }
+    }
+}
+
+/// Twice the signed area, by the shoelace formula.
+fn polygon_area(vertices: &[(f64, f64)]) -> f64 {
+    let mut sum = 0.0;
+    for i in 0..vertices.len() {
+        let (x0, y0) = vertices[i];
+        let (x1, y1) = vertices[(i + 1) % vertices.len()];
+        sum += x0 * y1 - x1 * y0;
+    }
+    sum
+}
+
+/// Whether any two non-adjacent edges of the outline meet.
+///
+/// Quadratic in the number of vertices, which is the right trade for a sketch:
+/// a few dozen points, once, at the moment a solid is built.
+fn polygon_crosses_itself(vertices: &[(f64, f64)]) -> bool {
+    let n = vertices.len();
+    let seg = |i: usize| (vertices[i], vertices[(i + 1) % n]);
+    for i in 0..n {
+        for j in (i + 1)..n {
+            // Edges that share a vertex touch by construction, and the first
+            // and last edge share one too.
+            if j == i + 1 || (i == 0 && j == n - 1) {
+                continue;
+            }
+            let (a, b) = seg(i);
+            let (c, d) = seg(j);
+            if segments_cross(a, b, c, d) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+type Point2 = (f64, f64);
+
+fn segments_cross(a: Point2, b: Point2, c: Point2, d: Point2) -> bool {
+    let side = |(px, py): Point2, (qx, qy): Point2, (rx, ry): Point2| {
+        let v = (qx - px) * (ry - py) - (qy - py) * (rx - px);
+        if v > 0.0 {
+            1
+        } else if v < 0.0 {
+            -1
+        } else {
+            0
+        }
+    };
+    let (d1, d2) = (side(c, d, a), side(c, d, b));
+    let (d3, d4) = (side(a, b, c), side(a, b, d));
+    if d1 * d2 < 0 && d3 * d4 < 0 {
+        return true;
+    }
+    // Collinear overlap: a zero on both sides of one segment, and the point
+    // inside the other's extent. Two edges of a sketch that double back along
+    // each other enclose nothing, and are as much of a crossing as an X.
+    let on = |(px, py): Point2, (qx, qy): Point2, (rx, ry): Point2| {
+        rx.min(px) - 1.0e-12 <= qx
+            && qx <= rx.max(px) + 1.0e-12
+            && ry.min(py) - 1.0e-12 <= qy
+            && qy <= ry.max(py) + 1.0e-12
+    };
+    (d1 == 0 && on(c, a, d))
+        || (d2 == 0 && on(c, b, d))
+        || (d3 == 0 && on(a, c, b))
+        || (d4 == 0 && on(a, d, b))
 }
 
 /// A 3D sketch plane with an origin point and orthogonal X/Y basis vectors.
@@ -364,11 +498,33 @@ pub trait GeometryKernel {
     /// history entry still refers to.
     fn delete(&mut self, body: Body) -> Result<()>;
 
+    // The six operations below share one rule, and it is the rule this seam was
+    // written for: **an operation a backend cannot perform says so.**
+    // [`KernelError::Unsupported`] is a conforming answer from every one of
+    // them, and returning the body unchanged — or a primitive of roughly the
+    // right size — is not. It reads as a rule about honesty and it is really a
+    // rule about *checks*: a suite can weigh an answer against arithmetic and
+    // cannot weigh one against an intention, so a backend that substitutes
+    // passes everything until somebody looks at the screen. Every one of these
+    // did substitute, on both real backends, until 2026-09-14 — see
+    // `RECORD/2026-09-14_00h21.a-profile-that-reaches-the-kernel.completed.md`.
+    //
+    // A bad *argument* is still [`KernelError::Degenerate`], and the two are
+    // different sentences to a user: "this build cannot do that" sends them to
+    // another build, "that radius is too big for that solid" sends them back to
+    // the model.
+
     /// Fillets / rounds all sharp edges of a solid with the specified radius.
     ///
     /// The input `body` is unmodified; a new handle is returned for the
     /// resulting solid. If `radius <= 0.0` or exceeds the solid's bounds,
     /// returns `KernelError::Degenerate`.
+    ///
+    /// **Blending is declinable, and in both directions at once.** A rolling
+    /// ball surface is a feature a kernel has or has not; a backend without one
+    /// answers [`KernelError::Unsupported`] from `fillet` *and* `chamfer`, never
+    /// from one alone — a user who can round an edge but not cut it has met a
+    /// bug, not a limitation.
     fn fillet(&mut self, body: Body, radius: f64) -> Result<Body>;
 
     /// Chamfers / bevels all sharp edges of a solid with the specified distance.
@@ -376,12 +532,31 @@ pub trait GeometryKernel {
     /// The input `body` is unmodified; a new handle is returned for the
     /// resulting solid. If `distance <= 0.0` or exceeds the solid's bounds,
     /// returns `KernelError::Degenerate`.
+    ///
+    /// Declinable with `fillet`, and only with it.
     fn chamfer(&mut self, body: Body, distance: f64) -> Result<Body>;
 
     /// Extrudes a 2D planar profile linearly along +Z by `distance`.
+    ///
+    /// **The solid stands on the plane the profile was drawn on**, from `z = 0`
+    /// to `z = distance`, rather than straddling it: a sketch is drawn on a face
+    /// and pulled up from it. The profile is the *outline* — a
+    /// [`Profile::Polygon`] extrudes to a prism over those vertices, not to a
+    /// box around them.
+    ///
+    /// [`Profile::validate`] first: an outline that is not a region is
+    /// [`KernelError::Degenerate`], by the same rule in every backend.
     fn extrude(&mut self, profile: &Profile, distance: f64) -> Result<Body>;
 
     /// Revolves a 2D profile around an axis passing through `axis_origin` along `axis_dir` by `angle_rad`.
+    ///
+    /// **The axis has to stand clear of the profile.** A profile is centred on
+    /// the origin, so a turn about an axis through the origin sweeps each half
+    /// of it over the other and the result covers itself twice — which is not a
+    /// solid, and is [`KernelError::Degenerate`] or
+    /// [`KernelError::Failed`] rather than something to interpret. Beside the
+    /// axis, the volume is Pappus's: area times the distance its centroid
+    /// travels.
     fn revolve(
         &mut self,
         profile: &Profile,
@@ -391,12 +566,24 @@ pub trait GeometryKernel {
     ) -> Result<Body>;
 
     /// Sweeps a 2D profile along a 3D path defined by `path_points`.
+    ///
+    /// The profile sits at the first point. A backend that can only sweep in a
+    /// straight line answers [`KernelError::Unsupported`] for a path with more
+    /// than two points, which is what `TruckKernel` does; the OpenCASCADE build
+    /// runs the profile along the polyline as a pipe.
     fn sweep(&mut self, profile: &Profile, path_points: &[Vec3]) -> Result<Body>;
 
     /// Loft / transitions between multiple 2D profiles placed on specified sketch planes.
+    ///
+    /// One plane per profile, and at least two of each. A backend that can only
+    /// join two sections answers [`KernelError::Unsupported`] for more.
     fn loft(&mut self, profiles: &[Profile], planes: &[SketchPlane]) -> Result<Body>;
 
     /// Creates a hollow/thin-walled solid by removing `face_id` with `thickness`.
+    ///
+    /// Needs an offset surface, which not every kernel has:
+    /// [`KernelError::Unsupported`] is a conforming answer and `TruckKernel`
+    /// gives it.
     fn shell(&mut self, body: Body, face_id: u32, thickness: f64) -> Result<Body>;
 
     fn topology(&self, body: Body) -> Result<Topology>;
@@ -712,5 +899,75 @@ mod tests {
         .validate()
         .expect_err("two assemblies cannot hold each other");
         assert!(err.contains("assembly 0"), "{err}");
+    }
+
+    /// The validator's own fixtures. A sketch is the one place in this program
+    /// where a user hands the kernel an arbitrary outline, so the predicate that
+    /// decides whether it is one is worth its own negative controls.
+    #[test]
+    fn a_profile_that_does_not_describe_a_region_is_refused() {
+        let poly = |v: &[(f64, f64)]| Profile::Polygon {
+            vertices: v.to_vec(),
+        };
+
+        // The shapes a sketcher produces, and they are fine either way round.
+        let l = poly(&[
+            (0.0, 0.0),
+            (4.0, 0.0),
+            (4.0, 2.0),
+            (2.0, 2.0),
+            (2.0, 4.0),
+            (0.0, 4.0),
+        ]);
+        assert!(l.validate().is_ok());
+        assert!((l.signed_area() - 12.0).abs() < 1e-9, "{}", l.signed_area());
+        let mut backwards = vec![
+            (0.0, 0.0),
+            (4.0, 0.0),
+            (4.0, 2.0),
+            (2.0, 2.0),
+            (2.0, 4.0),
+            (0.0, 4.0),
+        ];
+        backwards.reverse();
+        let cw = poly(&backwards);
+        assert!(cw.validate().is_ok());
+        assert!(cw.signed_area() < 0.0, "clockwise is negative area");
+
+        // A bowtie: two triangles winding opposite ways, no inside, and — the
+        // reason area alone is not the test — a signed area of exactly zero.
+        let bowtie = poly(&[(0.0, 0.0), (2.0, 2.0), (2.0, 0.0), (0.0, 2.0)]);
+        assert_eq!(bowtie.signed_area(), 0.0);
+        assert!(matches!(bowtie.validate(), Err(KernelError::Degenerate(_))));
+
+        // A crossing that does *not* cancel, so the area is a perfectly
+        // respectable number and the outline is still not one.
+        let crossed = poly(&[(0.0, 0.0), (4.0, 4.0), (0.0, 4.0), (4.0, 0.0), (2.0, 6.0)]);
+        assert!(matches!(
+            crossed.validate(),
+            Err(KernelError::Degenerate(_))
+        ));
+
+        // Degenerate in the other ways.
+        assert!(poly(&[(0.0, 0.0), (1.0, 1.0)]).validate().is_err());
+        assert!(
+            poly(&[(0.0, 0.0), (1.0, 1.0), (2.0, 2.0)])
+                .validate()
+                .is_err(),
+            "three points on a line enclose nothing"
+        );
+        assert!(
+            Profile::Rectangle {
+                width: 0.0,
+                height: 1.0
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(Profile::Circle { radius: -1.0 }.validate().is_err());
+        assert!(
+            Profile::Circle { radius: 1.0 }.validate().is_ok(),
+            "a disc is a region"
+        );
     }
 }

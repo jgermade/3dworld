@@ -118,12 +118,50 @@ fn revolve_profile_degrees_and_bounds() {
         width: 10.0,
         height: 20.0,
     };
+
+    // An axis through the middle of the profile is the degenerate case, and it
+    // belongs in this file: a profile is centred on the origin, so a turn about
+    // an axis through the origin sweeps each half of it over the other and the
+    // result covers itself twice. OpenCASCADE refuses it, which is the right
+    // answer and the one this suite exists to pin — it is *not* a crash, and it
+    // is not a solid either. This test asked for it and passed until
+    // 2026-09-14, because the backend was quietly substituting a cylinder for
+    // the profile and never revolving anything at all.
+    let refused = d.add_revolve(
+        "Degenerate",
+        &prof,
+        Vec3::ZERO,
+        Vec3::Y,
+        std::f64::consts::PI,
+    );
+    let message = refused
+        .expect_err("a profile turned about its own middle")
+        .to_string();
+    assert!(
+        message.contains("revolved"),
+        "refused, but without saying what was wrong: {message}"
+    );
+
+    // Beside the axis it is an ordinary half tube, and the arithmetic is
+    // Pappus's: half of 2 pi R A, with R = 20 and A = 200.
     let revolved = d
-        .add_revolve("Revolved", &prof, Vec3::ZERO, Vec3::Y, std::f64::consts::PI)
+        .add_revolve(
+            "Revolved",
+            &prof,
+            Vec3::new(-20.0, 0.0, 0.0),
+            Vec3::Y,
+            std::f64::consts::PI,
+        )
         .unwrap();
     let bounds = d.bounds(revolved).unwrap();
-    assert!(bounds.size().x > 0.0);
-    assert!(bounds.size().y > 0.0);
+    // The profile spans x from -5 to 5, so its distance from the axis at
+    // x = -20 runs 15 to 25. Half a turn leaves the starting face where it was
+    // and carries its far edge round to x = -45, so the span is 50 — not 45,
+    // which is what this test asked for on its first draft and is the radius
+    // rather than the reach.
+    assert!((bounds.size().x - 50.0).abs() < 1e-6, "{bounds:?}");
+    assert!((bounds.size().y - 20.0).abs() < 1e-6, "{bounds:?}");
+    assert!((bounds.size().z - 25.0).abs() < 1e-6, "{bounds:?}");
 }
 
 #[test]

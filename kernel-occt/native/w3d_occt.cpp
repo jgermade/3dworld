@@ -27,7 +27,17 @@
 #include <BRepFilletAPI_MakeFillet.hxx>
 #include <BRepOffsetAPI_MakeThickSolid.hxx>
 #include <BRepMesh_IncrementalMesh.hxx>
+#include <BRepBuilderAPI_MakeEdge.hxx>
+#include <BRepBuilderAPI_MakeFace.hxx>
+#include <BRepBuilderAPI_MakePolygon.hxx>
+#include <BRepBuilderAPI_MakeWire.hxx>
+#include <BRepOffsetAPI_MakePipe.hxx>
+#include <BRepOffsetAPI_ThruSections.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
+#include <BRepPrimAPI_MakePrism.hxx>
+#include <BRepPrimAPI_MakeRevol.hxx>
+#include <gp_Circ.hxx>
+#include <gp_Pln.hxx>
 #include <BRepPrimAPI_MakeCylinder.hxx>
 #include <BRepPrimAPI_MakeSphere.hxx>
 #include <BRep_Tool.hxx>
@@ -369,49 +379,163 @@ int32_t w3d_occt_shell(W3dOcctContext *ctx, uint32_t body, uint32_t face_id, dou
   });
 }
 
-int32_t w3d_occt_revolve(W3dOcctContext *ctx, int32_t profile_kind, double p1, double p2,
-                         double ax_ox, double ax_oy, double ax_oz,
-                         double ax_dx, double ax_dy, double ax_dz,
-                         double angle_rad, uint32_t *out) {
-  if (angle_rad <= 0.0 || p1 <= 0.0) {
-    return W3D_OCCT_ERR_DEGENERATE;
-  }
-  return guarded([&] {
-    if (profile_kind == 1) { // Circle
-      gp_Ax2 axis(gp_Pnt(ax_ox, ax_oy, ax_oz), gp_Dir(ax_dx, ax_dy, ax_dz));
-      BRepPrimAPI_MakeSphere maker(axis, p1, angle_rad);
-      *out = ctx->store(maker.Shape());
-    } else { // Rectangle or default
-      double height = p2 > 0.0 ? p2 : p1;
-      gp_Ax2 axis(gp_Pnt(ax_ox, ax_oy, ax_oz), gp_Dir(ax_dx, ax_dy, ax_dz));
-      BRepPrimAPI_MakeCylinder maker(axis, p1, height, angle_rad);
-      *out = ctx->store(maker.Shape());
-    }
-    return W3D_OCCT_OK;
-  });
+namespace {
+
+/// The plane a profile is drawn on, as OpenCASCADE's own axis placement.
+gp_Ax2 profile_plane(const W3dOcctProfile &p) {
+  const gp_Pnt origin(p.origin[0], p.origin[1], p.origin[2]);
+  const gp_Dir x(p.x_axis[0], p.x_axis[1], p.x_axis[2]);
+  const gp_Dir y(p.y_axis[0], p.y_axis[1], p.y_axis[2]);
+  return gp_Ax2(origin, x.Crossed(y), x);
 }
 
-int32_t w3d_occt_sweep(W3dOcctContext *ctx, int32_t profile_kind, double p1, double p2,
-                       const double *pts, uint32_t pt_count, uint32_t *out) {
-  if (pt_count < 2 || p1 <= 0.0) {
+gp_Pnt profile_point(const W3dOcctProfile &p, double u, double v) {
+  return gp_Pnt(p.origin[0] + p.x_axis[0] * u + p.y_axis[0] * v,
+                p.origin[1] + p.x_axis[1] * u + p.y_axis[1] * v,
+                p.origin[2] + p.x_axis[2] * u + p.y_axis[2] * v);
+}
+
+/// The closed outline a profile describes, in three dimensions.
+///
+/// A rectangle and a circle are centred on the plane's origin, as the contract
+/// says a profile is; a polygon's vertices say where it is. The caller has
+/// already refused a profile that is not a region — fewer than three corners, no
+/// area, an outline that crosses itself — in `Profile::validate`, on the Rust
+/// side, so that both backends refuse the same sketches for the same reasons.
+TopoDS_Wire profile_wire(const W3dOcctProfile &p) {
+  if (p.kind == 1) { // a disc
+    const gp_Circ circle(profile_plane(p), p.p1);
+    return BRepBuilderAPI_MakeWire(BRepBuilderAPI_MakeEdge(circle).Edge()).Wire();
+  }
+  BRepBuilderAPI_MakePolygon poly;
+  if (p.kind == 2 && p.vertices && p.vertex_count >= 3) {
+    for (uint32_t i = 0; i < p.vertex_count; ++i) {
+      poly.Add(profile_point(p, p.vertices[i * 2], p.vertices[i * 2 + 1]));
+    }
+  } else { // a rectangle, centred
+    const double w = p.p1 / 2.0;
+    const double h = (p.p2 > 0.0 ? p.p2 : p.p1) / 2.0;
+    poly.Add(profile_point(p, -w, -h));
+    poly.Add(profile_point(p, w, -h));
+    poly.Add(profile_point(p, w, h));
+    poly.Add(profile_point(p, -w, h));
+  }
+  poly.Close();
+  return poly.Wire();
+}
+
+/// The planar face that outline bounds — what every one of these operations
+/// sweeps.
+TopoDS_Face profile_face(const W3dOcctProfile &p) {
+  const TopoDS_Wire wire = profile_wire(p);
+  return BRepBuilderAPI_MakeFace(gp_Pln(profile_plane(p)), wire, Standard_True).Face();
+}
+
+gp_Vec profile_normal(const W3dOcctProfile &p) { return gp_Vec(profile_plane(p).Direction()); }
+
+} // namespace
+
+int32_t w3d_occt_extrude(W3dOcctContext *ctx, const W3dOcctProfile *profile, double distance,
+                         uint32_t *out) {
+  if (!profile || distance <= 0.0) {
     return W3D_OCCT_ERR_DEGENERATE;
   }
   return guarded([&] {
-    double height = p2 > 0.0 ? p2 : p1;
-    BRepPrimAPI_MakeBox maker(p1, height, 30.0);
+    // A real prism over the profile's own outline. This function did not exist
+    // before 2026-09-14: the Rust side turned an extrusion into `create_box` or
+    // `create_cylinder` with the profile's two numbers, which is why a sketched
+    // polygon came out a 20 x 20 slab that straddled the plane it was drawn on.
+    const TopoDS_Face face = profile_face(*profile);
+    BRepPrimAPI_MakePrism maker(face, profile_normal(*profile) * distance);
+    if (!maker.IsDone()) {
+      return fail("the profile could not be extruded");
+    }
     *out = ctx->store(maker.Shape());
     return W3D_OCCT_OK;
   });
 }
 
-int32_t w3d_occt_loft(W3dOcctContext *ctx, int32_t profile_kind, double p1, double p2,
-                      const double *planes, uint32_t plane_count, uint32_t *out) {
-  if (plane_count == 0 || p1 <= 0.0) {
+int32_t w3d_occt_revolve(W3dOcctContext *ctx, const W3dOcctProfile *profile,
+                         const double *axis_origin, const double *axis_dir, double angle_rad,
+                         uint32_t *out) {
+  if (!profile || !axis_origin || !axis_dir || angle_rad <= 0.0) {
     return W3D_OCCT_ERR_DEGENERATE;
   }
   return guarded([&] {
-    double height = p2 > 0.0 ? p2 : p1;
-    BRepPrimAPI_MakeBox maker(p1, height, 20.0);
+    // The profile turned about the axis, rather than a sphere or a cylinder
+    // chosen from the profile's kind and placed at the axis origin. The old
+    // version was right for exactly one case — a disc centred on the axis is a
+    // sphere — and wrong for every other, including a rectangle, which it made
+    // a cylinder of the rectangle's own width.
+    const TopoDS_Face face = profile_face(*profile);
+    const gp_Ax1 axis(gp_Pnt(axis_origin[0], axis_origin[1], axis_origin[2]),
+                      gp_Dir(axis_dir[0], axis_dir[1], axis_dir[2]));
+    BRepPrimAPI_MakeRevol maker(face, axis, angle_rad);
+    if (!maker.IsDone()) {
+      return fail("the profile could not be revolved about that axis");
+    }
+    *out = ctx->store(maker.Shape());
+    return W3D_OCCT_OK;
+  });
+}
+
+int32_t w3d_occt_sweep(W3dOcctContext *ctx, const W3dOcctProfile *profile, const double *pts,
+                       uint32_t pt_count, uint32_t *out) {
+  if (!profile || !pts || pt_count < 2) {
+    return W3D_OCCT_ERR_DEGENERATE;
+  }
+  return guarded([&] {
+    const auto point = [&](uint32_t i) {
+      return gp_Pnt(pts[i * 3], pts[i * 3 + 1], pts[i * 3 + 2]);
+    };
+    const TopoDS_Face face = profile_face(*profile);
+    if (pt_count == 2) {
+      // A straight path is a prism, which is both cheaper and more robust than
+      // a pipe over a two-point spine.
+      const gp_Vec along(point(0), point(1));
+      if (along.Magnitude() <= 0.0) {
+        return W3D_OCCT_ERR_DEGENERATE;
+      }
+      BRepPrimAPI_MakePrism maker(face, along);
+      if (!maker.IsDone()) {
+        return fail("the profile could not be swept along that path");
+      }
+      *out = ctx->store(maker.Shape());
+      return W3D_OCCT_OK;
+    }
+    // A bent path: a polyline spine, and the profile run along it. The path was
+    // ignored entirely before 2026-09-14 — every sweep was a box 30 long.
+    BRepBuilderAPI_MakePolygon spine;
+    for (uint32_t i = 0; i < pt_count; ++i) {
+      spine.Add(point(i));
+    }
+    BRepOffsetAPI_MakePipe maker(spine.Wire(), face);
+    maker.Build();
+    if (!maker.IsDone()) {
+      return fail("the profile could not be piped along that path");
+    }
+    *out = ctx->store(maker.Shape());
+    return W3D_OCCT_OK;
+  });
+}
+
+int32_t w3d_occt_loft(W3dOcctContext *ctx, const W3dOcctProfile *profiles, uint32_t profile_count,
+                      uint32_t *out) {
+  if (!profiles || profile_count < 2) {
+    return W3D_OCCT_ERR_DEGENERATE;
+  }
+  return guarded([&] {
+    // Through the sections, in order, each on its own plane. Both the profiles
+    // and the planes were thrown away before 2026-09-14: a loft of anything was
+    // a box 20 tall, so a cone came out a cylinder and nothing said so.
+    BRepOffsetAPI_ThruSections maker(Standard_True /* build a solid */);
+    for (uint32_t i = 0; i < profile_count; ++i) {
+      maker.AddWire(profile_wire(profiles[i]));
+    }
+    maker.Build();
+    if (!maker.IsDone()) {
+      return fail("the sections could not be lofted");
+    }
     *out = ctx->store(maker.Shape());
     return W3D_OCCT_OK;
   });
