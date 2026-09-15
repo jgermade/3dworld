@@ -28,11 +28,12 @@
 // toolchain requirement.
 #![cfg(target_arch = "wasm32")]
 
-use js_sys::{Object, Reflect};
+use js_sys::{Array, Object, Reflect, Uint8Array};
 use w3d_core::Document;
 use w3d_core::kernel::{BooleanOp, Mat4, Vec3};
 use w3d_kernel_truck::TruckKernel;
 use w3d_render::{Camera, Gpu, GpuMesh, Material, Object as DrawObject, PickPending, Renderer};
+use w3d_wire::{Addressing, Message, merge, split_by_face};
 use wasm_bindgen::prelude::*;
 use web_sys::HtmlCanvasElement;
 
@@ -90,6 +91,69 @@ pub struct Viewer {
     /// Whether the scene's boolean succeeded, so the page can say whether what
     /// it draws was modelled or merely asked for. See `scene`.
     modelled: bool,
+}
+
+/// The producer end of the worker boundary: tessellate the scene and hand back
+/// the bytes, with no device anywhere in the call.
+///
+/// This is what runs **in a worker**, which is why it is a free function and
+/// not a method on `Viewer`: a `Viewer` owns a wgpu surface, and a worker has
+/// no canvas to put one on. Everything it touches — the document, the
+/// tessellation, the split, the encoding — is `w3d-core`, `w3d-kernel-truck`
+/// and `w3d-wire`, and none of those knows a GPU exists.
+///
+/// Returns one `Uint8Array` per chunk. JavaScript posts them with the buffers
+/// in the transfer list, which is a *move*: the worker's heap gives them up.
+/// See `web/worker.js`, and `WIRE.md` for what is in them.
+///
+/// `chunks_per_body` is a parameter because nothing knows what it should be.
+/// The register says so too: no measurement anywhere in this repository says
+/// what a good split is, and a constant here would be a guess with a number's
+/// authority.
+#[wasm_bindgen(js_name = tessellateScene)]
+pub fn tessellate_scene(chunks_per_body: u32) -> Result<Object, JsError> {
+    // Three phases rather than one wall-clock number, for the reason
+    // `make measure` gives at the other end of this repository: modelling,
+    // meshing and encoding fail differently, and a caller can only act on one
+    // at a time. A single figure here would also be uncomparable with the
+    // page's own `tessellateMs`, which covers the middle phase alone.
+    let started = js_sys::Date::now();
+    let (mut doc, _) = scene();
+    let model_ms = js_sys::Date::now() - started;
+
+    let ids: Vec<_> = doc.nodes().map(|(id, _)| id).collect();
+    let started = js_sys::Date::now();
+    let mut meshes = Vec::with_capacity(ids.len());
+    for id in &ids {
+        meshes.push(
+            doc.mesh(*id)
+                .map_err(|e| JsError::new(&e.to_string()))?
+                .clone(),
+        );
+    }
+    let tessellate_ms = js_sys::Date::now() - started;
+
+    let started = js_sys::Date::now();
+    let out = Array::new();
+    for (id, mesh) in ids.iter().zip(&meshes) {
+        let chunks = split_by_face(
+            mesh,
+            chunks_per_body.max(1) as usize,
+            Addressing::whole(id.index()),
+        )
+        .map_err(|e| JsError::new(&e.to_string()))?;
+        for chunk in chunks {
+            out.push(&Uint8Array::from(chunk.as_slice()));
+        }
+    }
+    let encode_ms = js_sys::Date::now() - started;
+
+    let result = Object::new();
+    set(&result, "chunks", &out)?;
+    set(&result, "modelMs", &model_ms.into())?;
+    set(&result, "tessellateMs", &tessellate_ms.into())?;
+    set(&result, "encodeMs", &encode_ms.into())?;
+    Ok(result)
 }
 
 /// Opens a device against `canvas` and builds the scene.
@@ -244,6 +308,75 @@ impl Viewer {
 
     pub fn triangles(&self) -> u32 {
         self.bodies.iter().map(|b| b.mesh.triangles).sum()
+    }
+
+    /// The consumer end of the worker boundary: replace every body with one
+    /// rebuilt from chunks a worker produced.
+    ///
+    /// `chunks` is an array of `Uint8Array`, in whatever order they arrived —
+    /// they are grouped by the node in their own headers and merged by chunk
+    /// number, so the order this receives them in cannot change the result.
+    /// See `WIRE.md`.
+    ///
+    /// **One copy happens here and it is not the transfer.** The transfer is
+    /// free: `postMessage` moved the buffers rather than cloning them. What
+    /// costs is getting the bytes from a JS `ArrayBuffer` into this module's
+    /// linear memory, which `Uint8Array::to_vec` does — and which cannot be
+    /// avoided without writing into an exported pointer, which needs `unsafe`,
+    /// which this workspace forbids outside the FFI crate. It is one memcpy per
+    /// chunk against a tessellation that took seconds.
+    ///
+    /// Returns how many bodies were rebuilt.
+    #[wasm_bindgen(js_name = replaceWithWire)]
+    pub fn replace_with_wire(&mut self, chunks: Array) -> Result<u32, JsError> {
+        let arrived: Vec<Vec<u8>> = chunks
+            .iter()
+            .map(|v| {
+                v.dyn_into::<Uint8Array>()
+                    .map(|a| a.to_vec())
+                    .map_err(|_| JsError::new("a chunk is not a Uint8Array"))
+            })
+            .collect::<Result<_, _>>()?;
+        if arrived.is_empty() {
+            return Err(JsError::new("no chunks arrived"));
+        }
+
+        // Grouped by node, in the order the nodes are first seen, so that the
+        // bodies come out in a defined order rather than a hash map's.
+        let mut nodes: Vec<u32> = Vec::new();
+        let mut grouped: Vec<Vec<&[u8]>> = Vec::new();
+        for bytes in &arrived {
+            let node = Message::decode(bytes)
+                .map_err(|e| JsError::new(&e.to_string()))?
+                .addressing
+                .node;
+            match nodes.iter().position(|&n| n == node) {
+                Some(at) => grouped[at].push(bytes),
+                None => {
+                    nodes.push(node);
+                    grouped.push(vec![bytes]);
+                }
+            }
+        }
+
+        let mut bodies = Vec::with_capacity(grouped.len());
+        for (node, chunks) in nodes.iter().zip(&grouped) {
+            let merged = merge(chunks).map_err(|e| JsError::new(&e.to_string()))?;
+            let message = Message::decode(&merged).map_err(|e| JsError::new(&e.to_string()))?;
+            let mesh = GpuMesh::from_wire(
+                &self.gpu.device,
+                self.gpu.capabilities.max_buffer_size,
+                "body from a worker",
+                &message,
+            )
+            .map_err(|e| JsError::new(&e.to_string()))?;
+            bodies.push(Body { mesh, id: *node });
+        }
+
+        self.bodies = bodies;
+        self.selected = None;
+        self.pending = None;
+        Ok(self.bodies.len() as u32)
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {

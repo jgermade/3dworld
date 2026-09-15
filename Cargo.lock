@@ -3609,6 +3609,7 @@ dependencies = [
  "w3d-kernel-fake",
  "w3d-kernel-truck",
  "w3d-render",
+ "w3d-wire",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "wasm-bindgen-rayon",

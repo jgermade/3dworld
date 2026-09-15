@@ -35,20 +35,22 @@ What the numbers say this has to survive, from `make measure` on 2026-09-14:
 That last point is the only one that shapes the layout: a message carries **a
 chunk of one body**, not necessarily all of it.
 
-## What does not exist yet
+## What has run, and what has not
 
-**No worker.** There is no `worker.js`, no second wasm entry point, and nothing
-in `web/` posts a message: as of 2026-09-15 no buffer described by this page has
-ever crossed a heap. What exists is the format, both ends of it, and a headless
-test that splits a body three ways, hands the chunks over as bytes, merges them
-in reverse arrival order and draws a framebuffer byte-identical to the one the
-single-threaded path draws.
+**A message has crossed a heap.** `web/worker.js` instantiates a second copy of
+the wasm module with a linear memory of its own, tessellates, and posts the
+chunks with the buffers in the transfer list; the page merges them and uploads.
+Checked in Chromium, including the part only the sender can check — that the
+transfer was a *move*, because a `postMessage` with a wrong transfer list still
+delivers by cloning and the receiving end cannot tell the difference. Encoding
+cost 6 ms against 728 ms of meshing on that run.
 
-That is a real check of everything except the transfer itself, and the transfer
-is the part with the least room to surprise: a message is a byte array with no
-pointer in it, which is what a transferable `ArrayBuffer` carries. The sentences
-below are written in the present tense because they describe what a conforming
-implementation does, not what this repository has already run.
+**It is not on the boot path.** The page still meshes its scene on the main
+thread at startup and the worker replaces the result afterwards, which is what
+makes the comparison possible and means the stall this format exists to remove
+is shown to be removable rather than removed. And the largest payload ever sent
+is 178 KiB, against the 84 MiB the design is for — the browser has no
+OpenCASCADE in it, so nothing there produces an assembly of that size yet.
 
 ## Who parses this
 

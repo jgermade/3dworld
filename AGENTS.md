@@ -106,8 +106,8 @@ format/        w3d-format       the .w3d file: a zip, a manifest, and one       
 kernel-occt/   w3d-kernel-occt  the OpenCASCADE backend: a C ABI, and the       ✅ native
                                 Rust side of it                                 ⬜ wasm
 wire/          w3d-wire         what crosses a worker boundary: the packed     ✅ built
-                                vertex, and the message a tessellation
-                                becomes — see WIRE.md                           ⬜ in a worker
+                                vertex, and the message a tessellation          ✅ in a worker
+                                becomes — see WIRE.md                           ⬜ on the boot path
 render/        w3d-render       wgpu: capability detection, mesh upload,        ✅ built
                                 camera, and ID-buffer picking                   ✅ WebGL2
                                                                                 ⬜ WebGPU
