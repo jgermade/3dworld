@@ -16,34 +16,51 @@
  * from that heap. What it hands back is bytes, laid out as `WIRE.md` specifies,
  * and posted with the buffers in the transfer list so the move is a move.
  *
- * ## What it does not do
+ * ## It is sent a document, or it builds one
  *
- * It builds the scene itself rather than being sent one. The page's scene is a
- * fixed document — see `scene()` in `web/src/lib.rs` — so both sides can
- * construct it and the boundary is still exercised honestly. A worker that is
- * sent a *document* needs the document to be serialisable across the same
- * boundary, which is a second format and a later problem.
+ * Both, and which one matters. Until 2026-09-15 this worker could only *build*
+ * the page's scene, which worked because that scene is fixed and both sides
+ * can construct it — and which is exactly what kept it a demonstration rather
+ * than a modeller's boot path. The moment a user opens a file, the thread that
+ * draws is holding bytes and the worker has to be handed them.
  *
- * That limit is the whole of what keeps this a *demonstration* boot path
- * rather than a modeller's. Since 2026-09-15 this worker is what the page
- * boots on — nothing is tessellated on the thread that draws any more — but it
- * can only be, because the one scene there is happens to be constructible from
- * nothing. The moment a user opens a file, the document has to cross.
+ * So it now takes a document: a `.w3d`, posted as an `ArrayBuffer` and
+ * transferred like everything else here. **It is not a second format.** `.w3d`
+ * is what `FORMAT.md` already specifies, `w3d-format` already implements, and
+ * — usefully — depends on nothing that fails to build for wasm32, its zip
+ * being its own. A document crossing a worker boundary and a document crossing
+ * a disk turn out to be the same problem.
+ *
+ * The asymmetry is deliberate and worth naming: **bytes in are a model, bytes
+ * out are triangles.** `WIRE.md` describes a mesh and cannot describe a solid;
+ * `FORMAT.md` describes a solid and says nothing about how to draw it. Sending
+ * a `.w3d` back would mean the worker had done no work.
+ *
+ * With no document it falls back to the built-in scene, which is what happens
+ * when `make web-scene` has not run. `report().source` says which, and the
+ * browser test asserts both branches — a boot path that quietly stopped using
+ * the document would otherwise draw exactly the same picture.
  */
 
-import init, { tessellateScene } from './dist/w3d_web.js';
+import init, { tessellateScene, tessellateDocument } from './dist/w3d_web.js';
 
 self.onmessage = async (event) => {
-  const { chunksPerBody = 4 } = event.data ?? {};
+  const { chunksPerBody = 4, document = null } = event.data ?? {};
   try {
     const startedInit = performance.now();
     await init();
     const initMs = performance.now() - startedInit;
 
     const started = performance.now();
-    const result = tessellateScene(chunksPerBody);
+    // A document if the page had one to send, the compiled-in scene if not.
+    // The second is the older path and is still the honest answer when
+    // `make web-scene` has not run — not a silent one: `source` travels back.
+    const source = document ? 'document' : 'built-in scene';
+    const result = document
+      ? tessellateDocument(new Uint8Array(document), chunksPerBody)
+      : tessellateScene(chunksPerBody);
     const totalMs = performance.now() - started;
-    const { chunks, modelMs, tessellateMs, encodeMs, modelled } = result;
+    const { chunks, bodies, modelMs, tessellateMs, encodeMs, modelled } = result;
 
     // Each chunk is copied into a buffer of its own before being posted, and
     // that copy is what then moves for free.
@@ -80,7 +97,13 @@ self.onmessage = async (event) => {
       // `modelled` travels beside the bytes rather than in them: `WIRE.md`
       // describes a mesh and has no field for whether a boolean succeeded, and
       // the page has no document of its own left to ask.
-      { ok: true, buffers, bytes, initMs, totalMs, modelMs, tessellateMs, encodeMs, modelled },
+      {
+        ok: true, buffers, bytes, bodies, source,
+        initMs, totalMs, modelMs, tessellateMs, encodeMs,
+        // `null` from the document path, and that is the answer: a solid does
+        // not record whether a boolean made it. See `tessellate_document`.
+        modelled,
+      },
       buffers,
     );
 

@@ -119,9 +119,24 @@ pub struct Viewer {
     tessellate_ms: f64,
     /// Whether the scene's boolean succeeded, so the page can say whether what
     /// it draws was modelled or merely asked for. See `scene`.
-    modelled: bool,
+    ///
+    /// `None` where the source could not say — a document loaded from a file
+    /// is a solid, and nothing in it records whether a boolean made it. That
+    /// is reported as `null` rather than flattened to `false`, because the two
+    /// are different sentences: "the cut did not happen" and "nobody here
+    /// watched it happen".
+    modelled: Option<bool>,
     /// Which side of the worker boundary produced what is on screen.
     meshed_by: MeshedBy,
+    /// Where the *model* came from — a `.w3d` the page fetched, or the scene
+    /// compiled into this module.
+    ///
+    /// Separate from `meshed_by` because they are independent questions, and
+    /// conflating them would hide the interesting combination: a document that
+    /// was meshed on the main thread because the worker would not start is a
+    /// different failure from a worker that meshed the built-in scene because
+    /// the document was missing. Both draw a plate with a hole in it.
+    source: String,
 }
 
 /// The producer end of the worker boundary: tessellate the scene and hand back
@@ -149,9 +164,61 @@ pub fn tessellate_scene(chunks_per_body: u32) -> Result<Object, JsError> {
     // at a time. A single figure here would also be uncomparable with the
     // page's own `tessellateMs`, which covers the middle phase alone.
     let started = js_sys::Date::now();
-    let (mut doc, modelled) = scene();
+    let (doc, modelled) = scene();
     let model_ms = js_sys::Date::now() - started;
 
+    // `Some`, because this path *did* the boolean and watched it succeed or
+    // decline. The document path below cannot say the same about a file.
+    tessellate_into_chunks(doc, chunks_per_body, model_ms, Some(modelled))
+}
+
+/// The same, for a document that arrived as bytes instead of being built here.
+///
+/// **This is what makes the worker a modeller's boot path rather than a
+/// demonstration.** `tessellate_scene` works only because the page's scene is
+/// fixed and both sides can construct it; the moment a user opens a file, the
+/// thread that draws holds bytes and the worker has to be *sent* them. That was
+/// the whole of what register item 4 had left.
+///
+/// The bytes are a `.w3d` — the format this repository already specifies in
+/// `FORMAT.md` — and not a second format invented for this boundary. That is
+/// the point: a document crossing a worker boundary and a document crossing a
+/// disk are the same problem, and `w3d-format` already solved it, zip and all,
+/// with no dependency that does not build for wasm32. What crosses back is
+/// still `WIRE.md` chunks, because a mesh and a document are not the same
+/// thing and the asymmetry is real: bytes in are a model, bytes out are
+/// triangles.
+///
+/// The `modelled` question has no answer here and is reported as one: a
+/// document is a solid, and nothing in it records whether a boolean made it.
+/// The file's own writer refuses to emit an uncut scene — see
+/// `format/examples/scene_w3d.rs` — which is a guarantee about the file, not
+/// something this function verified, and saying `true` here would be the page
+/// vouching for a check it never ran.
+#[wasm_bindgen(js_name = tessellateDocument)]
+pub fn tessellate_document(bytes: &[u8], chunks_per_body: u32) -> Result<Object, JsError> {
+    let started = js_sys::Date::now();
+    let doc = w3d_format::load(TruckKernel::default(), bytes)
+        .map_err(|e| JsError::new(&format!("the document would not open: {e}")))?;
+    // Named `model_ms` for the phase it replaces, and it is not modelling: it
+    // is a zip, a manifest and a BREP parse per body. On this scene it is the
+    // 500 ms of boolean that is *no longer here*, which is the saving.
+    let model_ms = js_sys::Date::now() - started;
+
+    tessellate_into_chunks(doc, chunks_per_body, model_ms, None)
+}
+
+/// Mesh every body, split each into chunks, and report the phases.
+///
+/// Shared by both producers so that a document and the built-in scene cannot
+/// drift into being encoded differently — which would make the comparison the
+/// browser test draws between them meaningless.
+fn tessellate_into_chunks(
+    mut doc: Document<TruckKernel>,
+    chunks_per_body: u32,
+    model_ms: f64,
+    modelled: Option<bool>,
+) -> Result<Object, JsError> {
     let ids: Vec<_> = doc.nodes().map(|(id, _)| id).collect();
     let started = js_sys::Date::now();
     let mut meshes = Vec::with_capacity(ids.len());
@@ -181,14 +248,23 @@ pub fn tessellate_scene(chunks_per_body: u32) -> Result<Object, JsError> {
 
     let result = Object::new();
     set(&result, "chunks", &out)?;
+    set(&result, "bodies", &(ids.len() as u32).into())?;
     set(&result, "modelMs", &model_ms.into())?;
     set(&result, "tessellateMs", &tessellate_ms.into())?;
     set(&result, "encodeMs", &encode_ms.into())?;
-    // Whether the boolean this scene asks for actually happened. It has to
-    // cross with the bytes: since the worker became the boot path this is the
-    // only document the page builds, so a `modelled` left behind here is a
-    // page that cannot say whether what it draws was cut or merely asked for.
-    set(&result, "modelled", &modelled.into())?;
+    // Whether the boolean this scene asks for actually happened, or `null`
+    // where the source cannot say. It has to cross with the bytes: the page
+    // builds no document of its own any more, so a `modelled` left behind here
+    // is a page that cannot tell whether what it draws was cut or merely
+    // asked for.
+    set(
+        &result,
+        "modelled",
+        &match modelled {
+            Some(yes) => yes.into(),
+            None => JsValue::NULL,
+        },
+    )?;
     Ok(result)
 }
 
@@ -270,8 +346,9 @@ pub async fn start(canvas: HtmlCanvasElement, force_webgl: bool) -> Result<Viewe
         pending: None,
         selected: None,
         tessellate_ms: 0.0,
-        modelled: false,
+        modelled: None,
         meshed_by: MeshedBy::Nothing,
+        source: String::from("nothing yet"),
     })
 }
 
@@ -325,9 +402,17 @@ impl Viewer {
         // So it is said out loud rather than assumed from the fact that a
         // worker was started.
         set(&out, "meshedBy", &self.meshed_by.as_str().into())?;
+        set(&out, "source", &self.source.as_str().into())?;
         // Whether the plate on screen has a hole in it because a boolean cut
         // one, or is a plate and a pin sharing a space. See `scene`.
-        set(&out, "modelled", &self.modelled.into())?;
+        set(
+            &out,
+            "modelled",
+            &match self.modelled {
+                Some(yes) => yes.into(),
+                None => JsValue::NULL,
+            },
+        )?;
         set(
             &out,
             "deindexed",
@@ -356,8 +441,8 @@ impl Viewer {
     /// which this workspace forbids outside the FFI crate. It is one memcpy per
     /// chunk against a tessellation that took seconds.
     ///
-    /// `facts` carries what the bytes cannot: `tessellateMs`, `modelled` and
-    /// `fromWorker`. The first two have to be passed because this side no
+    /// `facts` carries what the bytes cannot: `tessellateMs`, `modelled`,
+    /// `fromWorker` and `source`. The first two have to be passed because this side no
     /// longer builds a document at startup, so there is nothing here that could
     /// measure the one or answer the other.
     ///
@@ -391,12 +476,24 @@ impl Viewer {
         let tessellate_ms = get(facts, "tessellateMs")?
             .as_f64()
             .ok_or_else(|| JsError::new("installWire: tessellateMs must be a number"))?;
-        let modelled = get(facts, "modelled")?
-            .as_bool()
-            .ok_or_else(|| JsError::new("installWire: modelled must be a boolean"))?;
+        // `null` is a legal answer and means the source could not say — see
+        // the field. Anything that is neither a boolean nor null is a caller
+        // that has lost track of what it is installing.
+        let modelled_js = get(facts, "modelled")?;
+        let modelled =
+            if modelled_js.is_null() || modelled_js.is_undefined() {
+                None
+            } else {
+                Some(modelled_js.as_bool().ok_or_else(|| {
+                    JsError::new("installWire: modelled must be a boolean or null")
+                })?)
+            };
         let from_worker = get(facts, "fromWorker")?
             .as_bool()
             .ok_or_else(|| JsError::new("installWire: fromWorker must be a boolean"))?;
+        let source = get(facts, "source")?
+            .as_string()
+            .ok_or_else(|| JsError::new("installWire: source must be a string"))?;
         let arrived: Vec<Vec<u8>> = chunks
             .iter()
             .map(|v| {
@@ -462,6 +559,7 @@ impl Viewer {
         } else {
             MeshedBy::MainThread
         };
+        self.source = source;
         Ok(self.bodies.len() as u32)
     }
 
@@ -484,6 +582,7 @@ impl Viewer {
     #[wasm_bindgen(js_name = tessellateHere)]
     pub fn tessellate_here(&mut self) -> Result<u32, JsError> {
         let (mut doc, modelled) = scene();
+        let modelled = Some(modelled);
         let ids: Vec<_> = doc.nodes().map(|(id, _)| id).collect();
 
         // Timed with the upload outside the clock, for the reason the old
@@ -528,6 +627,10 @@ impl Viewer {
         self.tessellate_ms = tessellate_ms;
         self.modelled = modelled;
         self.meshed_by = MeshedBy::MainThread;
+        // This path builds the compiled-in scene and can build nothing else:
+        // opening a document needs bytes, and if the worker could not run,
+        // nothing here fetched any.
+        self.source = String::from("built-in scene");
         Ok(self.bodies.len() as u32)
     }
 

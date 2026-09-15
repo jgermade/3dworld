@@ -17,6 +17,10 @@ serde_json = "1"
 
 [dev-dependencies]
 w3d-kernel-fake = { path = "../kernel-fake" }
+# For `examples/scene_w3d.rs` only: the browser demo's document has to be
+# written by the kernel that will read it back, and that kernel is truck.
+# A dev-dependency, so nothing ships it.
+w3d-kernel-truck = { path = "../kernel-truck" }
 
 [lints]
 workspace = true
