@@ -1,23 +1,29 @@
-//! Getting a [`w3d_kernel::Mesh`] onto the GPU, and what the face-id contract
-//! costs when it gets there.
+//! Getting a mesh onto the GPU — from a [`w3d_kernel::Mesh`] on the thread
+//! that made it, or from a [`Message`] a worker handed over.
 //!
-//! `Mesh::face_of_triangle` is per *triangle*, and a vertex shader has no
-//! per-primitive input in WGSL — there is no `gl_PrimitiveID` to read. So the
-//! face id has to become a vertex attribute, which is only sound if no vertex
-//! is shared between two faces.
+//! The packing itself is not here any more. It moved to `w3d-wire` on
+//! 2026-09-15, with the message format it feeds, so that a worker which
+//! tessellates does not link wgpu to pack what it produced; every name it took
+//! is re-exported below and callers did not have to change. What stayed is the
+//! half that needs a device: the vertex buffer layouts, the upload, and the
+//! draw.
 //!
-//! In practice it never is: both backends tessellate face by face and give
-//! each face its own nodes. But "in practice" is not the contract, so this
-//! module *checks*, and de-indexes the mesh when the check fails rather than
-//! drawing a plausible lie. [`GpuMesh::deindexed`] says which happened, and it
-//! is the number to look at when a mesh costs three times what it should.
+//! The layouts are the fixed point the whole boundary is designed against. 28
+//! bytes of position, normal and face id, because `Mesh::face_of_triangle` is
+//! per *triangle* and WGSL has no `gl_PrimitiveID` to read one from — so the
+//! face id has to become a vertex attribute, and `w3d-wire` de-indexes a mesh
+//! whose vertices are shared between faces rather than drawing a plausible lie.
 
 use w3d_kernel::Mesh;
+use w3d_wire::{LINE_VERTEX_SIZE as WIRE_LINE_VERTEX_SIZE, VERTEX_SIZE as WIRE_VERTEX_SIZE};
 use wgpu::util::DeviceExt as _;
 
-/// Position, normal, face id. 28 bytes, and every field is what a fragment
-/// shader needs rather than what a kernel happened to produce.
-pub const VERTEX_SIZE: u64 = 28;
+pub use w3d_wire::{MeshError, Message, PackedMesh, PackedVertex, WireError};
+
+/// Position, normal, face id. The wire format and the vertex buffer describe
+/// one layout, and it is declared once, in `w3d-wire`, because the whole point
+/// of that crate is that a producer with no GPU can write exactly these bytes.
+pub const VERTEX_SIZE: u64 = WIRE_VERTEX_SIZE as u64;
 
 pub const VERTEX_LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
     array_stride: VERTEX_SIZE,
@@ -41,7 +47,7 @@ pub const VERTEX_LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferL
     ],
 };
 
-pub const LINE_VERTEX_SIZE: u64 = 12;
+pub const LINE_VERTEX_SIZE: u64 = WIRE_LINE_VERTEX_SIZE as u64;
 
 pub const LINE_VERTEX_LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
     array_stride: LINE_VERTEX_SIZE,
@@ -52,103 +58,6 @@ pub const LINE_VERTEX_LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBu
         shader_location: 0,
     }],
 };
-
-/// 28-byte packed vertex attribute layout for zero-copy Transferable ArrayBuffer
-/// serialization across Web Worker boundaries and direct GPU buffer upload.
-#[repr(C)]
-#[derive(Clone, Copy, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
-pub struct PackedVertex {
-    pub position: [f32; 3],
-    pub normal: [f32; 3],
-    pub face_id: u32,
-}
-
-/// A serialized mesh representation designed for Transferable ArrayBuffer messaging
-/// between kernel worker threads and the main GPU render thread.
-#[derive(Clone, Debug, PartialEq)]
-pub struct PackedMesh {
-    pub vertices: Vec<PackedVertex>,
-    pub indices: Option<Vec<u32>>,
-    pub line_positions: Vec<[f32; 3]>,
-    pub line_indices: Option<Vec<u32>>,
-    pub deindexed: bool,
-    pub triangle_count: u32,
-    pub line_count: u32,
-}
-
-impl PackedMesh {
-    /// Serializes a kernel [`Mesh`] into a zero-copy 28-byte aligned [`PackedMesh`].
-    pub fn pack(mesh: &Mesh) -> Result<Self, MeshError> {
-        validate(mesh)?;
-
-        let (vertex_bytes, index_bytes, _count, deindexed) = match per_vertex_faces(mesh) {
-            Some(faces) => (
-                pack_vertices(mesh, |v| faces[v]),
-                Some(pack_indices(&mesh.indices)),
-                mesh.indices.len() as u32,
-                false,
-            ),
-            None => {
-                let expanded = expand(mesh);
-                let n = expanded.len() as u32;
-                (pack_expanded(&expanded), None, n, true)
-            }
-        };
-
-        let vertices: Vec<PackedVertex> = bytemuck::cast_slice(&vertex_bytes).to_vec();
-        let indices = index_bytes.map(|b| bytemuck::cast_slice(&b).to_vec());
-
-        let line_positions = mesh.line_positions.clone();
-
-        let line_indices = if !mesh.line_indices.is_empty() {
-            Some(mesh.line_indices.clone())
-        } else {
-            None
-        };
-
-        let line_count = (if line_indices.is_some() {
-            mesh.line_indices.len() / 2
-        } else {
-            line_positions.len() / 2
-        }) as u32;
-
-        Ok(Self {
-            vertices,
-            indices,
-            line_positions,
-            line_indices,
-            deindexed,
-            triangle_count: mesh.triangle_count() as u32,
-            line_count,
-        })
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum MeshError {
-    /// The backend produced something the contract forbids. The conformance
-    /// suite checks for this, and this is the second line of defence: a
-    /// malformed mesh is an error here, never a device loss three frames
-    /// later.
-    Malformed(&'static str),
-    /// The mesh is larger than this adapter's largest buffer. Checked before
-    /// the upload, because the failure mode otherwise is a lost device.
-    TooLarge { bytes: u64, max: u64 },
-}
-
-impl core::fmt::Display for MeshError {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            Self::Malformed(what) => write!(f, "malformed mesh: {what}"),
-            Self::TooLarge { bytes, max } => write!(
-                f,
-                "mesh needs {bytes} bytes and this adapter's limit is {max}"
-            ),
-        }
-    }
-}
-
-impl core::error::Error for MeshError {}
 
 /// One body's triangles and edges, ready to draw.
 pub struct GpuMesh {
@@ -167,78 +76,14 @@ pub struct GpuMesh {
 }
 
 impl GpuMesh {
+    /// From a mesh this thread has in its own heap. Packs, then uploads.
     pub fn upload(
         device: &wgpu::Device,
         max_buffer_size: u64,
         label: &str,
         mesh: &Mesh,
     ) -> Result<Self, MeshError> {
-        validate(mesh)?;
-
-        let (vertex_bytes, index_bytes, count, deindexed) = match per_vertex_faces(mesh) {
-            Some(faces) => (
-                pack_vertices(mesh, |v| faces[v]),
-                Some(pack_indices(&mesh.indices)),
-                mesh.indices.len() as u32,
-                false,
-            ),
-            None => {
-                let expanded = expand(mesh);
-                let n = expanded.len() as u32;
-                (pack_expanded(&expanded), None, n, true)
-            }
-        };
-
-        let bytes = vertex_bytes.len() as u64;
-        if bytes > max_buffer_size {
-            return Err(MeshError::TooLarge {
-                bytes,
-                max: max_buffer_size,
-            });
-        }
-
-        let vertices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some(label),
-            contents: &vertex_bytes,
-            usage: wgpu::BufferUsages::VERTEX,
-        });
-        let indices = index_bytes.map(|b| {
-            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some(label),
-                contents: &b,
-                usage: wgpu::BufferUsages::INDEX,
-            })
-        });
-
-        let (line_vertices, line_indices, line_count) = if !mesh.line_indices.is_empty() {
-            let line_v_bytes = pack_line_positions(&mesh.line_positions);
-            let line_i_bytes = pack_indices(&mesh.line_indices);
-            let v_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some(&format!("{label} lines v")),
-                contents: &line_v_bytes,
-                usage: wgpu::BufferUsages::VERTEX,
-            });
-            let i_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some(&format!("{label} lines i")),
-                contents: &line_i_bytes,
-                usage: wgpu::BufferUsages::INDEX,
-            });
-            (Some(v_buf), Some(i_buf), mesh.line_indices.len() as u32)
-        } else {
-            (None, None, 0)
-        };
-
-        Ok(Self {
-            vertices,
-            indices,
-            count,
-            line_vertices,
-            line_indices,
-            line_count,
-            deindexed,
-            triangles: mesh.triangle_count() as u32,
-            lines: mesh.line_count() as u32,
-        })
+        Self::from_packed(device, max_buffer_size, label, &PackedMesh::pack(mesh)?)
     }
 
     pub fn from_packed(
@@ -247,66 +92,134 @@ impl GpuMesh {
         label: &str,
         packed: &PackedMesh,
     ) -> Result<Self, MeshError> {
-        let vertex_bytes = bytemuck::cast_slice(&packed.vertices);
-        let bytes = vertex_bytes.len() as u64;
-        if bytes > max_buffer_size {
-            return Err(MeshError::TooLarge {
-                bytes,
-                max: max_buffer_size,
-            });
-        }
+        let vertex_bytes = packed.vertex_bytes();
+        too_large(vertex_bytes.len() as u64, max_buffer_size)?;
 
-        let vertices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some(label),
-            contents: vertex_bytes,
-            usage: wgpu::BufferUsages::VERTEX,
+        let vertices = buffer(device, label, vertex_bytes, wgpu::BufferUsages::VERTEX);
+        let indices = packed.indices.is_some().then(|| {
+            buffer(
+                device,
+                label,
+                packed.index_bytes(),
+                wgpu::BufferUsages::INDEX,
+            )
         });
-
-        let indices = packed.indices.as_ref().map(|idx| {
-            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some(label),
-                contents: bytemuck::cast_slice(idx),
-                usage: wgpu::BufferUsages::INDEX,
-            })
-        });
-
-        let count = if let Some(idx) = &packed.indices {
-            idx.len() as u32
-        } else {
-            packed.vertices.len() as u32
+        let count = match &packed.indices {
+            Some(idx) => idx.len() as u32,
+            None => packed.vertices.len() as u32,
         };
 
-        let (line_vertices, line_indices, line_count) = if let (Some(indices_vec), false) =
-            (&packed.line_indices, packed.line_positions.is_empty())
-        {
-            let line_v_bytes = bytemuck::cast_slice(&packed.line_positions);
-            let line_i_bytes = bytemuck::cast_slice(indices_vec);
-            let v_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some(&format!("{label} lines v")),
-                contents: line_v_bytes,
-                usage: wgpu::BufferUsages::VERTEX,
-            });
-            let i_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some(&format!("{label} lines i")),
-                contents: line_i_bytes,
-                usage: wgpu::BufferUsages::INDEX,
-            });
-            (Some(v_buf), Some(i_buf), indices_vec.len() as u32)
-        } else {
-            (None, None, 0)
+        let lines = match (&packed.line_indices, packed.line_positions.is_empty()) {
+            (Some(idx), false) => Some((
+                buffer(
+                    device,
+                    &format!("{label} lines v"),
+                    packed.line_vertex_bytes(),
+                    wgpu::BufferUsages::VERTEX,
+                ),
+                buffer(
+                    device,
+                    &format!("{label} lines i"),
+                    packed.line_index_bytes(),
+                    wgpu::BufferUsages::INDEX,
+                ),
+                idx.len() as u32,
+            )),
+            _ => None,
         };
 
-        Ok(Self {
+        Ok(Self::assemble(
+            vertices,
+            indices,
+            count,
+            lines,
+            packed.deindexed,
+            packed.triangle_count,
+            packed.line_count,
+        ))
+    }
+
+    /// From bytes a worker produced, with nothing rebuilt in between.
+    ///
+    /// This is what the format exists for: the vertex section is what a vertex
+    /// buffer wants, so it goes to the device as it arrived. `make measure`
+    /// put 84 MiB of packed mesh behind one 14.55 MiB STEP assembly, and every
+    /// intermediate copy of that is a copy on the thread that draws.
+    ///
+    /// The indices *are* walked once, which decoding deliberately does not do —
+    /// see `WIRE.md`. An index past the end of a vertex buffer is a lost device
+    /// three frames later rather than an error here, and the upload beside it
+    /// is already a linear pass over the same bytes.
+    pub fn from_wire(
+        device: &wgpu::Device,
+        max_buffer_size: u64,
+        label: &str,
+        message: &Message<'_>,
+    ) -> Result<Self, WireError> {
+        message.validate_indices()?;
+        let vertex_bytes = message.vertex_bytes();
+        too_large(vertex_bytes.len() as u64, max_buffer_size)?;
+
+        let vertices = buffer(device, label, vertex_bytes, wgpu::BufferUsages::VERTEX);
+        let indices = message
+            .index_bytes()
+            .map(|b| buffer(device, label, b, wgpu::BufferUsages::INDEX));
+
+        let line_index_bytes = message.line_index_bytes();
+        let lines = (!line_index_bytes.is_empty() && message.line_vertex_count() > 0).then(|| {
+            (
+                buffer(
+                    device,
+                    &format!("{label} lines v"),
+                    message.line_vertex_bytes(),
+                    wgpu::BufferUsages::VERTEX,
+                ),
+                buffer(
+                    device,
+                    &format!("{label} lines i"),
+                    line_index_bytes,
+                    wgpu::BufferUsages::INDEX,
+                ),
+                message.line_index_count(),
+            )
+        });
+
+        Ok(Self::assemble(
+            vertices,
+            indices,
+            message.draw_count(),
+            lines,
+            message.flags.deindexed(),
+            message.triangle_count(),
+            message.line_count(),
+        ))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn assemble(
+        vertices: wgpu::Buffer,
+        indices: Option<wgpu::Buffer>,
+        count: u32,
+        lines: Option<(wgpu::Buffer, wgpu::Buffer, u32)>,
+        deindexed: bool,
+        triangles: u32,
+        line_count: u32,
+    ) -> Self {
+        let (line_vertices, line_indices, drawn_line_indices) = match lines {
+            Some((v, i, n)) => (Some(v), Some(i), n),
+            None => (None, None, 0),
+        };
+        Self {
             vertices,
             indices,
             count,
             line_vertices,
             line_indices,
-            line_count,
-            deindexed: packed.deindexed,
-            triangles: packed.triangle_count,
-            lines: packed.line_count,
-        })
+            line_count: drawn_line_indices,
+            deindexed,
+            triangles,
+            lines: line_count,
+        }
     }
 
     pub(crate) fn draw(&self, pass: &mut wgpu::RenderPass<'_>) {
@@ -332,176 +245,43 @@ impl GpuMesh {
     }
 }
 
-fn validate(mesh: &Mesh) -> Result<(), MeshError> {
-    if mesh.normals.len() != mesh.positions.len() {
-        return Err(MeshError::Malformed("one normal per position"));
-    }
-    if !mesh.indices.len().is_multiple_of(3) {
-        return Err(MeshError::Malformed("indices are triangles"));
-    }
-    if mesh.face_of_triangle.len() != mesh.triangle_count() {
-        return Err(MeshError::Malformed("one face id per triangle"));
-    }
-    let n = mesh.positions.len() as u32;
-    if mesh.indices.iter().any(|&i| i >= n) {
-        return Err(MeshError::Malformed("an index is out of range"));
-    }
-    if !mesh.line_indices.len().is_multiple_of(2) {
-        return Err(MeshError::Malformed("line indices are line segments"));
-    }
-    let line_n = mesh.line_positions.len() as u32;
-    if mesh.line_indices.iter().any(|&i| i >= line_n) {
-        return Err(MeshError::Malformed("a line index is out of range"));
+/// Checked before the upload rather than after, because the failure mode
+/// otherwise is a lost device.
+fn too_large(bytes: u64, max: u64) -> Result<(), MeshError> {
+    if bytes > max {
+        return Err(MeshError::TooLarge { bytes, max });
     }
     Ok(())
 }
 
-/// `None` when a vertex belongs to two different faces, which is the case the
-/// indexed path cannot represent.
-fn per_vertex_faces(mesh: &Mesh) -> Option<Vec<u32>> {
-    const UNCLAIMED: u32 = u32::MAX;
-    let mut faces = vec![UNCLAIMED; mesh.positions.len()];
-    for (t, &face) in mesh.face_of_triangle.iter().enumerate() {
-        for &v in &mesh.indices[t * 3..t * 3 + 3] {
-            let slot = &mut faces[v as usize];
-            if *slot != UNCLAIMED && *slot != face {
-                return None;
-            }
-            *slot = face;
-        }
-    }
-    // A vertex no triangle uses keeps `UNCLAIMED`, which never reaches a
-    // fragment: nothing references it.
-    Some(faces)
-}
-
-/// One vertex per triangle corner. Three times the memory in the worst case,
-/// which is why the indexed path is tried first.
-fn expand(mesh: &Mesh) -> Vec<([f32; 3], [f32; 3], u32)> {
-    let mut out = Vec::with_capacity(mesh.indices.len());
-    for (t, &face) in mesh.face_of_triangle.iter().enumerate() {
-        for &v in &mesh.indices[t * 3..t * 3 + 3] {
-            let v = v as usize;
-            out.push((mesh.positions[v], mesh.normals[v], face));
-        }
-    }
-    out
-}
-
-// `to_le_bytes` rather than a casting crate. This runs once per body, the
-// workspace forbids `unsafe`, and a second dependency to avoid a copy that
-// nobody has measured is a bad trade — the note in AGENTS.md about dependency
-// licences applies to convenience crates too.
-
-fn push_vertex(out: &mut Vec<u8>, p: [f32; 3], n: [f32; 3], face: u32) {
-    for c in p {
-        out.extend_from_slice(&c.to_le_bytes());
-    }
-    for c in n {
-        out.extend_from_slice(&c.to_le_bytes());
-    }
-    out.extend_from_slice(&face.to_le_bytes());
-}
-
-fn pack_vertices(mesh: &Mesh, face_of: impl Fn(usize) -> u32) -> Vec<u8> {
-    let mut out = Vec::with_capacity(mesh.positions.len() * VERTEX_SIZE as usize);
-    for v in 0..mesh.positions.len() {
-        push_vertex(&mut out, mesh.positions[v], mesh.normals[v], face_of(v));
-    }
-    out
-}
-
-fn pack_expanded(vertices: &[([f32; 3], [f32; 3], u32)]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(vertices.len() * VERTEX_SIZE as usize);
-    for &(p, n, face) in vertices {
-        push_vertex(&mut out, p, n, face);
-    }
-    out
-}
-
-fn pack_indices(indices: &[u32]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(indices.len() * 4);
-    for i in indices {
-        out.extend_from_slice(&i.to_le_bytes());
-    }
-    out
-}
-
-fn pack_line_positions(positions: &[[f32; 3]]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(positions.len() * 12);
-    for p in positions {
-        for c in p {
-            out.extend_from_slice(&c.to_le_bytes());
-        }
-    }
-    out
+fn buffer(
+    device: &wgpu::Device,
+    label: &str,
+    contents: &[u8],
+    usage: wgpu::BufferUsages,
+) -> wgpu::Buffer {
+    device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some(label),
+        contents,
+        usage,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn tri(faces: &[u32], indices: &[u32], vertices: usize) -> Mesh {
-        Mesh {
-            positions: vec![[0.0; 3]; vertices],
-            normals: vec![[0.0, 0.0, 1.0]; vertices],
-            indices: indices.to_vec(),
-            face_of_triangle: faces.to_vec(),
-            line_positions: Vec::new(),
-            line_indices: Vec::new(),
-        }
-    }
-
+    /// The layout the GPU is bound to and the layout the wire writes are one
+    /// fact. They are declared in different crates, so the build says so.
     #[test]
-    fn a_vertex_used_by_one_face_keeps_the_index_buffer() {
-        let mesh = tri(&[7, 7], &[0, 1, 2, 1, 2, 3], 4);
-        assert_eq!(per_vertex_faces(&mesh), Some(vec![7, 7, 7, 7]));
-    }
-
-    #[test]
-    fn a_vertex_shared_between_two_faces_forces_de_indexing() {
-        let mesh = tri(&[1, 2], &[0, 1, 2, 1, 2, 3], 4);
-        assert_eq!(per_vertex_faces(&mesh), None);
-        // And the expansion keeps every corner's own face.
-        let expanded = expand(&mesh);
-        assert_eq!(expanded.len(), 6);
-        assert_eq!(
-            expanded.iter().map(|v| v.2).collect::<Vec<_>>(),
-            vec![1, 1, 1, 2, 2, 2]
-        );
-    }
-
-    #[test]
-    fn a_malformed_mesh_is_an_error_here_not_a_device_loss_later() {
-        let mut mesh = tri(&[0], &[0, 1, 2], 3);
-        mesh.face_of_triangle.push(1);
-        assert!(matches!(validate(&mesh), Err(MeshError::Malformed(_))));
-
-        let mesh = tri(&[0], &[0, 1, 9], 3);
-        assert!(matches!(validate(&mesh), Err(MeshError::Malformed(_))));
-
-        let mut mesh = tri(&[0], &[0, 1, 2], 3);
-        mesh.line_positions = vec![[0.0, 0.0, 0.0], [1.0, 1.0, 1.0]];
-        mesh.line_indices = vec![0, 1, 0]; // odd count
-        assert!(matches!(validate(&mesh), Err(MeshError::Malformed(_))));
-
-        let mut mesh = tri(&[0], &[0, 1, 2], 3);
-        mesh.line_positions = vec![[0.0, 0.0, 0.0]];
-        mesh.line_indices = vec![0, 5]; // out of bounds
-        assert!(matches!(validate(&mesh), Err(MeshError::Malformed(_))));
-    }
-
-    #[test]
-    fn packed_mesh_serializes_and_preserves_28_byte_alignment() {
-        let mesh = tri(&[7, 7], &[0, 1, 2, 1, 2, 3], 4);
-        let packed = PackedMesh::pack(&mesh).unwrap();
-        assert_eq!(packed.vertices.len(), 4);
-        assert_eq!(std::mem::size_of::<PackedVertex>(), 28);
-        assert_eq!(packed.vertices[0].face_id, 7);
-        assert!(!packed.deindexed);
-
-        // Verify zero-copy cast to bytes
-        let bytes: &[u8] = bytemuck::cast_slice(&packed.vertices);
-        assert_eq!(bytes.len(), 4 * 28);
+    fn the_vertex_layout_and_the_wire_agree() {
+        assert_eq!(VERTEX_SIZE, 28);
+        assert_eq!(VERTEX_SIZE, size_of::<PackedVertex>() as u64);
+        assert_eq!(VERTEX_LAYOUT.array_stride, VERTEX_SIZE);
+        assert_eq!(LINE_VERTEX_SIZE, 12);
+        // The face id is the last attribute and the one the whole de-indexing
+        // argument is about; if its offset drifts, a pick answers with a
+        // neighbouring face and nothing else notices.
+        assert_eq!(VERTEX_LAYOUT.attributes[2].offset, 24);
     }
 }

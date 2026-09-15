@@ -3591,11 +3591,11 @@ dependencies = [
 name = "w3d-render"
 version = "0.0.0"
 dependencies = [
- "bytemuck",
  "pollster",
  "w3d-core",
  "w3d-kernel",
  "w3d-kernel-fake",
+ "w3d-wire",
  "wgpu",
 ]
 
@@ -3614,6 +3614,14 @@ dependencies = [
  "wasm-bindgen-rayon",
  "web-sys",
  "wgpu",
+]
+
+[[package]]
+name = "w3d-wire"
+version = "0.0.0"
+dependencies = [
+ "bytemuck",
+ "w3d-kernel",
 ]
 
 [[package]]

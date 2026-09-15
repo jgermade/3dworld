@@ -8,7 +8,12 @@ publish.workspace = true
 
 [dependencies]
 w3d-kernel = { path = "../kernel", default-features = false }
-bytemuck = { version = "1", features = ["derive"] }
+# The packed vertex and the message it travels in. This crate is the consumer
+# end of that boundary — see WIRE.md — and the producer end deliberately does
+# not depend on this one.
+w3d-wire = { path = "../wire" }
+# No bytemuck here any more: the casts were all in `scene`, and they went with
+# it. It is still in the tree, under `w3d-wire`, so the NOTICE is unchanged.
 
 # The first third-party dependency this workspace has taken, and it is declared
 # per target rather than once: the backend list *is* the platform decision, and

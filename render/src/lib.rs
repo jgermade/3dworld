@@ -26,7 +26,7 @@ pub mod scene;
 pub use camera::Camera;
 pub use gpu::{Acceleration, Capabilities, Gpu, GpuError};
 pub use grid::Grid;
-pub use scene::{GpuMesh, MeshError};
+pub use scene::{GpuMesh, MeshError, Message, PackedMesh, PackedVertex, WireError};
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
