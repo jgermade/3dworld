@@ -145,9 +145,52 @@ export function poolSize(limit = 8) {
  * It owns the canvas rather than taking one, because a canvas keeps the first
  * context it is given: falling back from WebGPU to WebGL2 means a *new*
  * element, not a reconfigured one.
+ *
+ * ## The worker is the boot path
+ *
+ * Changed on 2026-09-15. `start` used to model the scene, tessellate every
+ * body and upload the result before it returned — all of it on the thread that
+ * then had to draw, which is the 56-second stall `make measure` found on a
+ * real assembly. Now the mesh is made in a worker with a linear memory of its
+ * own and arrives as bytes; see `web/worker.js` and `WIRE.md`.
+ *
+ * Three things about the order below are load-bearing:
+ *
+ *   - **The worker is started first**, before the module is even imported.
+ *     It loads its own copy and shares nothing, so there is nothing to wait
+ *     for — and every millisecond of adapter negotiation on this thread is a
+ *     millisecond the worker is already modelling.
+ *   - **The mesh is installed before the graphics check.** `drewSomething`
+ *     asks whether WebGPU actually rasterised anything by counting colours on
+ *     the canvas, and a viewer with no bodies draws a flat background. Run
+ *     that check first and every browser on earth "fails" it and falls back to
+ *     WebGL2. The dependency is invisible in both functions and is why it is
+ *     written down here.
+ *   - **The fallback re-installs, it does not re-tessellate.** The chunks are
+ *     already on this thread and a `GpuMesh` is the only thing tied to the
+ *     device that went away. The old code called `start` again and paid for
+ *     the whole tessellation a second time, on the path taken by exactly the
+ *     machines least able to afford it.
+ *
+ * And one thing that is not: the worker still *builds* the scene rather than
+ * being sent one. That works only because the page's scene is a fixed
+ * document. A modeller has to send the document across, which is a second
+ * format and is not written.
  */
-export async function boot(container) {
+export async function boot(container, { chunksPerBody = 4, workerUrl } = {}) {
   const caps = probe();
+
+  // Started before anything else on this thread, and deliberately not awaited
+  // until the device is open. A rejection here is not fatal — see `meshNote`.
+  //
+  // `workerUrl` exists so that the failure can be *caused*. An untested
+  // fallback is a fallback that does not work, and the only honest way to
+  // reach this one is to give it a worker that really will not load — see
+  // `web/test/browser.mjs`.
+  const meshing = tessellateInWorker(chunksPerBody, undefined, workerUrl).then(
+    (result) => ({ ok: true, result }),
+    (error) => ({ ok: false, error }),
+  );
   const wanted = caps.threaded ? 'threaded' : 'single';
   let chosen = wanted;
   let note = degradation(caps);
@@ -192,22 +235,66 @@ export async function boot(container) {
   let graphics = null;
   let { canvas, viewer } = await open(container, module, false);
 
+  // The worker's answer, awaited here because this is the first moment the
+  // result can be used: installing a mesh needs a device.
+  const wire = await meshing;
+  let meshNote = null;
+  if (!wire.ok) {
+    // A module worker can fail for reasons that are nothing to do with the
+    // engine — a Content-Security-Policy without `worker-src`, a `worker.js`
+    // that did not deploy, a file: URL. A blank viewport would be a worse
+    // answer than a slow one, so the old path is still here and the reason is
+    // shown rather than logged.
+    const why = wire.error?.message ?? wire.error;
+    meshNote =
+      `The tessellation worker did not run (${why}), so the scene was meshed ` +
+      'on the thread that draws. The page works and is slower for it; on a ' +
+      'large assembly that is a visible stall.';
+  }
+
+  /** Put the mesh on whichever device is current. Called again after a
+   *  graphics fallback, which is a new device and a new canvas but the same
+   *  bytes — see the note about re-installing above. */
+  const installMesh = (v) => {
+    if (wire.ok) {
+      const r = wire.result;
+      return v.installWire(r.chunks, {
+        tessellateMs: r.tessellateMs,
+        modelled: r.modelled,
+        // This thread is the only place that knows. The bytes do not say.
+        fromWorker: true,
+      });
+    }
+    return v.tessellateHere();
+  };
+  installMesh(viewer);
+
   // The check that `navigator.gpu` cannot answer. A browser can report WebGPU,
   // hand back an adapter with generous limits, accept every command — and
   // rasterise nothing, which reaches a user as a black canvas and no error.
   // Headless Chromium without a working GPU does exactly this. So the first
   // frame is looked at, and WebGL2 is a fallback from *evidence* rather than
   // from a feature flag.
+  //
+  // It runs *after* the mesh is installed because an empty viewport is a flat
+  // canvas, which is precisely what this function reads as "drew nothing".
   if (!drewSomething(canvas, viewer)) {
     graphics =
       'WebGPU reported an adapter and then drew nothing; fell back to WebGL2. ' +
       'This is a browser or driver fault, not a missing feature.';
     container.removeChild(canvas);
     ({ canvas, viewer } = await open(container, module, true));
+    installMesh(viewer);
   }
 
   return {
-    viewer, canvas, caps, wanted, chosen, note, graphics,
+    // `module` goes out so that a caller can tessellate on *this* thread and
+    // compare. That is the check the worker boundary used to get for free,
+    // when the main thread meshed at startup and the worker's result replaced
+    // it; now that the worker went first, the reference has to be made on
+    // purpose. See `web/test/browser.mjs`.
+    viewer, canvas, module, caps, wanted, chosen, note, graphics, meshNote,
+    wire: wire.ok ? wire.result : null,
     report: viewer.report(),
   };
 }
@@ -284,13 +371,16 @@ async function exists(url) {
  * silently copies 84 MiB is the failure this whole design exists to avoid, and
  * nothing else in the stack would report it.
  *
- * Resolves with `{ chunks, bytes, tessellateMs, initMs, transferred }`.
+ * Resolves with `{ chunks, bytes, tessellateMs, initMs, transferred, modelled }`.
+ * `modelled` is the worker's answer to whether the scene's boolean actually
+ * cut anything — a fact about *its* document, which since this became the boot
+ * path is the only one there is.
  */
-export function tessellateInWorker(chunksPerBody = 4, timeoutMs = 60000) {
+export function tessellateInWorker(chunksPerBody = 4, timeoutMs = 60000, workerUrl = './worker.js') {
   return new Promise((resolve, reject) => {
     let worker;
     try {
-      worker = new Worker(new URL('./worker.js', import.meta.url), { type: 'module' });
+      worker = new Worker(new URL(workerUrl, import.meta.url), { type: 'module' });
     } catch (e) {
       reject(new Error(`could not start the tessellation worker: ${e.message ?? e}`));
       return;
@@ -335,6 +425,7 @@ export function tessellateInWorker(chunksPerBody = 4, timeoutMs = 60000) {
         modelMs: payload.modelMs,
         tessellateMs: payload.tessellateMs,
         encodeMs: payload.encodeMs,
+        modelled: payload.modelled === true,
         transferred: msg.transferredOk === true,
       });
     };
@@ -342,7 +433,13 @@ export function tessellateInWorker(chunksPerBody = 4, timeoutMs = 60000) {
     worker.onerror = (e) => {
       clearTimeout(timer);
       worker.terminate();
-      reject(new Error(`the tessellation worker failed to load: ${e.message ?? e}`));
+      // A module worker that 404s fires an `ErrorEvent` carrying nothing: no
+      // message, no filename, no line. `String(e)` on it reads `[object
+      // Event]`, which told the first version of this exactly nothing — so the
+      // URL that was asked for is the fact worth reporting, because a worker
+      // that did not deploy is the likeliest way to arrive here.
+      const detail = e?.message || `could not load ${workerUrl}`;
+      reject(new Error(`the tessellation worker failed to load: ${detail}`));
     };
 
     worker.postMessage({ chunksPerBody });

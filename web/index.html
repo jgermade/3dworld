@@ -25,7 +25,7 @@
      after the boot it is meant to precede. See web/coi-serviceworker.js. -->
 <script src="./coi-serviceworker.js"></script>
 <script type="module">
-  import { boot, distinctColours, tessellateInWorker } from './loader.js';
+  import { boot, distinctColours } from './loader.js';
 
   const container = document.getElementById('viewport');
   const status = document.getElementById('status');
@@ -47,9 +47,33 @@
     if (coi) await coi.ready;
     state.coi = coi ? coi.note : null;
 
-    const { viewer, canvas, caps, wanted, chosen, note, graphics, report } =
-      await boot(container);
-    Object.assign(state, { caps, wanted, chosen, note, graphics, report, viewer });
+    // `?worker=fail` points the loader at a worker that does not exist, so
+    // that the main-thread fallback is reached through a real failure rather
+    // than through a flag that skips the attempt. The page's own hook, in the
+    // same spirit as `?coi=off` above.
+    const forceWorkerFailure =
+      new URLSearchParams(location.search).get('worker') === 'fail';
+
+    const { viewer, canvas, module, caps, wanted, chosen, note, graphics,
+            meshNote, wire, report } = await boot(container, {
+      workerUrl: forceWorkerFailure ? './worker-that-does-not-exist.js' : undefined,
+    });
+    Object.assign(state, {
+      caps, wanted, chosen, note, graphics, meshNote, report, viewer,
+      // What the boot path's worker reported about itself. Null when the
+      // worker could not run and the scene was meshed here instead.
+      wire: wire && {
+        chunks: wire.chunks.length,
+        bytes: wire.bytes,
+        claimed: wire.claimed,
+        transferred: wire.transferred,
+        initMs: wire.initMs,
+        modelMs: wire.modelMs,
+        tessellateMs: wire.tessellateMs,
+        encodeMs: wire.encodeMs,
+        modelled: wire.modelled,
+      },
+    });
 
     const dpr = Math.min(globalThis.devicePixelRatio || 1, 2);
     const fit = () => {
@@ -60,7 +84,21 @@
       viewer.resize(w, h);
     };
     fit();
-    addEventListener('resize', fit);
+    // Observed on the *container*, not on the window, and the difference was
+    // measured rather than reasoned about. The status bar below the viewport
+    // grows from one line to six the moment the page has anything to say, and
+    // the grid takes that space out of the viewport — with no window resize,
+    // so a `resize` listener never fires. `fit` therefore ran once, against a
+    // 624-pixel-tall box, and the canvas kept a 624-pixel backing store inside
+    // a box that was now 468 pixels tall.
+    //
+    // That is invisible while nothing maps a screen coordinate back into the
+    // buffer: the image is simply scaled to fit. The pick does map one, so
+    // every click was being read a third of the height away from where it
+    // landed — and it went unnoticed because the plate is large and centred
+    // and absorbed the error. A seventh status line, on the worker-failure
+    // path, was what finally pushed a centre click off the part.
+    new ResizeObserver(fit).observe(container);
 
     let dragging = null;
     canvas.addEventListener('pointerdown', (e) => {
@@ -119,37 +157,69 @@
       return distinctColours(canvas);
     };
 
-    // The worker boundary, on demand rather than at startup.
+    // The comparison the worker boundary used to get for free.
     //
-    // It is not on the boot path because the page must still work where a
-    // module worker cannot start, and because what it replaces — the scene
-    // this page already tessellated on the main thread — is the only thing
-    // there is to compare the result against. The comparison is the point:
-    // the triangle count after must equal the triangle count before, and the
-    // canvas must still be showing a solid rather than a flat colour.
+    // While the main thread meshed at startup and the worker's result replaced
+    // it afterwards, "the same triangles arrived by a different route" was a
+    // before-and-after on one viewer and cost nothing to assert. Now the
+    // worker goes first and there is no `before` — so the reference has to be
+    // built on purpose: tessellate the same scene on *this* thread, install it
+    // through the same wire path, and require the picture not to change.
     //
-    // When `w3d-web` becomes the modeller this is the path that stays and the
-    // startup tessellation is the one that goes.
-    state.tessellateInWorker = async (chunksPerBody = 4) => {
-      const before = { triangles: viewer.triangles(), colours: state.sample() };
-      const result = await tessellateInWorker(chunksPerBody);
-      const bodies = viewer.replaceWithWire(result.chunks);
-      const after = { triangles: viewer.triangles(), colours: state.sample() };
-      state.worker = {
-        chunks: result.chunks.length,
-        bytes: result.bytes,
-        claimed: result.claimed,
-        transferred: result.transferred,
-        initMs: result.initMs,
-        totalMs: result.totalMs,
-        modelMs: result.modelMs,
-        tessellateMs: result.tessellateMs,
-        encodeMs: result.encodeMs,
+    // It proves the same thing in the opposite direction. Two independent
+    // tessellations, in two linear memories, of one document, agree.
+    state.compareWithMainThread = (chunksPerBody = 4) => {
+      const before = {
+        triangles: viewer.triangles(),
+        colours: state.sample(),
+        meshedBy: viewer.report().meshedBy,
+      };
+
+      const started = performance.now();
+      const local = module.tessellateScene(chunksPerBody);
+      const onThisThreadMs = performance.now() - started;
+
+      // Copied out before `installWire` is called, and the reason is a hazard
+      // rather than a preference: if these were views into this module's
+      // linear memory, the allocation `installWire` makes to copy chunk 0 in
+      // could grow that memory, and growing it detaches every outstanding
+      // view — so chunk 1 would arrive empty, or throw. Whether they *are*
+      // views is measured rather than assumed: `chunkBuffer` below reports the
+      // backing buffer's size against the chunk's own. Equal means js-sys
+      // handed back a copy on the JS heap and this precaution is free
+      // insurance; very much larger means it is load-bearing.
+      const chunkBuffer = local.chunks.length
+        ? { chunk: local.chunks[0].length, buffer: local.chunks[0].buffer.byteLength }
+        : null;
+      const chunks = local.chunks.map((c) => {
+        const copy = new Uint8Array(c.length);
+        copy.set(c);
+        return copy;
+      });
+
+      const bodies = viewer.installWire(chunks, {
+        tessellateMs: local.tessellateMs,
+        modelled: local.modelled,
+        // Made right here, and said so. Passing `true` would turn `meshedBy`
+        // into a decoration that always agrees with whoever wrote the caller.
+        fromWorker: false,
+      });
+
+      const after = {
+        triangles: viewer.triangles(),
+        colours: state.sample(),
+        meshedBy: viewer.report().meshedBy,
+      };
+      state.comparison = {
         bodies,
+        chunks: chunks.length,
+        onThisThreadMs,
+        chunkBuffer,
+        modelled: local.modelled,
         before,
         after,
       };
-      return state.worker;
+      return state.comparison;
     };
 
     state.ready = true;
@@ -161,7 +231,11 @@
         `compute ${report.compute ? 'yes' : 'NO'} · vertex storage ` +
           `${report.vertexStorageBuffers ? 'yes' : 'NO'} · ` +
           `${report.triangles} triangles${report.deindexed ? ' (de-indexed)' : ''}` +
-          ` · meshed in ${report.tessellateMs.toFixed(1)} ms`,
+          // `meshedBy` and not just a duration. A boot that fell back to
+          // meshing on this thread draws the same picture in the same time and
+          // is the thing the worker exists to prevent; without this word on
+          // the screen, nobody would ever notice it had happened.
+          ` · meshed in ${report.tessellateMs.toFixed(1)} ms by ${report.meshedBy}`,
         // `pool` is rayon's own count, not the variant's name. A threaded
         // build whose workers never started says `pool 1` here and would say
         // `variant threaded` on the same line — showing both is what makes
@@ -181,6 +255,7 @@
       for (const text of [
         note,
         graphics,
+        meshNote,
         report.softwareRendering,
         report.degradation,
         state.coi,

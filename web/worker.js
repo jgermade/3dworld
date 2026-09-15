@@ -23,6 +23,12 @@
  * construct it and the boundary is still exercised honestly. A worker that is
  * sent a *document* needs the document to be serialisable across the same
  * boundary, which is a second format and a later problem.
+ *
+ * That limit is the whole of what keeps this a *demonstration* boot path
+ * rather than a modeller's. Since 2026-09-15 this worker is what the page
+ * boots on — nothing is tessellated on the thread that draws any more — but it
+ * can only be, because the one scene there is happens to be constructible from
+ * nothing. The moment a user opens a file, the document has to cross.
  */
 
 import init, { tessellateScene } from './dist/w3d_web.js';
@@ -37,17 +43,32 @@ self.onmessage = async (event) => {
     const started = performance.now();
     const result = tessellateScene(chunksPerBody);
     const totalMs = performance.now() - started;
-    const { chunks, modelMs, tessellateMs, encodeMs } = result;
+    const { chunks, modelMs, tessellateMs, encodeMs, modelled } = result;
 
-    // `tessellateScene` returns `Uint8Array`s that are *views into this
-    // module's linear memory*. Transferring the memory itself is neither
-    // possible nor wanted, so each one is copied into a buffer of its own
-    // first — and that copy is what then moves for free.
+    // Each chunk is copied into a buffer of its own before being posted, and
+    // that copy is what then moves for free.
     //
-    // Doing it the other way round is the bug this comment exists to prevent:
-    // posting the views' `.buffer` would hand over the whole wasm memory, which
-    // the engine refuses, and on an engine that did not, would detach the heap
-    // this worker is still running in.
+    // **The reason is not the one this comment used to give.** It said these
+    // were views into the module's linear memory, so that posting `.buffer`
+    // would offer the engine the whole wasm heap. Measured on 2026-09-15, in
+    // the run `make web-test` now makes, that is not what js-sys hands back:
+    // a 75 964-byte chunk arrived in a 75 964-byte `ArrayBuffer`, so
+    // `Uint8Array::from` is copying onto the JS heap and each chunk already
+    // owns its buffer. `web/test/browser.mjs` asserts that ratio, so a change
+    // to it is a failing check rather than a silent hazard.
+    //
+    // The copy stays, as insurance rather than necessity, because what it
+    // guards against is real and one line away: the day `tessellateScene`
+    // hands back a `Uint8Array::view` — which is the obvious thing to reach
+    // for to avoid a copy — posting `.buffer` would offer the entire linear
+    // memory, and on an engine that allowed it, detach the heap this worker is
+    // still running in. It costs one memcpy of 178 KiB against half a second
+    // of meshing.
+    //
+    // What is still not explained is why the *first* version of this file
+    // failed in Chromium, which is what the original comment was written from.
+    // The measurement says what the buffers are; it does not say what went
+    // wrong that day, and nobody should assume this paragraph settles it.
     const buffers = chunks.map((chunk) => {
       const copy = new Uint8Array(chunk.length);
       copy.set(chunk);
@@ -56,7 +77,10 @@ self.onmessage = async (event) => {
 
     const bytes = buffers.reduce((n, b) => n + b.byteLength, 0);
     self.postMessage(
-      { ok: true, buffers, bytes, initMs, totalMs, modelMs, tessellateMs, encodeMs },
+      // `modelled` travels beside the bytes rather than in them: `WIRE.md`
+      // describes a mesh and has no field for whether a boolean succeeded, and
+      // the page has no document of its own left to ask.
+      { ok: true, buffers, bytes, initMs, totalMs, modelMs, tessellateMs, encodeMs, modelled },
       buffers,
     );
 
