@@ -13,7 +13,10 @@
 use w3d_core::Document;
 use w3d_kernel::{BooleanOp, Mat4, Vec3};
 use w3d_kernel_fake::FakeKernel;
-use w3d_render::{Acceleration, Camera, Gpu, GpuMesh, Material, Object, Renderer, Viewport};
+use w3d_render::{
+    Acceleration, Camera, Gpu, GpuMesh, Material, Message, Object, Renderer, Viewport,
+};
+use w3d_wire::{Addressing, merge, split_by_face};
 
 const W: u32 = 256;
 const H: u32 = 192;
@@ -275,4 +278,101 @@ fn picking_outside_the_viewport_is_a_miss_not_a_panic() {
     let vp = viewport(&h.gpu);
     let hit = h.renderer.pick(&vp, &camera, W, 0, &[]);
     assert_eq!(hit, w3d_render::Pick::MISS);
+}
+
+/// The worker boundary, end to end, against a rasteriser.
+///
+/// The document is tessellated here, split by face into three chunks as a pool
+/// of workers would produce them, handed over as *bytes* and nothing else, and
+/// uploaded from those bytes with no `Mesh` rebuilt on this side. The picture
+/// must be the one the local path draws — not similar to it, the same.
+///
+/// Byte-identical pixels are the right assertion because the primitive stream
+/// is identical: chunking renumbers vertices, so the index buffers differ, but
+/// they resolve to the same triangles in the same order. A difference here is
+/// a real one.
+#[test]
+fn a_body_that_crossed_the_worker_boundary_draws_the_same_picture() {
+    let Some(mut h) = harness() else { return };
+    let mut doc = document();
+    let (id, _) = doc.nodes().next().unwrap();
+    let mesh = doc.mesh(id).unwrap().clone();
+
+    let max = h.gpu.capabilities.max_buffer_size;
+    let local = GpuMesh::upload(&h.gpu.device, max, "local", &mesh).unwrap();
+
+    let chunks = split_by_face(&mesh, 3, Addressing::whole(id.index())).unwrap();
+    assert!(chunks.len() > 1, "a single chunk would prove nothing");
+    // Reversed, because a pool answers in whatever order it answers.
+    let arrived: Vec<&[u8]> = chunks.iter().rev().map(|c| c.as_slice()).collect();
+    let merged_bytes = merge(&arrived).unwrap();
+    let message = Message::decode(&merged_bytes).unwrap();
+    let remote = GpuMesh::from_wire(&h.gpu.device, max, "remote", &message).unwrap();
+
+    assert_eq!(remote.triangles, local.triangles);
+    assert_eq!(remote.deindexed, local.deindexed);
+
+    let mut camera = Camera::default();
+    camera.fit(&doc.visible_bounds());
+
+    let draw = |h: &mut Harness, mesh: &GpuMesh| {
+        let (color, depth) = w3d_render::offscreen_targets(&h.gpu.device, W, H);
+        let (color_view, depth_view) = (
+            color.create_view(&Default::default()),
+            depth.create_view(&Default::default()),
+        );
+        let objects = [Object {
+            mesh,
+            id: 1,
+            material: Material::default(),
+        }];
+        let vp = viewport(&h.gpu);
+        h.renderer
+            .draw(&vp, &color_view, &depth_view, &camera, &objects);
+        read_back(&h.gpu, &color)
+    };
+
+    let from_local = draw(&mut h, &local);
+    let from_wire = draw(&mut h, &remote);
+    let differing = from_local
+        .iter()
+        .zip(&from_wire)
+        .filter(|(a, b)| a != b)
+        .count();
+    assert_eq!(
+        differing,
+        0,
+        "{differing} of {} bytes differ between the local upload and the one \
+         that came over the wire",
+        from_local.len()
+    );
+
+    // And a pick answers with the same face, which is the part that would go
+    // wrong quietly: face identity is a vertex attribute, and a chunker that
+    // renumbered it would still draw a plausible picture.
+    let vp = viewport(&h.gpu);
+    let local_hit = h.renderer.pick(
+        &vp,
+        &camera,
+        W / 2,
+        H / 2,
+        &[Object {
+            mesh: &local,
+            id: 1,
+            material: Material::default(),
+        }],
+    );
+    let wire_hit = h.renderer.pick(
+        &vp,
+        &camera,
+        W / 2,
+        H / 2,
+        &[Object {
+            mesh: &remote,
+            id: 1,
+            material: Material::default(),
+        }],
+    );
+    assert_eq!(local_hit, wire_hit);
+    assert!(local_hit.hit().is_some());
 }

@@ -25,7 +25,7 @@
      after the boot it is meant to precede. See web/coi-serviceworker.js. -->
 <script src="./coi-serviceworker.js"></script>
 <script type="module">
-  import { boot, distinctColours } from './loader.js';
+  import { boot, distinctColours, tessellateInWorker } from './loader.js';
 
   const container = document.getElementById('viewport');
   const status = document.getElementById('status');
@@ -117,6 +117,39 @@
     state.sample = () => {
       viewer.render();
       return distinctColours(canvas);
+    };
+
+    // The worker boundary, on demand rather than at startup.
+    //
+    // It is not on the boot path because the page must still work where a
+    // module worker cannot start, and because what it replaces — the scene
+    // this page already tessellated on the main thread — is the only thing
+    // there is to compare the result against. The comparison is the point:
+    // the triangle count after must equal the triangle count before, and the
+    // canvas must still be showing a solid rather than a flat colour.
+    //
+    // When `w3d-web` becomes the modeller this is the path that stays and the
+    // startup tessellation is the one that goes.
+    state.tessellateInWorker = async (chunksPerBody = 4) => {
+      const before = { triangles: viewer.triangles(), colours: state.sample() };
+      const result = await tessellateInWorker(chunksPerBody);
+      const bodies = viewer.replaceWithWire(result.chunks);
+      const after = { triangles: viewer.triangles(), colours: state.sample() };
+      state.worker = {
+        chunks: result.chunks.length,
+        bytes: result.bytes,
+        claimed: result.claimed,
+        transferred: result.transferred,
+        initMs: result.initMs,
+        totalMs: result.totalMs,
+        modelMs: result.modelMs,
+        tessellateMs: result.tessellateMs,
+        encodeMs: result.encodeMs,
+        bodies,
+        before,
+        after,
+      };
+      return state.worker;
     };
 
     state.ready = true;

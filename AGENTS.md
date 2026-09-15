@@ -105,6 +105,9 @@ format/        w3d-format       the .w3d file: a zip, a manifest, and one       
                                 geometry blob per body — see FORMAT.md
 kernel-occt/   w3d-kernel-occt  the OpenCASCADE backend: a C ABI, and the       ✅ native
                                 Rust side of it                                 ⬜ wasm
+wire/          w3d-wire         what crosses a worker boundary: the packed     ✅ built
+                                vertex, and the message a tessellation          ✅ in a worker
+                                becomes — see WIRE.md                           ⬜ on the boot path
 render/        w3d-render       wgpu: capability detection, mesh upload,        ✅ built
                                 camera, and ID-buffer picking                   ✅ WebGL2
                                                                                 ⬜ WebGPU
@@ -161,6 +164,15 @@ capability, it is declared there first**, then implemented behind whichever back
   allowed to disagree about is not a result. `w3d-kernel-truck`'s `parallel` feature is held to it
   by a fingerprint pinned as a literal and asserted under both settings, which is the only way one
   test can hold two builds to the same bytes.
+- **What crosses a worker boundary is bytes, and the crate that describes them
+  links no GPU.** A worker tessellates and packs; it has no device and no
+  business carrying a graphics backend to pack with, which is why `w3d-wire`
+  holds the packed vertex and `w3d-render` depends on *it* rather than the other
+  way round. The layout is one fact declared once: `VERTEX_SIZE` is `w3d-wire`'s
+  and the vertex buffer layout is written against it. See
+  [WIRE.md](WIRE.md) — and note what it is not: a message format inside one run
+  of one program, free to change whenever both ends are rebuilt together, which
+  `.w3d` is not.
 - **The kernel does not move to the GPU.** WGSL has no `f64` and no exact predicates. Booleans,
   intersections and anything whose correctness is numerical stay on the CPU, permanently, and no
   benchmark is an argument against this.

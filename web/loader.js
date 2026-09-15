@@ -267,3 +267,84 @@ async function exists(url) {
     return false;
   }
 }
+
+/**
+ * Runs a tessellation in a worker and brings the result back as bytes.
+ *
+ * The one place a message described by `WIRE.md` actually crosses a heap. The
+ * worker is a *second instantiation* of the same wasm module with a linear
+ * memory of its own — see `web/worker.js` — so what comes back cannot be an
+ * object, a pointer or a `Vec`. It is `ArrayBuffer`s, and they arrive
+ * **transferred**: the worker no longer has them.
+ *
+ * That last part is checked rather than assumed. A `postMessage` whose second
+ * argument is wrong still delivers, by *copying*, and the difference is
+ * invisible from here — so the worker sends the byte count it intended to give
+ * up, and `transferred` says whether the buffers really moved. A boundary that
+ * silently copies 84 MiB is the failure this whole design exists to avoid, and
+ * nothing else in the stack would report it.
+ *
+ * Resolves with `{ chunks, bytes, tessellateMs, initMs, transferred }`.
+ */
+export function tessellateInWorker(chunksPerBody = 4, timeoutMs = 60000) {
+  return new Promise((resolve, reject) => {
+    let worker;
+    try {
+      worker = new Worker(new URL('./worker.js', import.meta.url), { type: 'module' });
+    } catch (e) {
+      reject(new Error(`could not start the tessellation worker: ${e.message ?? e}`));
+      return;
+    }
+
+    const timer = setTimeout(() => {
+      worker.terminate();
+      reject(new Error(`the tessellation worker did not answer in ${timeoutMs} ms`));
+    }, timeoutMs);
+
+    // Two messages arrive: the payload, then the worker's verdict on whether
+    // its own buffers were detached by the post. The second is the only
+    // evidence that the transfer was a move — see `web/worker.js`.
+    let payload = null;
+    worker.onmessage = (event) => {
+      const msg = event.data;
+      if (!msg || !msg.ok) {
+        clearTimeout(timer);
+        worker.terminate();
+        reject(new Error(msg?.error ?? 'the tessellation worker failed and said nothing'));
+        return;
+      }
+      if (!msg.verdict) {
+        payload = msg;
+        return;
+      }
+
+      clearTimeout(timer);
+      worker.terminate();
+      if (!payload) {
+        reject(new Error('the worker reported on a payload it never sent'));
+        return;
+      }
+      const chunks = payload.buffers.map((b) => new Uint8Array(b));
+      const arrived = chunks.reduce((n, c) => n + c.length, 0);
+      resolve({
+        chunks,
+        bytes: arrived,
+        claimed: payload.bytes,
+        initMs: payload.initMs,
+        totalMs: payload.totalMs,
+        modelMs: payload.modelMs,
+        tessellateMs: payload.tessellateMs,
+        encodeMs: payload.encodeMs,
+        transferred: msg.transferredOk === true,
+      });
+    };
+
+    worker.onerror = (e) => {
+      clearTimeout(timer);
+      worker.terminate();
+      reject(new Error(`the tessellation worker failed to load: ${e.message ?? e}`));
+    };
+
+    worker.postMessage({ chunksPerBody });
+  });
+}

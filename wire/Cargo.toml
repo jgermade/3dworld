@@ -1,0 +1,19 @@
+[package]
+name = "w3d-wire"
+description = "What crosses a worker boundary: the packed vertex the GPU wants, and the message a tessellation becomes. See WIRE.md."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# No wgpu, and that is the whole reason this is a crate rather than a module of
+# `w3d-render`. A worker that tessellates has no GPU and no business linking
+# one: the browser's payload is already 4.25 MiB (item 7 of the register) and a
+# second module carrying a graphics backend it never calls would be the easiest
+# megabyte in the build to have not spent.
+[dependencies]
+w3d-kernel = { path = "../kernel", default-features = false }
+bytemuck = { version = "1", features = ["derive"] }
+
+[lints]
+workspace = true

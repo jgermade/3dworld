@@ -5,7 +5,7 @@
 // renderable formats and its own idea of what a downlevel limit is. Until this
 // file existed, every claim in STACK.md about the fallback was an argument.
 //
-// It runs the page four times, and the four are different questions:
+// It runs the page five times, and the five are different questions:
 //
 //   1. WebGPU offered — whatever the page ends up on, it must draw and pick.
 //      Headless Chromium here reports WebGPU and then rasterises nothing, so
@@ -14,12 +14,16 @@
 //      fallback is exercised rather than described.
 //   3. No COOP/COEP and no service worker — the loader must degrade *visibly*,
 //      which is a rule in STACK.md and otherwise nothing checks it.
-//   4. No COOP/COEP, service worker allowed — the case every GitHub Pages
+//   4. The worker boundary. A second wasm instantiation, with a linear memory
+//      of its own, tessellates and posts the result as transferable buffers —
+//      which is the architecture STACK.md describes and, until this run
+//      existed, had never happened. See WIRE.md.
+//   5. No COOP/COEP, service worker allowed — the case every GitHub Pages
 //      visitor is in. `coi-serviceworker.js` must supply the headers the host
 //      never sends, and the page must end up isolated and say where the
-//      isolation came from. Without this run the worker is a claim.
+//      isolation came from. Without this run the service worker is a claim.
 //
-// Runs 1 and 4 also decide the variant, and what they assert depends on
+// Runs 1 and 5 also decide the variant, and what they assert depends on
 // whether `make web-threaded` has run — see `THREADED_BUILT`. Both branches
 // assert something, because the interesting failure is a page that boots,
 // prints "threaded" and runs on one core.
@@ -124,7 +128,7 @@ function serve({ isolated }) {
 
 /** Loads the page and returns everything it learned, plus a screenshot of the
  *  canvas. Nothing here inspects internals the page does not itself display. */
-async function run({ isolated = true, webgpu = true, coi = true } = {}) {
+async function run({ isolated = true, webgpu = true, coi = true, worker = false } = {}) {
   const { proc, url } = await serve({ isolated });
   // `?coi=off` is the page's own hook for skipping service-worker registration.
   // Run 3 needs it: with the worker in play a host that sends no headers is no
@@ -193,7 +197,17 @@ async function run({ isolated = true, webgpu = true, coi = true } = {}) {
       state.frames = await page.evaluate(() => globalThis.__w3d.frames);
     }
 
-    return { ...state, pick, colours, consoleErrors };
+    // The worker boundary, run last: it replaces the bodies on the viewer, so
+    // everything above must have been measured against the scene the main
+    // thread tessellated for itself.
+    let workerResult = null;
+    if (worker && state.ready) {
+      workerResult = await page
+        .evaluate(() => globalThis.__w3d.tessellateInWorker(4))
+        .catch((e) => ({ failed: String(e && e.message ? e.message : e) }));
+    }
+
+    return { ...state, pick, colours, worker: workerResult, consoleErrors };
   } finally {
     await browser.close();
     proc.kill();
@@ -279,6 +293,75 @@ console.log('\n— WebGL2, the fallback —');
       r.pick && r.pick.object !== null && r.pick.face !== null,
       JSON.stringify(r.pick),
     );
+    check('nothing threw', r.consoleErrors.length === 0, r.consoleErrors.join(' | '));
+  }
+}
+
+console.log('\n— the worker boundary: a tessellation that crossed a heap —');
+{
+  const r = await run({ isolated: true, webgpu: true, worker: true });
+  check('the page starts', r.ready, r.error ?? '');
+  if (r.ready) {
+    const w = r.worker;
+    check('the worker answered', w && !w.failed, w?.failed ?? '');
+    if (w && !w.failed) {
+      // A second wasm instantiation with a linear memory of its own produced
+      // these. Until this check existed, every sentence in STACK.md about
+      // sharding across wasm32 heaps was an argument.
+      check('it produced chunks', w.chunks > 0, `${w.chunks} chunks, ${w.bytes} bytes`);
+      check(
+        'every byte it sent arrived',
+        w.bytes === w.claimed,
+        `${w.bytes} arrived of ${w.claimed} sent`,
+      );
+      // The one that matters, and the one only the worker can answer: a
+      // `postMessage` with a wrong transfer list still delivers, by copying,
+      // and from this side the two are indistinguishable. The worker looks at
+      // its own buffers afterwards — a transferred ArrayBuffer is detached.
+      check(
+        'the buffers were moved, not copied',
+        w.transferred === true,
+        w.transferred ? 'detached on the sending side' : 'still held by the worker',
+      );
+      check('the bodies came back', w.bodies > 0, `${w.bodies} bodies`);
+      // The proof that the format carried the mesh and not merely some bytes:
+      // the same triangles are on the screen as before, having got there by a
+      // completely different route.
+      check(
+        'and they are the same triangles the main thread had made',
+        w.after.triangles === w.before.triangles && w.after.triangles > 0,
+        `${w.before.triangles} before, ${w.after.triangles} after`,
+      );
+      check(
+        'the canvas still shows a solid',
+        w.after.colours >= DRAWN,
+        `${w.after.colours} distinct colours, against ${w.before.colours} before`,
+      );
+      // A fact, not a threshold: one scene, one machine, a software
+      // rasteriser. A missing number would mean the timing never ran.
+      // Facts, not thresholds: one scene, one machine, a software rasteriser.
+      // Split into phases so that the middle one is comparable with the page's
+      // own `tessellateMs`, which covers the mesh loop and nothing else — a
+      // single wall-clock number here would have included the boolean and the
+      // encoding and would have looked like overhead.
+      check(
+        'the worker timed itself, phase by phase',
+        ['modelMs', 'tessellateMs', 'encodeMs', 'initMs'].every(
+          (k) => typeof w[k] === 'number' && w[k] >= 0,
+        ),
+        `instantiate ${Math.round(w.initMs)} · model ${Math.round(w.modelMs)} · ` +
+          `mesh ${Math.round(w.tessellateMs)} · encode ${Math.round(w.encodeMs)} ms ` +
+          `(main thread meshed the same scene in ${Math.round(r.report.tessellateMs)} ms)`,
+      );
+      // Encoding is a memcpy and a header per chunk against a tessellation
+      // that is trigonometry. If this ever inverts, the format got expensive
+      // and nothing else would say so.
+      check(
+        'encoding costs a fraction of meshing',
+        w.encodeMs <= w.tessellateMs,
+        `${Math.round(w.encodeMs)} ms encoding against ${Math.round(w.tessellateMs)} ms meshing`,
+      );
+    }
     check('nothing threw', r.consoleErrors.length === 0, r.consoleErrors.join(' | '));
   }
 }

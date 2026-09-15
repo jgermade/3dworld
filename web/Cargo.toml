@@ -26,6 +26,10 @@ w3d-core = { path = "../core" }
 w3d-kernel-fake = { path = "../kernel-fake" }
 w3d-kernel-truck = { path = "../kernel-truck" }
 w3d-render = { path = "../render" }
+# The message a tessellation becomes. Depended on directly rather than
+# through `w3d-render`'s re-export, because the *worker* half of this crate
+# uses it with no device anywhere near it — see WIRE.md.
+w3d-wire = { path = "../wire" }
 wasm-bindgen = "0.2.127"
 wasm-bindgen-futures = "0.4"
 js-sys = "0.3"
