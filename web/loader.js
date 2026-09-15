@@ -177,8 +177,21 @@ export function poolSize(limit = 8) {
  * document. A modeller has to send the document across, which is a second
  * format and is not written.
  */
-export async function boot(container, { chunksPerBody = 4, workerUrl } = {}) {
+export async function boot(
+  container,
+  { chunksPerBody = 4, workerUrl, documentUrl = './scene.w3d' } = {},
+) {
   const caps = probe();
+
+  // The document, fetched here and never opened here. This thread does not
+  // parse it, does not build a `Document` out of it and does not know what is
+  // in it — it hands the bytes to the worker, which is the whole shape of a
+  // modeller's boot path. `null` when there is no such file, and the worker
+  // then builds its compiled-in scene instead.
+  //
+  // Not awaited before the worker is created, so that fetching the document
+  // overlaps with the worker loading its own copy of the wasm.
+  const document = fetchDocument(documentUrl);
 
   // Started before anything else on this thread, and deliberately not awaited
   // until the device is open. A rejection here is not fatal — see `meshNote`.
@@ -187,7 +200,7 @@ export async function boot(container, { chunksPerBody = 4, workerUrl } = {}) {
   // fallback is a fallback that does not work, and the only honest way to
   // reach this one is to give it a worker that really will not load — see
   // `web/test/browser.mjs`.
-  const meshing = tessellateInWorker(chunksPerBody, undefined, workerUrl).then(
+  const meshing = tessellateInWorker(chunksPerBody, undefined, workerUrl, document).then(
     (result) => ({ ok: true, result }),
     (error) => ({ ok: false, error }),
   );
@@ -263,6 +276,9 @@ export async function boot(container, { chunksPerBody = 4, workerUrl } = {}) {
         modelled: r.modelled,
         // This thread is the only place that knows. The bytes do not say.
         fromWorker: true,
+        // Whether the worker opened the document this thread fetched, or fell
+        // back to the scene compiled into it.
+        source: r.source,
       });
     }
     return v.tessellateHere();
@@ -346,6 +362,30 @@ function drewSomething(canvas, viewer) {
   return distinctColours(canvas) > 1;
 }
 
+/**
+ * The document the page boots on, or `null` if there is not one.
+ *
+ * A miss is not an error and must not be: `make web-scene` may simply not have
+ * run, and the page still works on the scene compiled into the wasm. What must
+ * not happen is that the difference goes unnoticed, which is why the answer
+ * comes back out of `boot` as `report().source` and both branches are asserted.
+ *
+ * Returns an `ArrayBuffer`, because that is what can be *transferred* into the
+ * worker. Handing over a `Uint8Array` would copy it.
+ */
+async function fetchDocument(url) {
+  try {
+    const res = await fetch(url);
+    if (!res.ok) return null;
+    const bytes = await res.arrayBuffer();
+    // A zero-length file is a build that half-ran, and it would reach the
+    // worker as a document that will not open — a worse error, further away.
+    return bytes.byteLength > 0 ? bytes : null;
+  } catch {
+    return null;
+  }
+}
+
 async function exists(url) {
   try {
     const res = await fetch(url, { method: 'HEAD' });
@@ -371,12 +411,23 @@ async function exists(url) {
  * silently copies 84 MiB is the failure this whole design exists to avoid, and
  * nothing else in the stack would report it.
  *
- * Resolves with `{ chunks, bytes, tessellateMs, initMs, transferred, modelled }`.
- * `modelled` is the worker's answer to whether the scene's boolean actually
- * cut anything — a fact about *its* document, which since this became the boot
- * path is the only one there is.
+ * Resolves with `{ chunks, bytes, tessellateMs, initMs, transferred, modelled,
+ * source }`. `modelled` is the worker's answer to whether the scene's boolean
+ * actually cut anything, and it is `null` from a document — a solid does not
+ * record whether a boolean made it. `source` says which of the two the worker
+ * meshed.
+ *
+ * `documentPromise` resolves to the `.w3d` bytes to send, or to `null` for the
+ * worker's compiled-in scene. It is awaited *after* the worker is constructed,
+ * so the fetch and the worker's own wasm load overlap; the buffer is then
+ * transferred, not copied.
  */
-export function tessellateInWorker(chunksPerBody = 4, timeoutMs = 60000, workerUrl = './worker.js') {
+export function tessellateInWorker(
+  chunksPerBody = 4,
+  timeoutMs = 60000,
+  workerUrl = './worker.js',
+  documentPromise = null,
+) {
   return new Promise((resolve, reject) => {
     let worker;
     try {
@@ -425,7 +476,12 @@ export function tessellateInWorker(chunksPerBody = 4, timeoutMs = 60000, workerU
         modelMs: payload.modelMs,
         tessellateMs: payload.tessellateMs,
         encodeMs: payload.encodeMs,
-        modelled: payload.modelled === true,
+        bodies: payload.bodies,
+        source: payload.source,
+        // Passed through as-is, `null` included: see the doc comment. Coercing
+        // it to a boolean here would turn "nobody watched" into "it did not
+        // happen", which is a different and wrong sentence.
+        modelled: payload.modelled ?? null,
         transferred: msg.transferredOk === true,
       });
     };
@@ -442,6 +498,18 @@ export function tessellateInWorker(chunksPerBody = 4, timeoutMs = 60000, workerU
       reject(new Error(`the tessellation worker failed to load: ${detail}`));
     };
 
-    worker.postMessage({ chunksPerBody });
+    // Awaited here rather than before the worker was constructed, so that
+    // fetching the document overlapped with the worker loading its wasm. The
+    // buffer goes in the transfer list: a document is the one thing crossing
+    // *into* the worker and there is no reason to copy it either.
+    Promise.resolve(documentPromise)
+      .then((doc) => {
+        worker.postMessage({ chunksPerBody, document: doc }, doc ? [doc] : []);
+      })
+      .catch((e) => {
+        clearTimeout(timer);
+        worker.terminate();
+        reject(new Error(`the document could not be read: ${e?.message ?? e}`));
+      });
   });
 }

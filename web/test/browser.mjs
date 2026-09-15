@@ -26,17 +26,19 @@
 //      before-and-after. Now the worker goes first, so the run tessellates the
 //      same scene on the main thread afterwards and requires the picture not
 //      to change — the same claim, made in the opposite direction.
-//   5. The worker failing. The boot path's fallback — meshing on the thread
+//   5. No document to send — `make web-scene` not having run. The worker must
+//      fall back to the scene compiled into it, and the page must say so.
+//   6. The worker failing. The boot path's fallback — meshing on the thread
 //      that draws — is reached by pointing the loader at a worker that does
 //      not exist, so the failure is real rather than a flag that skips the
 //      attempt. An untested fallback is a fallback that does not work, and
 //      this one exists precisely for the machines nobody here is testing on.
-//   6. No COOP/COEP, service worker allowed — the case every GitHub Pages
+//   7. No COOP/COEP, service worker allowed — the case every GitHub Pages
 //      visitor is in. `coi-serviceworker.js` must supply the headers the host
 //      never sends, and the page must end up isolated and say where the
 //      isolation came from. Without this run the service worker is a claim.
 //
-// Runs 1 and 6 also decide the variant, and what they assert depends on
+// Runs 1 and 7 also decide the variant, and what they assert depends on
 // whether `make web-threaded` has run — see `THREADED_BUILT`. Both branches
 // assert something, because the interesting failure is a page that boots,
 // prints "threaded" and runs on one core.
@@ -147,6 +149,7 @@ async function run({
   coi = true,
   compare = false,
   breakWorker = false,
+  noDocument = false,
 } = {}) {
   const { proc, url } = await serve({ isolated });
   // `?coi=off` is the page's own hook for skipping service-worker registration.
@@ -158,6 +161,9 @@ async function run({
   // The page's own hook: it boots against a worker URL that 404s, so the
   // rejection `boot` handles is the one a broken deployment would produce.
   if (breakWorker) params.push('worker=fail');
+  // The deployment where `make web-scene` has not run. The worker must fall
+  // back to the scene compiled into it, and say so.
+  if (noDocument) params.push('doc=off');
   const target = params.length ? `${url}?${params.join('&')}` : url;
   const args = ['--no-sandbox', '--enable-unsafe-swiftshader'];
   if (webgpu) {
@@ -199,6 +205,9 @@ async function run({
         // What the boot path's worker reported, or null if it never ran.
         wire: s.wire ?? null,
         meshNote: s.meshNote ?? null,
+        // How free the thread that draws was while the worker worked — see
+        // `checkThreadWasFree`.
+        boot: s.boot ?? null,
         status: document.getElementById('status')?.textContent ?? '',
       };
     });
@@ -251,6 +260,30 @@ async function run({
 
 /** A lit solid on a dark background is many colours. One is a blank canvas. */
 const DRAWN = 8;
+
+/**
+ * The thread that draws must not have been blocked while the worker worked.
+ *
+ * This is the entire benefit of the worker boot path, and it is invisible: the
+ * picture at the end is identical whether the mesh was made here or there. So
+ * the page measures the one thing that can only happen on an unblocked thread —
+ * a frame callback — and reports the **longest gap between two of them** during
+ * boot.
+ *
+ * A threshold rather than a fact, and a loose one on purpose: this runs on a
+ * software rasteriser and the number moves. What it has to separate is two
+ * cases about a second apart, not two that are close. The suite carries the
+ * blocked case as a control — `?worker=fail` meshes on this thread — which
+ * measured a 1406 ms stall against 255 ms here.
+ */
+function checkThreadWasFree(r) {
+  const b = r.boot;
+  check(
+    'the thread that draws was not blocked while the worker worked',
+    b && b.maxStallMs < 600 && b.ticks > 10,
+    b ? `${b.ticks} frames in ${b.ms} ms, longest stall ${b.maxStallMs} ms` : '(not measured)',
+  );
+}
 
 /**
  * The canvas's backing store must be the size the canvas is displayed at.
@@ -329,7 +362,26 @@ console.log('\n— WebGPU offered, cross-origin isolated —');
     // asserts the browser is modelling rather than displaying. Since the
     // worker became the boot path the answer is the *worker's* — this page has
     // no document — which is why `installWire` is made to carry it.
-    check('the plate on screen was cut, not just asked for', r.report.modelled === true);
+    // The document the page fetched and never opened. Until 2026-09-15 this
+    // read `built-in scene` on every run, because the worker could only build
+    // one — which is exactly what kept the boot path a demonstration.
+    check(
+      'the page booted on a document it was sent',
+      r.report.source === 'document',
+      r.report.source,
+    );
+    // And `modelled` is null *because* of that, which is an answer rather than
+    // a gap: a solid does not record whether a boolean made it, and the file's
+    // writer refusing to emit an uncut scene is a guarantee about the file, not
+    // a check this page ran. The claim that the browser's own boolean still
+    // works is asserted in the worker-boundary run, where a document really is
+    // built here.
+    check(
+      'and says it cannot vouch for a boolean it did not run',
+      r.report.modelled === null,
+      String(r.report.modelled),
+    );
+    checkThreadWasFree(r);
     checkCanvasFit(r);
     // Asserted on every run and not only on the one named for it: the worker
     // is the boot path everywhere, or it is a special case that happens to
@@ -412,13 +464,22 @@ console.log('\n— the worker boundary: the boot path —');
         w.transferred === true,
         w.transferred ? 'detached on the sending side' : 'still held by the worker',
       );
-      // `modelled` has no field in WIRE.md — the format describes a mesh, not
-      // a provenance — so it travels beside the bytes. Before the worker was
-      // the boot path the page answered this from its own document; it no
-      // longer has one, and a page that cannot say whether the plate was cut
-      // is how a boolean that silently stopped working goes unnoticed for
-      // nine days, which is what happened here once already.
-      check('the plate on screen was cut, not just asked for', w.modelled === true);
+      // What crossed *into* the worker, which is the half that did not exist
+      // before 2026-09-15. A `.w3d` — the format FORMAT.md already specifies —
+      // went in as a transferred ArrayBuffer, and triangles came back out.
+      check('a document crossed into the worker', w.source === 'document', String(w.source));
+      check('and it came back as one body', w.bodies === 1, `${w.bodies} bodies`);
+      // The saving, and it is the reason to send a document rather than a
+      // recipe: opening a `.w3d` costs a parse, where building this scene costs
+      // a boolean. Measured at 13 ms against roughly 500. Asserted loosely,
+      // because it is one scene on a software rasteriser — what must hold is
+      // the order of magnitude, since an inversion would mean opening a file
+      // had become as expensive as re-cutting it.
+      check(
+        'and opening it cost far less than re-cutting the hole would',
+        w.modelMs < w.tessellateMs / 4,
+        `${Math.round(w.modelMs)} ms to open, against ${Math.round(w.tessellateMs)} ms meshing`,
+      );
       check(
         'the worker timed itself, phase by phase',
         ['modelMs', 'tessellateMs', 'encodeMs', 'initMs'].every(
@@ -442,10 +503,26 @@ console.log('\n— the worker boundary: the boot path —');
     const c = r.comparison;
     check('the main thread can still tessellate the same scene', c && !c.failed, c?.failed ?? '');
     if (c && !c.failed) {
+      // **Not equality, and the reason is a finding rather than a tolerance.**
+      // The document's hole was cut on x86-64; the reference's was cut in
+      // wasm32 — and the two booleans do not produce quite the same solid, so
+      // the same tessellator makes 6294 triangles of one and 6290 of the
+      // other. Tessellation itself agrees across the two architectures: this
+      // same document meshes to 6294 natively and to 6294 in the browser. It
+      // is the boolean that differs, which is the hazard AGENTS.md names for
+      // relaxed SIMD arriving through a different door.
+      //
+      // So what is asserted is that these are the same *scene* — two copies of
+      // it, one in `format/examples/scene_w3d.rs` and one in `web/src/lib.rs`,
+      // which is the drift this check exists to catch. It is a weak check and
+      // is written down as one: a change to a dimension that does not move the
+      // triangle count would pass it.
+      const drift = Math.abs(c.after.triangles - c.before.triangles);
       check(
-        'and it agrees with the worker, triangle for triangle',
-        c.after.triangles === c.before.triangles && c.after.triangles > 0,
-        `${c.before.triangles} from the worker, ${c.after.triangles} from this thread`,
+        'and it is the same scene as the one compiled in, to within the boolean',
+        c.after.triangles > 0 && drift <= c.before.triangles * 0.01,
+        `${c.before.triangles} from the document, ${c.after.triangles} built here — ` +
+          `${drift} triangles apart`,
       );
       check(
         'the canvas still shows a solid',
@@ -460,10 +537,12 @@ console.log('\n— the worker boundary: the boot path —');
         c.before.meshedBy === 'worker' && c.after.meshedBy === 'main thread',
         `${c.before.meshedBy} → ${c.after.meshedBy}`,
       );
-      check(
-        'both routes agree the plate was cut',
-        c.modelled === true && w?.modelled === true,
-      );
+      // The browser's *own* boolean, which the document path no longer
+      // exercises — the hole in the file was cut natively at build time. This
+      // is now the only check anywhere that the boolean works in wasm, and it
+      // is why the reference tessellation is worth running for more than the
+      // comparison.
+      check('the browser cut the hole itself, when asked to', c.modelled === true);
       // Settles a question the code could only guess at: whether the
       // `Uint8Array`s `tessellateScene` returns are views into the module's
       // linear memory or copies on the JS heap. A backing buffer the size of
@@ -526,6 +605,22 @@ console.log('\n— the worker will not load: the page must still work —');
       `meshed by ${r.report.meshedBy}`,
     );
     check('with no worker result to show', r.wire === null);
+    // No worker means nothing fetched a document either, so this path can only
+    // build the compiled-in scene — and can therefore answer the question the
+    // document path cannot.
+    check('on the compiled-in scene, which it cut itself',
+      r.report.source === 'built-in scene' && r.report.modelled === true,
+      `${r.report.source}, modelled ${r.report.modelled}`);
+    // **The control that gives `checkThreadWasFree` its meaning.** This is the
+    // old boot path, exactly: a solid meshed synchronously on the thread that
+    // draws. If this run ever stops blocking, either the scene got trivial or
+    // the measurement stopped measuring — and the assertion on every other run
+    // would quietly become vacuous.
+    check(
+      'and the thread that draws really was blocked, which is the point',
+      r.boot && r.boot.maxStallMs > 600,
+      r.boot ? `longest stall ${r.boot.maxStallMs} ms over ${r.boot.ms} ms of boot` : '(not measured)',
+    );
     check('frames were drawn', r.frames > 2, `${r.frames} frames`);
     check('the canvas is not blank', r.colours >= DRAWN, `${r.colours} distinct colours`);
     // The same scene, by the path that does not cross a heap. If these ever
@@ -558,6 +653,30 @@ console.log('\n— the worker will not load: the page must still work —');
       r.status.includes('meshed on the thread that draws'),
       r.status.split('\n').find((l) => l.includes('thread that draws')) ?? '',
     );
+  }
+}
+
+console.log('\n— no document to send: the worker must fall back and say so —');
+{
+  const r = await run({ isolated: true, webgpu: true, noDocument: true });
+  // The state of a deployment where `make web-scene` has not run. The page must
+  // still work — the scene is compiled into the wasm — and must not pretend it
+  // booted on a document.
+  check('the page starts without a document', r.ready, r.error ?? '');
+  if (r.ready) {
+    check(
+      'and it says it used the compiled-in scene',
+      r.report.source === 'built-in scene',
+      r.report.source,
+    );
+    // The compensation for the branch above: this path *did* run the boolean
+    // here, so it can answer what the document path cannot.
+    check('which it could cut itself, and did', r.report.modelled === true);
+    check('the mesh is still made in the worker', r.report.meshedBy === 'worker',
+      `meshed by ${r.report.meshedBy}`);
+    check('the canvas is not blank', r.colours >= DRAWN, `${r.colours} distinct colours`);
+    checkThreadWasFree(r);
+    check('nothing threw', r.consoleErrors.length === 0, r.consoleErrors.join(' | '));
   }
 }
 

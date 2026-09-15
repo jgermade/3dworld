@@ -59,12 +59,20 @@ with the same triangle count. `report().meshedBy` is what says which happened,
 and it is the caller's word — a message here has no field for where it was made,
 deliberately, since this format describes a mesh and not a provenance.
 
-**What has not happened is a document crossing.** The worker *builds* the page's
-scene rather than being sent one, which works only because that scene is fixed.
-A modeller has to send the document across, and that is a second format. And the
-largest payload ever sent is 178 KiB, against the 84 MiB the design is for — the
-browser has no OpenCASCADE in it, so nothing there produces an assembly of that
-size yet.
+**A document crosses the other way**, since 2026-09-15, and it is *not* a second
+format: it is a `.w3d`, which [FORMAT.md](FORMAT.md) already specifies. It turned
+out that a document crossing a worker boundary and a document crossing a disk are
+the same problem — `w3d-format` depends on `serde` and `serde_json` and nothing
+else, its zip being its own, so it builds for wasm32 with no substitution.
+
+The asymmetry is the design, and is worth stating plainly: **bytes in are a
+model, bytes out are triangles.** This page cannot describe a solid and
+`FORMAT.md` says nothing about how to draw one, so a worker that answered in
+`.w3d` would have done no work.
+
+What that leaves unchanged: the largest payload ever sent is 178 KiB, against the
+84 MiB the design is for — the browser has no OpenCASCADE in it, so nothing there
+produces an assembly of that size yet.
 
 ## Who parses this
 

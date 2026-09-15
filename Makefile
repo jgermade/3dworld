@@ -121,7 +121,19 @@ THREAD_RUSTFLAGS := -C target-feature=+atomics,+bulk-memory,+mutable-globals \
   -C link-arg=--export=__tls_align
 
 .PHONY: web web-threaded web-both web-opt web-serve web-test app app-test
-web:
+## The document the page boots on, written by the kernel that will read it
+## back. Not a check, and not committed: a generated file in the tree is a file
+## that can be older than its generator and still look authoritative.
+##
+## It is what makes the browser's worker a *modeller's* boot path rather than a
+## demonstration — the page fetches these bytes and posts them, and the thread
+## that draws never builds a document. Without it the page still works, on the
+## scene compiled into the wasm; `report().source` says which, and both
+## branches are asserted.
+web-scene:
+	$(CARGO) run -q -p w3d-format --example scene_w3d --release -- $(WASM_OUT)/../scene.w3d
+
+web: web-scene
 	rustup target add $(WASM_TARGET)
 	$(CARGO) build -p w3d-web --release --target $(WASM_TARGET)
 	wasm-bindgen --target web --no-typescript --out-dir $(WASM_OUT) \

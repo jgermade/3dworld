@@ -30,6 +30,10 @@ w3d-render = { path = "../render" }
 # through `w3d-render`'s re-export, because the *worker* half of this crate
 # uses it with no device anywhere near it — see WIRE.md.
 w3d-wire = { path = "../wire" }
+# The document that crosses *into* the worker. `.w3d` is the format this
+# repository already specifies, and `w3d-format` depends on nothing that does
+# not build for wasm32 — its zip is its own. See `tessellate_document`.
+w3d-format = { path = "../format" }
 wasm-bindgen = "0.2.127"
 wasm-bindgen-futures = "0.4"
 js-sys = "0.3"

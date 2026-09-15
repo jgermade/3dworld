@@ -51,13 +51,77 @@
     // that the main-thread fallback is reached through a real failure rather
     // than through a flag that skips the attempt. The page's own hook, in the
     // same spirit as `?coi=off` above.
-    const forceWorkerFailure =
-      new URLSearchParams(location.search).get('worker') === 'fail';
+    const query = new URLSearchParams(location.search);
+    const forceWorkerFailure = query.get('worker') === 'fail';
+    // `?doc=off` points the loader at a document that is not there, so the
+    // worker falls back to the scene compiled into it. That is the state of a
+    // deployment where `make web-scene` has not run, and it must be a branch
+    // the suite asserts rather than the one it happens to take.
+    const forceNoDocument = query.get('doc') === 'off';
+
+    // While the worker works, this thread is supposed to be free. That is the
+    // entire benefit of the boot path and it is invisible — the picture at the
+    // end is identical either way — so it is *measured*, here, by the cheapest
+    // thing that can only happen on an unblocked thread: a frame callback.
+    //
+    // `maxStallMs` is the number that matters, not the tick count. A thread
+    // meshing a solid synchronously produces one enormous gap between
+    // consecutive callbacks, the length of the mesh; a free one produces gaps
+    // of a frame. It is a direct measurement of "was this thread blocked", and
+    // it needs no baseline from another build — `?worker=fail` meshes here, so
+    // the suite has the blocked case as a control.
+    const spin = ['|', '/', '-', '\\'];
+    let ticks = 0;
+    let maxStallMs = 0;
+    let ticking = true;
+    let lastTick = performance.now();
+    const startedBoot = lastTick;
+    const tick = () => {
+      // Checked first, not last. Clearing `ticking` does not cancel the frame
+      // already queued, so a final callback fires *after* boot has finished and
+      // overwrites the status bar with a spinner — which is what it did: three
+      // checks that read the status found "meshing in a worker…" on a page that
+      // had long since finished.
+      if (!ticking) return;
+      const now = performance.now();
+      // Skipped on the first callback: the gap before it is page setup, not a
+      // stall this page caused.
+      if (ticks > 0) maxStallMs = Math.max(maxStallMs, now - lastTick);
+      lastTick = now;
+      ticks += 1;
+      // The spinner, and it is not decoration: a thread that is blocked cannot
+      // paint one. It is the same fact as `maxStallMs`, in the form a user
+      // reads.
+      status.textContent = `${spin[ticks % spin.length]} meshing in a worker…`;
+      if (ticking) requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
+
+    let booted;
+    try {
+      booted = await boot(container, {
+        workerUrl: forceWorkerFailure ? './worker-that-does-not-exist.js' : undefined,
+        documentUrl: forceNoDocument ? './no-such-scene.w3d' : undefined,
+      });
+    } finally {
+      ticking = false;
+    }
+    // The gap that the loop above cannot see, and on the blocking path it is
+    // the only one that matters: measuring a stall needs a callback on the far
+    // side of it, and a thread that meshes synchronously right up to the end of
+    // boot never gets one. Without this line the blocked case reported a
+    // longest stall of 24 ms — a frame — while it had in fact been blocked for
+    // most of a second, which would have made the whole measurement a
+    // decoration that always agreed with whoever wrote it.
+    maxStallMs = Math.max(maxStallMs, performance.now() - lastTick);
+    state.boot = {
+      ticks,
+      maxStallMs: Math.round(maxStallMs),
+      ms: Math.round(performance.now() - startedBoot),
+    };
 
     const { viewer, canvas, module, caps, wanted, chosen, note, graphics,
-            meshNote, wire, report } = await boot(container, {
-      workerUrl: forceWorkerFailure ? './worker-that-does-not-exist.js' : undefined,
-    });
+            meshNote, wire, report } = booted;
     Object.assign(state, {
       caps, wanted, chosen, note, graphics, meshNote, report, viewer,
       // What the boot path's worker reported about itself. Null when the
@@ -67,6 +131,8 @@
         bytes: wire.bytes,
         claimed: wire.claimed,
         transferred: wire.transferred,
+        bodies: wire.bodies,
+        source: wire.source,
         initMs: wire.initMs,
         modelMs: wire.modelMs,
         tessellateMs: wire.tessellateMs,
@@ -203,6 +269,9 @@
         // Made right here, and said so. Passing `true` would turn `meshedBy`
         // into a decoration that always agrees with whoever wrote the caller.
         fromWorker: false,
+        // `tessellateScene` builds the compiled-in scene; it never opens a
+        // document. This is the reference the boot path is compared against.
+        source: 'built-in scene',
       });
 
       const after = {
@@ -235,11 +304,19 @@
           // meshing on this thread draws the same picture in the same time and
           // is the thing the worker exists to prevent; without this word on
           // the screen, nobody would ever notice it had happened.
-          ` · meshed in ${report.tessellateMs.toFixed(1)} ms by ${report.meshedBy}`,
+          ` · meshed in ${report.tessellateMs.toFixed(1)} ms by ${report.meshedBy}` +
+          // Two independent facts on one line, because the interesting cases
+          // are the mixed ones: a document meshed on the main thread, or the
+          // built-in scene meshed in the worker, each of which means a
+          // different thing went wrong and both of which look identical.
+          ` · from ${report.source}` +
+          (report.modelled === null ? '' : report.modelled ? ' (cut)' : ' (NOT cut)'),
         // `pool` is rayon's own count, not the variant's name. A threaded
         // build whose workers never started says `pool 1` here and would say
         // `variant threaded` on the same line — showing both is what makes
         // that visible instead of flattering.
+        `boot ${state.boot.ms} ms · ${state.boot.ticks} frames while it worked · ` +
+          `longest stall ${state.boot.maxStallMs} ms`,
         `variant ${chosen}${chosen === wanted ? '' : ` (wanted ${wanted})`} · ` +
           `threads ${caps.threads ? 'yes' : 'no'} (pool ${report.threads}) · ` +
           `isolated ${caps.isolated ? `yes (${caps.isolatedBy})` : 'no'} · ` +

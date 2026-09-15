@@ -3542,6 +3542,7 @@ dependencies = [
  "serde_json",
  "w3d-core",
  "w3d-kernel-fake",
+ "w3d-kernel-truck",
 ]
 
 [[package]]
@@ -3606,6 +3607,7 @@ dependencies = [
  "js-sys",
  "rayon",
  "w3d-core",
+ "w3d-format",
  "w3d-kernel-fake",
  "w3d-kernel-truck",
  "w3d-render",
