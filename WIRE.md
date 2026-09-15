@@ -45,12 +45,26 @@ transfer was a *move*, because a `postMessage` with a wrong transfer list still
 delivers by cloning and the receiving end cannot tell the difference. Encoding
 cost 6 ms against 728 ms of meshing on that run.
 
-**It is not on the boot path.** The page still meshes its scene on the main
-thread at startup and the worker replaces the result afterwards, which is what
-makes the comparison possible and means the stall this format exists to remove
-is shown to be removable rather than removed. And the largest payload ever sent
-is 178 KiB, against the 84 MiB the design is for — the browser has no
-OpenCASCADE in it, so nothing there produces an assembly of that size yet.
+**It is the boot path**, since 2026-09-15. `w3d_web::start` opens a device and
+returns a viewer with no bodies in it; the mesh arrives from a worker that was
+started before the adapter was asked for anything, and the thread that draws
+tessellates nothing. That holds on every run of `make web-test`, including the
+page with no COOP/COEP — a *module worker* needs no cross-origin isolation, only
+a **shared memory** does — and including the WebGL2 fallback, which re-uploads
+the bytes it already has rather than meshing again as it used to.
+
+It is checked rather than assumed, because it cannot be seen: a page that fell
+back to meshing on the main thread draws the same picture, in the same colours,
+with the same triangle count. `report().meshedBy` is what says which happened,
+and it is the caller's word — a message here has no field for where it was made,
+deliberately, since this format describes a mesh and not a provenance.
+
+**What has not happened is a document crossing.** The worker *builds* the page's
+scene rather than being sent one, which works only because that scene is fixed.
+A modeller has to send the document across, and that is a second format. And the
+largest payload ever sent is 178 KiB, against the 84 MiB the design is for — the
+browser has no OpenCASCADE in it, so nothing there produces an assembly of that
+size yet.
 
 ## Who parses this
 

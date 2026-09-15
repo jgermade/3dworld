@@ -30,7 +30,7 @@
 
 use js_sys::{Array, Object, Reflect, Uint8Array};
 use w3d_core::Document;
-use w3d_core::kernel::{BooleanOp, Mat4, Vec3};
+use w3d_core::kernel::{Aabb, BooleanOp, Mat4, Vec3};
 use w3d_kernel_truck::TruckKernel;
 use w3d_render::{Camera, Gpu, GpuMesh, Material, Object as DrawObject, PickPending, Renderer};
 use w3d_wire::{Addressing, Message, merge, split_by_face};
@@ -64,6 +64,35 @@ fn thread_count() -> u32 {
     }
 }
 
+/// Where the mesh on screen was made.
+///
+/// Reported out to the page, and it has to be: a boot path that quietly fell
+/// back to meshing on the main thread draws exactly the same picture as one
+/// that did not, in exactly the same colours, with the same triangle count.
+/// The only difference is that the thread which draws was blocked for the
+/// whole of it — which is invisible in every check this repository has, and is
+/// the entire point of the worker. See `report`.
+#[derive(Clone, Copy, PartialEq)]
+enum MeshedBy {
+    /// `start` has returned and nothing has been installed yet. A viewer in
+    /// this state draws an empty scene, which is a flat canvas — see the note
+    /// in `loader.js` about why the graphics fallback cannot be asked to judge
+    /// one.
+    Nothing,
+    Worker,
+    MainThread,
+}
+
+impl MeshedBy {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Nothing => "nothing yet",
+            Self::Worker => "worker",
+            Self::MainThread => "main thread",
+        }
+    }
+}
+
 /// One node's mesh on the GPU, and the id the pick will answer with.
 struct Body {
     mesh: GpuMesh,
@@ -91,6 +120,8 @@ pub struct Viewer {
     /// Whether the scene's boolean succeeded, so the page can say whether what
     /// it draws was modelled or merely asked for. See `scene`.
     modelled: bool,
+    /// Which side of the worker boundary produced what is on screen.
+    meshed_by: MeshedBy,
 }
 
 /// The producer end of the worker boundary: tessellate the scene and hand back
@@ -118,7 +149,7 @@ pub fn tessellate_scene(chunks_per_body: u32) -> Result<Object, JsError> {
     // at a time. A single figure here would also be uncomparable with the
     // page's own `tessellateMs`, which covers the middle phase alone.
     let started = js_sys::Date::now();
-    let (mut doc, _) = scene();
+    let (mut doc, modelled) = scene();
     let model_ms = js_sys::Date::now() - started;
 
     let ids: Vec<_> = doc.nodes().map(|(id, _)| id).collect();
@@ -153,10 +184,30 @@ pub fn tessellate_scene(chunks_per_body: u32) -> Result<Object, JsError> {
     set(&result, "modelMs", &model_ms.into())?;
     set(&result, "tessellateMs", &tessellate_ms.into())?;
     set(&result, "encodeMs", &encode_ms.into())?;
+    // Whether the boolean this scene asks for actually happened. It has to
+    // cross with the bytes: since the worker became the boot path this is the
+    // only document the page builds, so a `modelled` left behind here is a
+    // page that cannot say whether what it draws was cut or merely asked for.
+    set(&result, "modelled", &modelled.into())?;
     Ok(result)
 }
 
-/// Opens a device against `canvas` and builds the scene.
+/// Opens a device against `canvas`. **It does not build or mesh a scene.**
+///
+/// That changed on 2026-09-15, and it is what put the worker on the boot path:
+/// this function used to model the document, tessellate every body and upload
+/// the result before it returned, all of it on the thread that then had to
+/// draw. Now it returns a viewer with no bodies at all, and the mesh arrives
+/// through [`Viewer::install_wire`] from a worker that has been running since
+/// before the adapter was asked for.
+///
+/// Two consequences worth knowing at the call site:
+///
+/// - **A viewer returned from here draws nothing**, so the loader's
+///   "did WebGPU actually rasterise anything" check cannot be run against it
+///   until a mesh is installed. `loader.js` orders those two for that reason.
+/// - **The camera is not fitted here either**, because there is no document to
+///   take bounds from. It is fitted when bodies arrive.
 ///
 /// Fails rather than panics when there is no adapter: on the web that is a
 /// message a user has to see — "this browser has neither WebGPU nor WebGL2" —
@@ -208,47 +259,19 @@ pub async fn start(canvas: HtmlCanvasElement, force_webgl: bool) -> Result<Viewe
     let renderer = Renderer::new(&gpu.device, format);
     let depth = depth_texture(&gpu.device, width, height);
 
-    let (mut doc, modelled) = scene();
-    let ids: Vec<_> = doc.nodes().map(|(id, _)| id).collect();
-
-    // Tessellation is timed on its own, with the GPU upload outside the clock:
-    // the upload is driver work and would drown the thing being measured.
-    let started = js_sys::Date::now();
-    let mut meshes = Vec::with_capacity(ids.len());
-    for id in &ids {
-        meshes.push(
-            doc.mesh(*id)
-                .map_err(|e| JsError::new(&e.to_string()))?
-                .clone(),
-        );
-    }
-    let tessellate_ms = js_sys::Date::now() - started;
-
-    let mut bodies = Vec::with_capacity(ids.len());
-    for (id, mesh) in ids.iter().zip(&meshes) {
-        let mesh = GpuMesh::upload(&gpu.device, gpu.capabilities.max_buffer_size, "body", mesh)
-            .map_err(|e| JsError::new(&e.to_string()))?;
-        bodies.push(Body {
-            mesh,
-            id: id.index(),
-        });
-    }
-
-    let mut camera = Camera::default();
-    camera.fit(&doc.visible_bounds());
-
     Ok(Viewer {
         gpu,
         renderer,
         surface,
         config,
         depth,
-        bodies,
-        camera,
+        bodies: Vec::new(),
+        camera: Camera::default(),
         pending: None,
         selected: None,
-        tessellate_ms,
-        modelled,
+        tessellate_ms: 0.0,
+        modelled: false,
+        meshed_by: MeshedBy::Nothing,
     })
 }
 
@@ -295,6 +318,13 @@ impl Viewer {
         // Read from rayon, not from which file was loaded — see `thread_count`.
         set(&out, "threads", &thread_count().into())?;
         set(&out, "tessellateMs", &self.tessellate_ms.into())?;
+        // Which side of the worker boundary made what is on screen. A page
+        // that fell back to meshing on the thread that draws looks *identical*
+        // to one that did not — same triangles, same colours, same picture —
+        // and the only observable difference is a stall nothing here can see.
+        // So it is said out loud rather than assumed from the fact that a
+        // worker was started.
+        set(&out, "meshedBy", &self.meshed_by.as_str().into())?;
         // Whether the plate on screen has a hole in it because a boolean cut
         // one, or is a plate and a pin sharing a space. See `scene`.
         set(&out, "modelled", &self.modelled.into())?;
@@ -310,8 +340,8 @@ impl Viewer {
         self.bodies.iter().map(|b| b.mesh.triangles).sum()
     }
 
-    /// The consumer end of the worker boundary: replace every body with one
-    /// rebuilt from chunks a worker produced.
+    /// The consumer end of the worker boundary, **and since 2026-09-15 the
+    /// boot path**: install every body from chunks a worker produced.
     ///
     /// `chunks` is an array of `Uint8Array`, in whatever order they arrived —
     /// they are grouped by the node in their own headers and merged by chunk
@@ -326,9 +356,47 @@ impl Viewer {
     /// which this workspace forbids outside the FFI crate. It is one memcpy per
     /// chunk against a tessellation that took seconds.
     ///
-    /// Returns how many bodies were rebuilt.
-    #[wasm_bindgen(js_name = replaceWithWire)]
-    pub fn replace_with_wire(&mut self, chunks: Array) -> Result<u32, JsError> {
+    /// `facts` carries what the bytes cannot: `tessellateMs`, `modelled` and
+    /// `fromWorker`. The first two have to be passed because this side no
+    /// longer builds a document at startup, so there is nothing here that could
+    /// measure the one or answer the other.
+    ///
+    /// **`fromWorker` is the caller's word and there is no way to check it**,
+    /// which is worth stating rather than hiding: a `WIRE.md` message has no
+    /// field for where it was made, deliberately — the format describes a mesh,
+    /// not a provenance — so bytes tessellated on this thread and bytes posted
+    /// from a worker are byte-for-byte indistinguishable on arrival. Only the
+    /// caller knows which it has, and `report().meshedBy` is therefore exactly
+    /// as trustworthy as `loader.js`. Missing or mistyped facts are an error
+    /// rather than a default, because a `tessellateMs` that quietly became 0
+    /// would read as a boot too fast to believe and nobody would believe it.
+    ///
+    /// **The camera is fitted here**, and from the arrived vertices, because
+    /// `start` no longer has a document to take bounds from. Those are *mesh*
+    /// bounds and they sit inside the B-rep's by the chordal error — a
+    /// tessellated cylinder is fractionally narrower than the cylinder it
+    /// approximates. For framing a view that is not a difference anyone can
+    /// see; for anything that has to be exact it is the wrong number, which is
+    /// why it is written down here rather than left to be discovered.
+    ///
+    /// Safe to call more than once with the same chunks, and the loader does
+    /// exactly that: falling back from WebGPU to WebGL2 means a new canvas and
+    /// a new device, and re-uploading bytes already in hand is much cheaper
+    /// than tessellating the scene a second time — which is what the fallback
+    /// used to cost.
+    ///
+    /// Returns how many bodies were installed.
+    #[wasm_bindgen(js_name = installWire)]
+    pub fn install_wire(&mut self, chunks: Array, facts: &Object) -> Result<u32, JsError> {
+        let tessellate_ms = get(facts, "tessellateMs")?
+            .as_f64()
+            .ok_or_else(|| JsError::new("installWire: tessellateMs must be a number"))?;
+        let modelled = get(facts, "modelled")?
+            .as_bool()
+            .ok_or_else(|| JsError::new("installWire: modelled must be a boolean"))?;
+        let from_worker = get(facts, "fromWorker")?
+            .as_bool()
+            .ok_or_else(|| JsError::new("installWire: fromWorker must be a boolean"))?;
         let arrived: Vec<Vec<u8>> = chunks
             .iter()
             .map(|v| {
@@ -359,14 +427,22 @@ impl Viewer {
             }
         }
 
+        let mut bounds = Aabb::EMPTY;
         let mut bodies = Vec::with_capacity(grouped.len());
         for (node, chunks) in nodes.iter().zip(&grouped) {
             let merged = merge(chunks).map_err(|e| JsError::new(&e.to_string()))?;
             let message = Message::decode(&merged).map_err(|e| JsError::new(&e.to_string()))?;
+            // Accumulated while the merged bytes are still alive, which is the
+            // only window there is: `message` borrows `merged`.
+            for v in message.vertices() {
+                bounds.expand(position_of(v.position));
+            }
             let mesh = GpuMesh::from_wire(
                 &self.gpu.device,
                 self.gpu.capabilities.max_buffer_size,
-                "body from a worker",
+                // Not "from a worker": this path installs main-thread bytes
+                // too, and a debug label that lies is worse than a vague one.
+                "body from wire",
                 &message,
             )
             .map_err(|e| JsError::new(&e.to_string()))?;
@@ -376,6 +452,82 @@ impl Viewer {
         self.bodies = bodies;
         self.selected = None;
         self.pending = None;
+        if !bounds.is_empty() {
+            self.camera.fit(&bounds);
+        }
+        self.tessellate_ms = tessellate_ms;
+        self.modelled = modelled;
+        self.meshed_by = if from_worker {
+            MeshedBy::Worker
+        } else {
+            MeshedBy::MainThread
+        };
+        Ok(self.bodies.len() as u32)
+    }
+
+    /// Mesh the scene on **this** thread — the fallback for when the worker
+    /// could not be used at all.
+    ///
+    /// This is what `start` used to do, and it is deliberately still reachable.
+    /// A module worker can fail for reasons that have nothing to do with the
+    /// engine: a Content-Security-Policy without `worker-src`, a `worker.js`
+    /// that did not get deployed, a file: URL, an engine out of memory. A
+    /// modeller that shows *nothing* because a worker would not start is worse
+    /// than one that stalls, so the slow path stays — and `report().meshedBy`
+    /// says which of the two happened, so that it is visible rather than
+    /// silent.
+    ///
+    /// Bounds are taken from the mesh here as well, rather than from the
+    /// document that is right there, so that both paths frame the scene
+    /// identically. A camera that depended on which of them ran would make
+    /// every screenshot comparison between them meaningless.
+    #[wasm_bindgen(js_name = tessellateHere)]
+    pub fn tessellate_here(&mut self) -> Result<u32, JsError> {
+        let (mut doc, modelled) = scene();
+        let ids: Vec<_> = doc.nodes().map(|(id, _)| id).collect();
+
+        // Timed with the upload outside the clock, for the reason the old
+        // `start` gave: the upload is driver work and would drown the thing
+        // being measured.
+        let started = js_sys::Date::now();
+        let mut meshes = Vec::with_capacity(ids.len());
+        for id in &ids {
+            meshes.push(
+                doc.mesh(*id)
+                    .map_err(|e| JsError::new(&e.to_string()))?
+                    .clone(),
+            );
+        }
+        let tessellate_ms = js_sys::Date::now() - started;
+
+        let mut bounds = Aabb::EMPTY;
+        let mut bodies = Vec::with_capacity(ids.len());
+        for (id, mesh) in ids.iter().zip(&meshes) {
+            for p in &mesh.positions {
+                bounds.expand(position_of(*p));
+            }
+            let uploaded = GpuMesh::upload(
+                &self.gpu.device,
+                self.gpu.capabilities.max_buffer_size,
+                "body",
+                mesh,
+            )
+            .map_err(|e| JsError::new(&e.to_string()))?;
+            bodies.push(Body {
+                mesh: uploaded,
+                id: id.index(),
+            });
+        }
+
+        self.bodies = bodies;
+        self.selected = None;
+        self.pending = None;
+        if !bounds.is_empty() {
+            self.camera.fit(&bounds);
+        }
+        self.tessellate_ms = tessellate_ms;
+        self.modelled = modelled;
+        self.meshed_by = MeshedBy::MainThread;
         Ok(self.bodies.len() as u32)
     }
 
@@ -491,6 +643,14 @@ fn objects(bodies: &[Body], selected: Option<u32>) -> Vec<DrawObject<'_>> {
         .collect()
 }
 
+/// A packed position lifted to the document's own precision.
+///
+/// Both meshing paths accumulate bounds through this one function, so that
+/// neither can drift into framing the scene differently from the other.
+fn position_of(p: [f32; 3]) -> Vec3 {
+    Vec3::new(p[0] as f64, p[1] as f64, p[2] as f64)
+}
+
 fn depth_texture(device: &wgpu::Device, width: u32, height: u32) -> wgpu::Texture {
     device.create_texture(&wgpu::TextureDescriptor {
         label: Some("w3d depth"),
@@ -527,6 +687,11 @@ fn scene() -> (Document<TruckKernel>, bool) {
     let _ = doc.transform(drill, &Mat4::from_translation(Vec3::new(8.0, 0.0, 0.0)));
     let modelled = doc.boolean(BooleanOp::Difference, plate, drill).is_ok();
     (doc, modelled)
+}
+
+fn get(target: &Object, key: &str) -> Result<JsValue, JsError> {
+    Reflect::get(target, &key.into())
+        .map_err(|_| JsError::new(&format!("could not read `{key}` from the facts object")))
 }
 
 fn set(target: &Object, key: &str, value: &JsValue) -> Result<(), JsError> {

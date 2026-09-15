@@ -14,16 +14,29 @@
 //      fallback is exercised rather than described.
 //   3. No COOP/COEP and no service worker — the loader must degrade *visibly*,
 //      which is a rule in STACK.md and otherwise nothing checks it.
-//   4. The worker boundary. A second wasm instantiation, with a linear memory
-//      of its own, tessellates and posts the result as transferable buffers —
-//      which is the architecture STACK.md describes and, until this run
-//      existed, had never happened. See WIRE.md.
-//   5. No COOP/COEP, service worker allowed — the case every GitHub Pages
+//   4. The worker boundary, which since 2026-09-15 is the **boot path**: the
+//      page tessellates nothing on the thread that draws. A second wasm
+//      instantiation, with a linear memory of its own, models and meshes and
+//      posts the result as transferable buffers, and the viewer is built from
+//      those bytes and nothing else. See WIRE.md.
+//
+//      This run also builds the reference the old arrangement got for free.
+//      While the main thread meshed at startup and the worker's result
+//      replaced it, "the same triangles by a different route" was a
+//      before-and-after. Now the worker goes first, so the run tessellates the
+//      same scene on the main thread afterwards and requires the picture not
+//      to change — the same claim, made in the opposite direction.
+//   5. The worker failing. The boot path's fallback — meshing on the thread
+//      that draws — is reached by pointing the loader at a worker that does
+//      not exist, so the failure is real rather than a flag that skips the
+//      attempt. An untested fallback is a fallback that does not work, and
+//      this one exists precisely for the machines nobody here is testing on.
+//   6. No COOP/COEP, service worker allowed — the case every GitHub Pages
 //      visitor is in. `coi-serviceworker.js` must supply the headers the host
 //      never sends, and the page must end up isolated and say where the
 //      isolation came from. Without this run the service worker is a claim.
 //
-// Runs 1 and 5 also decide the variant, and what they assert depends on
+// Runs 1 and 6 also decide the variant, and what they assert depends on
 // whether `make web-threaded` has run — see `THREADED_BUILT`. Both branches
 // assert something, because the interesting failure is a page that boots,
 // prints "threaded" and runs on one core.
@@ -128,13 +141,24 @@ function serve({ isolated }) {
 
 /** Loads the page and returns everything it learned, plus a screenshot of the
  *  canvas. Nothing here inspects internals the page does not itself display. */
-async function run({ isolated = true, webgpu = true, coi = true, worker = false } = {}) {
+async function run({
+  isolated = true,
+  webgpu = true,
+  coi = true,
+  compare = false,
+  breakWorker = false,
+} = {}) {
   const { proc, url } = await serve({ isolated });
   // `?coi=off` is the page's own hook for skipping service-worker registration.
   // Run 3 needs it: with the worker in play a host that sends no headers is no
   // longer a page that cannot be isolated, and the degradation it is there to
   // check never happens.
-  const target = coi ? url : `${url}?coi=off`;
+  const params = [];
+  if (!coi) params.push('coi=off');
+  // The page's own hook: it boots against a worker URL that 404s, so the
+  // rejection `boot` handles is the one a broken deployment would produce.
+  if (breakWorker) params.push('worker=fail');
+  const target = params.length ? `${url}?${params.join('&')}` : url;
   const args = ['--no-sandbox', '--enable-unsafe-swiftshader'];
   if (webgpu) {
     args.push('--enable-unsafe-webgpu', '--enable-features=Vulkan');
@@ -172,12 +196,16 @@ async function run({ isolated = true, webgpu = true, coi = true, worker = false 
         chosen: s.chosen ?? null,
         wanted: s.wanted ?? null,
         note: s.note ?? null,
+        // What the boot path's worker reported, or null if it never ran.
+        wire: s.wire ?? null,
+        meshNote: s.meshNote ?? null,
         status: document.getElementById('status')?.textContent ?? '',
       };
     });
 
     let pick = null;
     let colours = 0;
+    let canvasFit = null;
     if (state.ready) {
       // Let the loop run so `frames` is a rendered frame count, not zero.
       await page.waitForFunction(() => globalThis.__w3d.frames > 2, null, { timeout: 10000 });
@@ -188,6 +216,13 @@ async function run({ isolated = true, webgpu = true, coi = true, worker = false 
       // time anything outside the rendering task looks at it.
       colours = await page.evaluate(() => globalThis.__w3d.sample());
 
+      // Captured before the click, because it is what decides whether the
+      // click means anything. See `checkCanvasFit`.
+      canvasFit = await page.evaluate(() => {
+        const c = document.querySelector('#viewport canvas');
+        return c && { backing: [c.width, c.height], css: [c.clientWidth, c.clientHeight] };
+      });
+
       const box = await page.locator('#viewport').boundingBox();
       await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
       pick = await page
@@ -197,17 +232,17 @@ async function run({ isolated = true, webgpu = true, coi = true, worker = false 
       state.frames = await page.evaluate(() => globalThis.__w3d.frames);
     }
 
-    // The worker boundary, run last: it replaces the bodies on the viewer, so
-    // everything above must have been measured against the scene the main
-    // thread tessellated for itself.
-    let workerResult = null;
-    if (worker && state.ready) {
-      workerResult = await page
-        .evaluate(() => globalThis.__w3d.tessellateInWorker(4))
+    // Run last, because it replaces the bodies on the viewer: everything
+    // above is measured against what the *worker* produced at boot, which is
+    // the thing under test.
+    let comparison = null;
+    if (compare && state.ready) {
+      comparison = await page
+        .evaluate(() => globalThis.__w3d.compareWithMainThread(4))
         .catch((e) => ({ failed: String(e && e.message ? e.message : e) }));
     }
 
-    return { ...state, pick, colours, worker: workerResult, consoleErrors };
+    return { ...state, pick, colours, canvasFit, comparison, consoleErrors };
   } finally {
     await browser.close();
     proc.kill();
@@ -216,6 +251,32 @@ async function run({ isolated = true, webgpu = true, coi = true, worker = false 
 
 /** A lit solid on a dark background is many colours. One is a blank canvas. */
 const DRAWN = 8;
+
+/**
+ * The canvas's backing store must be the size the canvas is displayed at.
+ *
+ * This looks like housekeeping and is not. A mismatch is *invisible* on
+ * screen — the image is scaled into the box and looks right — and wrong for
+ * anything that maps a screen coordinate back into the buffer, which is what
+ * picking does. It went unnoticed until 2026-09-15 because the only thing that
+ * maps one is a click, and the scene is a large centred plate that absorbed the
+ * error: the canvas was 624 pixels tall inside a 468-pixel box on every run,
+ * and a centre click was read a third of the height away from where it landed.
+ *
+ * What made it a *visible* failure was a seventh line of status text on the
+ * worker-failure run, which took enough height out of the viewport to push the
+ * click off the part. So a passing pick is not evidence this is right, and that
+ * is exactly why it gets an assertion of its own rather than being left to the
+ * pick to notice.
+ */
+function checkCanvasFit(r) {
+  const f = r.canvasFit;
+  check(
+    'the canvas backing store is the size it is displayed at',
+    f && f.backing[0] === f.css[0] && f.backing[1] === f.css[1],
+    f ? `${f.backing.join('x')} backing, ${f.css.join('x')} displayed` : '(no canvas)',
+  );
+}
 
 console.log('\n— WebGPU offered, cross-origin isolated —');
 {
@@ -265,8 +326,16 @@ console.log('\n— WebGPU offered, cross-origin isolated —');
     // anything, and for nine days it got a plate: the backend's boolean
     // returned a copy of its first operand. Nothing in a screenshot or a
     // triangle count would say so, and this is the only check anywhere that
-    // asserts the browser is modelling rather than displaying.
+    // asserts the browser is modelling rather than displaying. Since the
+    // worker became the boot path the answer is the *worker's* — this page has
+    // no document — which is why `installWire` is made to carry it.
     check('the plate on screen was cut, not just asked for', r.report.modelled === true);
+    checkCanvasFit(r);
+    // Asserted on every run and not only on the one named for it: the worker
+    // is the boot path everywhere, or it is a special case that happens to
+    // hold in the test that looks for it.
+    check('the scene was meshed off the thread that draws', r.report.meshedBy === 'worker',
+      `meshed by ${r.report.meshedBy}${r.meshNote ? ` — ${r.meshNote}` : ''}`);
     check('nothing threw', r.consoleErrors.length === 0, r.consoleErrors.join(' | '));
   }
 }
@@ -293,21 +362,41 @@ console.log('\n— WebGL2, the fallback —');
       r.pick && r.pick.object !== null && r.pick.face !== null,
       JSON.stringify(r.pick),
     );
+    // The fallback path is the one that used to tessellate the scene a second
+    // time, by calling `start` again — on exactly the machines least able to
+    // afford it. It now re-uploads bytes it already has, so the mesh is still
+    // the worker's and was made once.
+    check(
+      'and the WebGL2 fallback did not re-mesh on this thread',
+      r.report.meshedBy === 'worker',
+      `meshed by ${r.report.meshedBy}`,
+    );
+    // The fallback replaces the canvas element, so this is a second chance to
+    // get its size wrong.
+    checkCanvasFit(r);
     check('nothing threw', r.consoleErrors.length === 0, r.consoleErrors.join(' | '));
   }
 }
 
-console.log('\n— the worker boundary: a tessellation that crossed a heap —');
+console.log('\n— the worker boundary: the boot path —');
 {
-  const r = await run({ isolated: true, webgpu: true, worker: true });
+  const r = await run({ isolated: true, webgpu: true, compare: true });
   check('the page starts', r.ready, r.error ?? '');
   if (r.ready) {
-    const w = r.worker;
-    check('the worker answered', w && !w.failed, w?.failed ?? '');
-    if (w && !w.failed) {
-      // A second wasm instantiation with a linear memory of its own produced
-      // these. Until this check existed, every sentence in STACK.md about
-      // sharding across wasm32 heaps was an argument.
+    // The assertion this whole run exists for, and the one that is invisible
+    // in a screenshot: the thread that draws did not mesh. A page that fell
+    // back to `tessellateHere` draws the identical picture, in the identical
+    // colours, with the identical triangle count — the only difference is the
+    // stall, and nothing but this word reports it.
+    check(
+      'nothing was tessellated on the thread that draws',
+      r.report.meshedBy === 'worker',
+      `meshed by ${r.report.meshedBy}${r.meshNote ? ` — ${r.meshNote}` : ''}`,
+    );
+    check('and so the worker had to have run', r.wire !== null, r.meshNote ?? '');
+
+    const w = r.wire;
+    if (w) {
       check('it produced chunks', w.chunks > 0, `${w.chunks} chunks, ${w.bytes} bytes`);
       check(
         'every byte it sent arrived',
@@ -323,35 +412,20 @@ console.log('\n— the worker boundary: a tessellation that crossed a heap —')
         w.transferred === true,
         w.transferred ? 'detached on the sending side' : 'still held by the worker',
       );
-      check('the bodies came back', w.bodies > 0, `${w.bodies} bodies`);
-      // The proof that the format carried the mesh and not merely some bytes:
-      // the same triangles are on the screen as before, having got there by a
-      // completely different route.
-      check(
-        'and they are the same triangles the main thread had made',
-        w.after.triangles === w.before.triangles && w.after.triangles > 0,
-        `${w.before.triangles} before, ${w.after.triangles} after`,
-      );
-      check(
-        'the canvas still shows a solid',
-        w.after.colours >= DRAWN,
-        `${w.after.colours} distinct colours, against ${w.before.colours} before`,
-      );
-      // A fact, not a threshold: one scene, one machine, a software
-      // rasteriser. A missing number would mean the timing never ran.
-      // Facts, not thresholds: one scene, one machine, a software rasteriser.
-      // Split into phases so that the middle one is comparable with the page's
-      // own `tessellateMs`, which covers the mesh loop and nothing else — a
-      // single wall-clock number here would have included the boolean and the
-      // encoding and would have looked like overhead.
+      // `modelled` has no field in WIRE.md — the format describes a mesh, not
+      // a provenance — so it travels beside the bytes. Before the worker was
+      // the boot path the page answered this from its own document; it no
+      // longer has one, and a page that cannot say whether the plate was cut
+      // is how a boolean that silently stopped working goes unnoticed for
+      // nine days, which is what happened here once already.
+      check('the plate on screen was cut, not just asked for', w.modelled === true);
       check(
         'the worker timed itself, phase by phase',
         ['modelMs', 'tessellateMs', 'encodeMs', 'initMs'].every(
           (k) => typeof w[k] === 'number' && w[k] >= 0,
         ),
         `instantiate ${Math.round(w.initMs)} · model ${Math.round(w.modelMs)} · ` +
-          `mesh ${Math.round(w.tessellateMs)} · encode ${Math.round(w.encodeMs)} ms ` +
-          `(main thread meshed the same scene in ${Math.round(r.report.tessellateMs)} ms)`,
+          `mesh ${Math.round(w.tessellateMs)} · encode ${Math.round(w.encodeMs)} ms`,
       );
       // Encoding is a memcpy and a header per chunk against a tessellation
       // that is trigonometry. If this ever inverts, the format got expensive
@@ -360,6 +434,49 @@ console.log('\n— the worker boundary: a tessellation that crossed a heap —')
         'encoding costs a fraction of meshing',
         w.encodeMs <= w.tessellateMs,
         `${Math.round(w.encodeMs)} ms encoding against ${Math.round(w.tessellateMs)} ms meshing`,
+      );
+    }
+
+    // The reference, built on purpose now that the worker no longer has a
+    // main-thread result to be compared against.
+    const c = r.comparison;
+    check('the main thread can still tessellate the same scene', c && !c.failed, c?.failed ?? '');
+    if (c && !c.failed) {
+      check(
+        'and it agrees with the worker, triangle for triangle',
+        c.after.triangles === c.before.triangles && c.after.triangles > 0,
+        `${c.before.triangles} from the worker, ${c.after.triangles} from this thread`,
+      );
+      check(
+        'the canvas still shows a solid',
+        c.after.colours >= DRAWN,
+        `${c.after.colours} distinct colours, against ${c.before.colours} before`,
+      );
+      // Installing bytes made here must *say* they were made here. If this
+      // ever reads `worker`, `meshedBy` has stopped being evidence and the
+      // check above it is worthless.
+      check(
+        'and installing them says so, rather than claiming a worker',
+        c.before.meshedBy === 'worker' && c.after.meshedBy === 'main thread',
+        `${c.before.meshedBy} → ${c.after.meshedBy}`,
+      );
+      check(
+        'both routes agree the plate was cut',
+        c.modelled === true && w?.modelled === true,
+      );
+      // Settles a question the code could only guess at: whether the
+      // `Uint8Array`s `tessellateScene` returns are views into the module's
+      // linear memory or copies on the JS heap. A backing buffer the size of
+      // the chunk is a copy; a backing buffer of megabytes is the whole wasm
+      // memory, and then every caller must copy them out before anything can
+      // allocate. A fact, not a threshold — but a *change* here would change
+      // what callers are obliged to do.
+      check(
+        'a chunk out of tessellateScene is backed by a buffer of its own size',
+        c.chunkBuffer && c.chunkBuffer.buffer === c.chunkBuffer.chunk,
+        c.chunkBuffer
+          ? `${c.chunkBuffer.chunk} byte chunk in a ${c.chunkBuffer.buffer} byte buffer`
+          : '(no chunks)',
       );
     }
     check('nothing threw', r.consoleErrors.length === 0, r.consoleErrors.join(' | '));
@@ -382,6 +499,64 @@ console.log('\n— no COOP/COEP: the degradation must be visible —');
       'and the user can see it',
       r.status.includes('Cross-Origin-Embedder-Policy'),
       r.status.split('\n').find((l) => l.includes('Cross-Origin-Embedder-Policy')) ?? '',
+    );
+    // Worth its own assertion because the two are easy to conflate: a *module
+    // worker* needs no COOP/COEP at all. Only a **shared memory** does. So the
+    // page that cannot have a thread pool still gets its tessellation off the
+    // thread that draws, which is most of what the pool was wanted for.
+    check(
+      'but the tessellation is still off the thread that draws',
+      r.report.meshedBy === 'worker',
+      `meshed by ${r.report.meshedBy}${r.meshNote ? ` — ${r.meshNote}` : ''}`,
+    );
+  }
+}
+
+console.log('\n— the worker will not load: the page must still work —');
+{
+  const r = await run({ isolated: true, webgpu: true, breakWorker: true });
+  // The whole point. A modeller that shows nothing because a worker would not
+  // start is a worse answer than one that is slow, so the path `start` used to
+  // take is still there and still correct.
+  check('the page starts anyway', r.ready, r.error ?? '');
+  if (r.ready) {
+    check(
+      'and it meshed on the thread that draws',
+      r.report.meshedBy === 'main thread',
+      `meshed by ${r.report.meshedBy}`,
+    );
+    check('with no worker result to show', r.wire === null);
+    check('frames were drawn', r.frames > 2, `${r.frames} frames`);
+    check('the canvas is not blank', r.colours >= DRAWN, `${r.colours} distinct colours`);
+    // The same scene, by the path that does not cross a heap. If these ever
+    // disagree with the worker's 6290, one of the two is wrong.
+    check(
+      'and it is the same scene the worker would have made',
+      r.report.triangles > 0,
+      `${r.report.triangles} triangles`,
+    );
+    // The run with the most status text, and so the smallest viewport — which
+    // is what turned the stale backing store from a silent error into a missed
+    // click in the first place.
+    checkCanvasFit(r);
+    check(
+      'picking still works',
+      r.pick && r.pick.object !== null && r.pick.face !== null,
+      JSON.stringify(r.pick),
+    );
+    check('the plate was still cut', r.report.modelled === true);
+    // Degrading quietly is the failure this repository keeps legislating
+    // against. A page that silently meshes on the main thread is a stall
+    // nobody can attribute six months later.
+    check(
+      'the reason is stated, not swallowed',
+      typeof r.meshNote === 'string' && r.meshNote.includes('meshed'),
+      r.meshNote ?? '(no note)',
+    );
+    check(
+      'and the user can see it',
+      r.status.includes('meshed on the thread that draws'),
+      r.status.split('\n').find((l) => l.includes('thread that draws')) ?? '',
     );
   }
 }
