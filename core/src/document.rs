@@ -116,6 +116,26 @@ impl Unit {
     }
 }
 
+/// What a push/pull actually did.
+///
+/// `slack` is zero when the solid is exactly what was asked for. It is not when
+/// the backend could not join two coplanar sides and the prism had to be moved
+/// off them — see [`Document::push_pull_face`]. It is a distance, in the
+/// document's units, and it is reported rather than swallowed so that a status
+/// line can say the model is approximate and by how much.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PushPull {
+    pub distance: f64,
+    pub slack: f64,
+}
+
+impl PushPull {
+    #[must_use]
+    pub fn is_exact(&self) -> bool {
+        self.slack == 0.0
+    }
+}
+
 /// One solid in the document, with the things a user gave it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Node {
@@ -747,14 +767,138 @@ impl<K: GeometryKernel> Document<K> {
         Ok(())
     }
 
-    pub fn push_pull_face(&mut self, id: NodeId, face_id: u32, distance: f64) -> Result<()> {
-        let mesh = self.mesh(id)?.clone();
-        let metrics = mesh
-            .face_metrics(face_id)
-            .ok_or_else(|| KernelError::Failed(format!("face #{face_id} not found on body")))?;
-        let translation = metrics.normal * distance;
-        let m = Mat4::from_translation(translation);
-        self.transform(id, &m)
+    /// Pulls one planar face along its normal, adding material outward and
+    /// cutting it inward — the modeller's push/pull.
+    ///
+    /// Until 2026-09-16 this translated the *whole body* along the face normal
+    /// and reported "extruded face #n": the kernel trait has no local face
+    /// operation, and the shortcut was never visible in a test because a
+    /// translated box and a pulled box have the same bounds. It is built here
+    /// out of what the trait does have — the face's outline from the mesh, an
+    /// extrusion of that outline, and a boolean — so a backend needs nothing
+    /// new and a curved face is refused instead of quietly moving the part.
+    ///
+    /// # Errors
+    /// [`DocumentError`] for an unknown node, and the kernel's own error when
+    /// the face is not flat, its outline is not a single loop, or the backend
+    /// declines the boolean.
+    pub fn push_pull_face(&mut self, id: NodeId, face_id: u32, distance: f64) -> Result<PushPull> {
+        if !distance.is_finite() {
+            return Err(KernelError::Degenerate("push/pull distance is not a number").into());
+        }
+        if distance == 0.0 {
+            return Ok(PushPull {
+                distance,
+                slack: 0.0,
+            });
+        }
+        let before = self.node(id)?.clone();
+        let weld = self.tolerance.linear;
+        let mesh = self.mesh(id)?;
+        let face = crate::face::face_loop(mesh, face_id, weld).map_err(|e| e.kernel_error())?;
+
+        // The prism and the solid must overlap in volume rather than meet at a
+        // face: two coincident planes are the case every boolean tolerance is
+        // worst at. Pulling outward, the prism starts *inside* the solid by
+        // `eps`, which adds nothing; cutting inward, it starts outside by the
+        // same, which removes nothing. Either way the result is exact and the
+        // boolean is given a real intersection to work with. `eps` has to clear
+        // the tolerance a backend picks for itself, which is a fraction of the
+        // body's size, not of the document's units.
+        let body_extent = {
+            let size = self.kernel.bounds(before.body)?.size();
+            size.x.max(size.y).max(size.z)
+        };
+        let eps = (body_extent.max(face.extent) * 2.0e-3).max(self.tolerance.linear * 10.0);
+
+        let outward = distance > 0.0;
+        let along = if outward { face.normal } else { -face.normal };
+        let (uv, x_axis, y_axis) = face.projected(along);
+        let op = if outward {
+            BooleanOp::Union
+        } else {
+            BooleanOp::Difference
+        };
+        let base = face.origin - along * eps;
+        let placement = Mat4([
+            [x_axis.x, y_axis.x, along.x, base.x],
+            [x_axis.y, y_axis.y, along.y, base.y],
+            [x_axis.z, y_axis.z, along.z, base.z],
+            [0.0, 0.0, 0.0, 1.0],
+        ]);
+        let height = distance.abs() + eps;
+
+        // Exact first. A prism that stands on the face has its sides *coplanar*
+        // with the solid's own, and a backend either handles that or does not:
+        // `truck-shapeops` panics on it whatever tolerance it is given, and
+        // OpenCASCADE does not. So the second attempt moves the prism's sides
+        // off those planes by a tenth of the tolerance the backend runs the
+        // boolean at — inward when adding material, so nothing is invented;
+        // outward when cutting, so nothing is left behind. The caller is told
+        // which attempt answered, because a result that is right to within a
+        // fraction of a tolerance is still not the result that was asked for.
+        let skew = face.extent.max(body_extent) * 1.0e-4;
+        let mut refused = None;
+        for attempt in [0.0, skew] {
+            let vertices =
+                crate::face::offset_polygon(&uv, if outward { attempt } else { -attempt });
+            let profile = w3d_kernel::Profile::Polygon { vertices };
+            if let Err(e) = profile.validate() {
+                refused = Some(e);
+                break;
+            }
+            match self.swept_boolean(before.body, &profile, height, &placement, op) {
+                Ok(body) => {
+                    let body = self.track(body);
+                    let after = Node {
+                        body,
+                        ..before.clone()
+                    };
+                    self.replace(id, "Push/Pull Face", before, after);
+                    return Ok(PushPull {
+                        distance,
+                        slack: attempt,
+                    });
+                }
+                // A backend that declines the operation outright declines it
+                // twice; only a failure on the geometry is worth a second try.
+                Err(e @ (KernelError::Unsupported(_) | KernelError::Degenerate(_))) => {
+                    refused = Some(e);
+                    break;
+                }
+                Err(e) => refused = Some(e),
+            }
+        }
+        Err(refused
+            .unwrap_or_else(|| KernelError::Failed(String::from("push/pull built nothing")))
+            .into())
+    }
+
+    /// Extrudes `profile` to `height`, places it with `placement`, and runs
+    /// `op` against `body`. Every temporary is deleted, including on the paths
+    /// that fail — a prism that outlives its boolean is a leak the garbage
+    /// collector cannot see, because nothing in the document ever referred to
+    /// it.
+    fn swept_boolean(
+        &mut self,
+        body: Body,
+        profile: &w3d_kernel::Profile,
+        height: f64,
+        placement: &Mat4,
+        op: BooleanOp,
+    ) -> core::result::Result<Body, KernelError> {
+        let flat = self.kernel.extrude(profile, height)?;
+        let prism = match self.kernel.transform(flat, placement) {
+            Ok(prism) => prism,
+            Err(e) => {
+                let _ = self.kernel.delete(flat);
+                return Err(e);
+            }
+        };
+        let result = self.kernel.boolean(op, body, prism, self.tolerance);
+        let _ = self.kernel.delete(flat);
+        let _ = self.kernel.delete(prism);
+        result
     }
 
     pub fn rename(&mut self, id: NodeId, name: impl Into<String>) -> Result<()> {

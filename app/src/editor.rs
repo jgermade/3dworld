@@ -219,6 +219,12 @@ pub struct Editor<K: GeometryKernel> {
     selected_edge: Option<(NodeId, u32, [f32; 3], [f32; 3])>,
     hovered_edge: EdgeHover,
     sketch_state: SketchState,
+    /// A face being dragged in the viewport, and how far it has been dragged so
+    /// far. The geometry is not touched until the button comes up: push/pull is
+    /// a boolean now, and one boolean per mouse-move is a frame budget spent
+    /// several times over — as well as one undo step per frame, and one dead
+    /// body and one dead mesh left behind by each.
+    pending_pull: Option<(NodeId, u32, f64)>,
 }
 
 impl<K: GeometryKernel> Editor<K> {
@@ -237,6 +243,7 @@ impl<K: GeometryKernel> Editor<K> {
             selected_edge: None,
             hovered_edge: EdgeHover::None,
             sketch_state: SketchState::default(),
+            pending_pull: None,
         }
     }
 
@@ -286,6 +293,7 @@ impl<K: GeometryKernel> Editor<K> {
 
     pub fn cancel_drag(&mut self) {
         self.drag = None;
+        self.pending_pull = None;
     }
 
     pub fn is_dragging(&self) -> bool {
@@ -540,9 +548,19 @@ impl<K: GeometryKernel> Editor<K> {
                 Reaction::Redraw
             }
             Input::Up { button } => {
+                // A face dragged in the viewport is applied here, once, however
+                // many frames the drag took.
+                let pulled = self.commit_pending_pull();
                 let Some(drag) = self.drag.take() else {
-                    return Reaction::Nothing;
+                    return if pulled {
+                        Reaction::Redraw
+                    } else {
+                        Reaction::Nothing
+                    };
                 };
+                if pulled {
+                    return Reaction::Redraw;
+                }
                 if drag.button != button || drag.moved || button != Button::Left {
                     return Reaction::Nothing;
                 }
@@ -1117,10 +1135,54 @@ impl<K: GeometryKernel> Editor<K> {
                 "push/pull requires a selected sub-object face",
             ));
         };
-        self.doc
+        let was = self.face_metrics(id, face_id);
+        let done = self
+            .doc
             .push_pull_face(id, face_id, distance)
             .map_err(|e| e.to_string())?;
-        Ok(format!("extruded face #{face_id} by {distance:.1} mm"))
+        let what = if distance >= 0.0 {
+            "extruded"
+        } else {
+            "recessed"
+        };
+
+        // A boolean rebuilds the solid, and a rebuilt solid numbers its faces
+        // afresh: face #3 after the pull is not the face that was pulled. So the
+        // selection follows the *geometry* — the face with the same normal
+        // nearest to where the pulled one now stands — and is dropped, loudly,
+        // when there is no such face. Keeping the old number is how a second
+        // pull lands on a face nobody chose.
+        if let Some(was) = was {
+            let expected = was.centroid + was.normal * distance;
+            let nearest = self
+                .node_faces_metrics(id)
+                .into_iter()
+                .filter(|m| m.normal.dot(was.normal) > 0.99)
+                .map(|m| ((m.centroid - expected).length(), m.face_id))
+                .min_by(|a, b| a.0.total_cmp(&b.0));
+            match nearest.filter(|(gap, _)| *gap <= was.area.sqrt().max(1.0)) {
+                Some((_, found)) => self.selected_face = Some((id, found)),
+                None => {
+                    self.selected_face = None;
+                    return Ok(format!(
+                        "{what} face #{face_id} by {distance:.2} mm — the face is gone from the \
+                         rebuilt solid, so pick the new one"
+                    ));
+                }
+            }
+        }
+        // The slack is the backend's, not the user's, and it is said out loud
+        // rather than rounded away: a solid that is right to within a fraction
+        // of a tolerance is still not the solid that was asked for.
+        if done.is_exact() {
+            Ok(format!("{what} face #{face_id} by {distance:.2} mm"))
+        } else {
+            Ok(format!(
+                "{what} face #{face_id} by {distance:.2} mm — with {:.4} mm of slack, because this \
+                 backend will not join coplanar sides",
+                done.slack
+            ))
+        }
     }
 
     pub fn shell(&mut self, thickness: f64) -> Result<String, String> {
@@ -1451,12 +1513,51 @@ impl<K: GeometryKernel> Editor<K> {
             return Reaction::Nothing;
         }
 
-        if self.doc.push_pull_face(id, face_id, delta_d).is_ok() {
-            self.status = format!("extruded face #{face_id} by {delta_d:.1} mm");
-            Reaction::Redraw
-        } else {
-            Reaction::Nothing
+        let total = match self.pending_pull {
+            Some((n, f, so_far)) if n == id && f == face_id => so_far + delta_d,
+            _ => delta_d,
+        };
+        self.pending_pull = Some((id, face_id, total));
+        self.status = format!("face #{face_id}: {total:+.2} mm — release to apply");
+        Reaction::Redraw
+    }
+
+    /// The face drag in flight, for a shell that wants to draw where it would
+    /// land. `None` between drags.
+    pub fn pending_pull(&self) -> Option<(NodeId, u32, f64)> {
+        self.pending_pull
+    }
+
+    /// Applies the face drag the viewport has been accumulating, as one
+    /// operation and one undo step. Returns whether anything was applied.
+    pub fn commit_pending_pull(&mut self) -> bool {
+        let Some((id, face_id, distance)) = self.pending_pull.take() else {
+            return false;
+        };
+        if distance.abs() < 1.0e-6 {
+            return false;
         }
+        self.selected_face = Some((id, face_id));
+        self.status = match self.push_pull_face(distance) {
+            Ok(message) | Err(message) => message,
+        };
+        true
+    }
+
+    /// Throws away a face drag without applying it.
+    pub fn cancel_pending_pull(&mut self) {
+        self.pending_pull = None;
+    }
+
+    /// The outline of a face, in world coordinates — what the shell draws to
+    /// show where a pull would land. `None` for a face no outline can be taken
+    /// from, which is exactly the set of faces push/pull refuses.
+    pub fn face_outline(&mut self, node_id: NodeId, face_id: u32) -> Option<Vec<Vec3>> {
+        let weld = self.doc.tolerance().linear;
+        let mesh = self.doc.mesh(node_id).ok()?;
+        w3d_core::face_loop(mesh, face_id, weld)
+            .ok()
+            .map(|l| l.points)
     }
 
     pub fn measure_distance(&mut self) -> Result<String, String> {
@@ -2347,10 +2448,32 @@ mod tests {
         );
         assert_eq!(e.selected_face(), Some((id, 1)));
 
-        // Simulate interactive mouse drag to extrude
+        // A drag measures; it does not model. Until the button comes up the
+        // document is untouched — one boolean per frame is what this replaced.
+        let before = e.document().bounds(id).unwrap();
         let reaction = e.drag_face_extrude(0.0, -50.0);
         assert_eq!(reaction, Reaction::Redraw);
-        assert!(e.status().contains("extruded face #1"));
+        assert_eq!(e.document().bounds(id).unwrap(), before);
+        let (_, face, so_far) = e.pending_pull().expect("the drag is in flight");
+        assert_eq!(face, 1);
+        assert!(so_far > 0.0, "{so_far}");
+
+        // Dragging further adds to the same pull rather than starting another.
+        e.drag_face_extrude(0.0, -50.0);
+        let (_, _, total) = e.pending_pull().unwrap();
+        assert!((total - so_far * 2.0).abs() < 1.0e-9, "{total} vs {so_far}");
+
+        // Letting go applies it: once, as one undo step.
+        assert!(
+            e.input(Input::Up {
+                button: Button::Left
+            }) != Reaction::Nothing
+        );
+        assert_eq!(e.pending_pull(), None);
+        assert!(e.status().contains("face #1"), "{}", e.status());
+        assert!(e.document().bounds(id).unwrap() != before);
+        assert!(e.document_mut().undo().is_some());
+        assert_eq!(e.document().bounds(id).unwrap(), before);
     }
 
     #[test]
