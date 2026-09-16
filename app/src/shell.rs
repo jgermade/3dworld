@@ -81,6 +81,7 @@ struct Live<K: GeometryKernel + Default> {
     modifiers: ModifiersState,
     cursor: (f64, f64),
     ribbon_tab: RibbonTab,
+    gizmo_active: bool,
     /// Where `--screenshot` copies the frame *before* it is presented. A
     /// presented surface texture is destroyed, so reading one back afterwards
     /// is a validation error — the copy has to happen in the same encoder that
@@ -287,6 +288,7 @@ impl<K: GeometryKernel + Default> ApplicationHandler for Shell<K> {
             modifiers: ModifiersState::empty(),
             cursor: (0.0, 0.0),
             ribbon_tab: RibbonTab::default(),
+            gizmo_active: false,
             capture,
             options: self.options.clone(),
             frames: 0,
@@ -301,14 +303,12 @@ impl<K: GeometryKernel + Default> ApplicationHandler for Shell<K> {
         // a click in the viewport, and getting that order wrong makes every
         // button also rotate the model.
         let response = live.egui.on_window_event(&live.window, &event);
-        let consumed = response.consumed;
         if response.repaint {
             live.window.request_redraw();
         }
 
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
-            WindowEvent::ModifiersChanged(m) => live.modifiers = m.state(),
             WindowEvent::Resized(size) => {
                 live.resize(size.width, size.height);
                 live.window.request_redraw();
@@ -328,8 +328,33 @@ impl<K: GeometryKernel + Default> ApplicationHandler for Shell<K> {
                     _ => live.window.request_redraw(),
                 }
             }
+            WindowEvent::ModifiersChanged(m) => {
+                live.modifiers = m.state();
+                let reaction = live.editor.input(Input::ModifiersChanged {
+                    additive: live.modifiers.shift_key(),
+                    ctrl: live.modifiers.control_key() || live.modifiers.super_key(),
+                    alt: live.modifiers.alt_key(),
+                });
+                live.react(reaction);
+                live.window.request_redraw();
+            }
             WindowEvent::CursorMoved { position, .. } => {
                 live.cursor = (position.x, position.y);
+                let _ = live.editor.input(Input::ModifiersChanged {
+                    additive: live.modifiers.shift_key(),
+                    ctrl: live.modifiers.control_key() || live.modifiers.super_key(),
+                    alt: live.modifiers.alt_key(),
+                });
+                // If a gizmo is actively dragging, cancel any editor drag and let gizmo handle movement
+                if live.gizmo_active {
+                    live.editor.cancel_drag();
+                    return;
+                }
+                // If egui widget consumed this cursor movement (e.g. over a ribbon button or outliner),
+                // do not orbit or hover-test 3D geometry.
+                if response.consumed {
+                    return;
+                }
                 let reaction = live.editor.input(Input::Move {
                     x: position.x,
                     y: position.y,
@@ -342,22 +367,33 @@ impl<K: GeometryKernel + Default> ApplicationHandler for Shell<K> {
                 };
                 let reaction = match state {
                     ElementState::Pressed => {
-                        let (x, y) = live.cursor;
-                        live.editor.input(Input::Down {
-                            x,
-                            y,
-                            button,
-                            additive: live.modifiers.shift_key(),
-                            ctrl: live.modifiers.control_key() || live.modifiers.super_key(),
-                            alt: live.modifiers.alt_key(),
-                        })
+                        if response.consumed || live.gizmo_active {
+                            live.editor.cancel_drag();
+                            Reaction::Nothing
+                        } else {
+                            let (x, y) = live.cursor;
+                            live.editor.input(Input::Down {
+                                x,
+                                y,
+                                button,
+                                additive: live.modifiers.shift_key(),
+                                ctrl: live.modifiers.control_key() || live.modifiers.super_key(),
+                                alt: live.modifiers.alt_key(),
+                            })
+                        }
                     }
-                    ElementState::Released => live.editor.input(Input::Up { button }),
+                    ElementState::Released => {
+                        // CRITICAL: Mouse release MUST ALWAYS clear editor drag,
+                        // preventing clicks from getting hooked/stuck.
+                        live.editor.input(Input::Up { button })
+                    }
                 };
                 live.react(reaction);
             }
-            _ if consumed => {}
             WindowEvent::MouseWheel { delta, .. } => {
+                if response.consumed {
+                    return;
+                }
                 let amount = match delta {
                     MouseScrollDelta::LineDelta(_, y) => f64::from(y),
                     MouseScrollDelta::PixelDelta(p) => p.y / 50.0,
@@ -365,11 +401,23 @@ impl<K: GeometryKernel + Default> ApplicationHandler for Shell<K> {
                 let reaction = live.editor.input(Input::Scroll(-amount));
                 live.react(reaction);
             }
-            WindowEvent::KeyboardInput { event, .. } if event.state.is_pressed() => {
-                if let Some(command) = map_key(&event.logical_key, live.modifiers) {
-                    execute_command(&mut live.editor, command);
-                    live.window.request_redraw();
+            WindowEvent::KeyboardInput { event, .. } => {
+                // If egui text edit wants keyboard input, don't execute 3dworld single-key shortcuts.
+                if live.egui.egui_ctx().egui_wants_keyboard_input() {
+                    return;
                 }
+                if event.state.is_pressed()
+                    && let Some(command) = map_key(&event.logical_key, live.modifiers)
+                {
+                    execute_command(&mut live.editor, command);
+                }
+                let reaction = live.editor.input(Input::ModifiersChanged {
+                    additive: live.modifiers.shift_key(),
+                    ctrl: live.modifiers.control_key() || live.modifiers.super_key(),
+                    alt: live.modifiers.alt_key(),
+                });
+                live.react(reaction);
+                live.window.request_redraw();
             }
             _ => {}
         }
@@ -469,7 +517,7 @@ fn map_key(key: &Key, modifiers: ModifiersState) -> Option<Command> {
         Key::Named(NamedKey::Delete) | Key::Named(NamedKey::Backspace) => {
             Some(Command::DeleteSelected)
         }
-        Key::Named(NamedKey::Escape) => Some(Command::ClearSelection),
+        Key::Named(NamedKey::Escape) => Some(Command::Escape),
         _ => None,
     }
 }
@@ -615,6 +663,7 @@ impl<K: GeometryKernel + Default> Live<K> {
                 &mut self.renderer,
                 self.modifiers,
                 &mut self.ribbon_tab,
+                &mut self.gizmo_active,
             )
         });
         self.egui
@@ -809,6 +858,7 @@ fn chrome<K: GeometryKernel + Default>(
     renderer: &mut Renderer,
     modifiers: ModifiersState,
     active_tab: &mut RibbonTab,
+    gizmo_active: &mut bool,
 ) {
     // 1. Top Ribbon Bar Panel
     egui::Panel::top("ribbon_panel").show(root, |ui| {
@@ -1224,211 +1274,890 @@ fn chrome<K: GeometryKernel + Default>(
             });
         });
 
+    let screen = root.max_rect();
+    let sw = f64::from(screen.width());
+    let sh = f64::from(screen.height());
+    let (vw, vh) = editor.viewport();
+    let vp = if vw > 0 && vh > 0 {
+        let aspect = f64::from(vw) / f64::from(vh);
+        let proj = editor.camera().projection(aspect);
+        let view = editor.camera().view();
+        Some(proj.mul(&view))
+    } else {
+        None
+    };
+    let project_3d = move |p: w3d_core::kernel::Vec3| -> Option<egui::Pos2> {
+        let vp = vp?;
+        let (px, py, pz) = (p.x, p.y, p.z);
+        let clip_x = vp.0[0][0] * px + vp.0[0][1] * py + vp.0[0][2] * pz + vp.0[0][3];
+        let clip_y = vp.0[1][0] * px + vp.0[1][1] * py + vp.0[1][2] * pz + vp.0[1][3];
+        let clip_w = vp.0[3][0] * px + vp.0[3][1] * py + vp.0[3][2] * pz + vp.0[3][3];
+        if clip_w <= 1.0e-5 {
+            None
+        } else {
+            let sx = screen.min.x as f64 + (clip_x / clip_w + 1.0) * 0.5 * sw;
+            let sy = screen.min.y as f64 + (1.0 - clip_y / clip_w) * 0.5 * sh;
+            Some(egui::pos2(sx as f32, sy as f32))
+        }
+    };
+
+    let draw_arrow_3d = |painter: &egui::Painter,
+                         from: egui::Pos2,
+                         to: egui::Pos2,
+                         color: egui::Color32,
+                         width: f32,
+                         highlight: bool| {
+        let dir = to - from;
+        let len = dir.length();
+        if len < 4.0 {
+            return;
+        }
+        let u = dir / len;
+        let norm = egui::vec2(-u.y, u.x);
+        let head_len = 16.0f32.min(len * 0.45);
+        let head_w = head_len * 0.6;
+        let shaft_end = to - u * (head_len * 0.8);
+
+        // Dark background halo for high contrast in 3D scene
+        painter.line_segment(
+            [from, shaft_end],
+            egui::Stroke::new(width + 3.0, egui::Color32::from_black_alpha(180)),
+        );
+        // Colored Arrow Shaft
+        painter.line_segment(
+            [from, shaft_end],
+            egui::Stroke::new(if highlight { width + 2.0 } else { width }, color),
+        );
+
+        // Arrow Head triangle
+        let tip = to;
+        let p1 = to - u * head_len + norm * head_w;
+        let p2 = to - u * head_len - norm * head_w;
+        painter.add(egui::Shape::convex_polygon(
+            vec![tip, p1, p2],
+            color,
+            egui::Stroke::new(
+                1.5,
+                if highlight {
+                    egui::Color32::WHITE
+                } else {
+                    color
+                },
+            ),
+        ));
+
+        // Interactive grab handle node at tip
+        painter.circle_filled(to, if highlight { 6.0 } else { 4.5 }, color);
+        painter.circle_stroke(
+            to,
+            if highlight { 8.5 } else { 6.0 },
+            egui::Stroke::new(1.5, egui::Color32::WHITE),
+        );
+    };
+
     // 4.5. Real-time 2D Sketch Overlay Painter
     let sketch = editor.sketch_state();
     if sketch.active && !sketch.points.is_empty() {
-        let (vw, vh) = editor.viewport();
-        if vw > 0 && vh > 0 {
-            let aspect = f64::from(vw) / f64::from(vh);
-            let vp = editor.camera().view_projection(aspect);
-            let col0 = vp[0];
-            let col1 = vp[1];
-            let col2 = vp[2];
-            let col3 = vp[3];
-
-            let project = |u: f64, v: f64| -> Option<egui::Pos2> {
+        let painter = root.painter();
+        let screen_points: Vec<_> = sketch
+            .points
+            .iter()
+            .filter_map(|&(u, v)| {
                 let p = sketch.plane.origin + sketch.plane.x_axis * u + sketch.plane.y_axis * v;
-                let (px, py, pz) = (p.x, p.y, p.z);
-                let cx = f64::from(col0[0]) * px
-                    + f64::from(col1[0]) * py
-                    + f64::from(col2[0]) * pz
-                    + f64::from(col3[0]);
-                let cy = f64::from(col0[1]) * px
-                    + f64::from(col1[1]) * py
-                    + f64::from(col2[1]) * pz
-                    + f64::from(col3[1]);
-                let cw = f64::from(col0[3]) * px
-                    + f64::from(col1[3]) * py
-                    + f64::from(col2[3]) * pz
-                    + f64::from(col3[3]);
-                if cw <= 1.0e-5 {
-                    None
-                } else {
-                    let sx = ((cx / cw) * 0.5 + 0.5) * f64::from(vw);
-                    let sy = ((1.0 - cy / cw) * 0.5) * f64::from(vh);
-                    Some(egui::pos2(sx as f32, sy as f32))
-                }
+                project_3d(p)
+            })
+            .collect();
+
+        for i in 0..screen_points.len().saturating_sub(1) {
+            painter.line_segment(
+                [screen_points[i], screen_points[i + 1]],
+                egui::Stroke::new(2.5, egui::Color32::from_rgb(0, 220, 255)),
+            );
+        }
+        if screen_points.len() >= 3 {
+            painter.line_segment(
+                [*screen_points.last().unwrap(), screen_points[0]],
+                egui::Stroke::new(1.5, egui::Color32::from_rgb(255, 200, 0)),
+            );
+        }
+
+        for (i, &pt) in screen_points.iter().enumerate() {
+            let color = if i == 0 {
+                egui::Color32::from_rgb(0, 255, 120)
+            } else {
+                egui::Color32::WHITE
             };
+            painter.circle_filled(pt, 5.0, color);
+        }
+    }
 
+    // 5. Professional CAD-Grade 3D Manipulators (Gizmos)
+    let hit_test_arrow =
+        |mouse: egui::Pos2, from: egui::Pos2, to: egui::Pos2, tolerance: f32| -> bool {
+            let d = to - from;
+            let len_sq = d.length_sq();
+            if len_sq < 1.0 {
+                return (mouse - to).length() <= tolerance;
+            }
+            let t = ((mouse - from).dot(d) / len_sq).clamp(0.0, 1.0);
+            let proj = from + d * t;
+            (mouse - proj).length() <= tolerance
+        };
+
+    let axis_screen_metrics = |p0: w3d_core::kernel::Vec3,
+                               dir: w3d_core::kernel::Vec3|
+     -> Option<(egui::Pos2, egui::Vec2, f64)> {
+        let s0 = project_3d(p0)?;
+        let test_dist = 10.0;
+        let s1 = project_3d(p0 + dir * test_dist)?;
+        let delta = s1 - s0;
+        let len = delta.length();
+        if len < 0.5 {
+            return None;
+        }
+        let screen_dir = delta / len;
+        let points_per_mm = f64::from(len) / test_dist;
+        Some((s0, screen_dir, points_per_mm))
+    };
+
+    #[derive(Clone, Debug, PartialEq)]
+    enum ActiveGizmoKind {
+        FaceTranslate {
+            node_id: w3d_core::NodeId,
+            face_id: u32,
+            dir: w3d_core::kernel::Vec3,
+        },
+        FaceExtrude {
+            node_id: w3d_core::NodeId,
+            face_id: u32,
+            is_negative: bool,
+        },
+        EdgeFillet {
+            node_id: w3d_core::NodeId,
+        },
+        EdgeChamfer {
+            node_id: w3d_core::NodeId,
+        },
+    }
+
+    #[derive(Clone, Debug)]
+    struct ActiveGizmoState {
+        kind: ActiveGizmoKind,
+        origin_3d: w3d_core::kernel::Vec3,
+        dir_3d: w3d_core::kernel::Vec3,
+        screen_origin: egui::Pos2,
+        screen_dir: egui::Vec2,
+        points_per_mm: f64,
+        mouse_start: egui::Pos2,
+        hud_pos: egui::Pos2,
+        drag_dist_mm: f64,
+        applied_dist_mm: f64,
+        text_buffer: String,
+        focus_needed: bool,
+        in_transaction: bool,
+        label: &'static str,
+        color: egui::Color32,
+    }
+
+    let gizmo_state_id = egui::Id::new("live_active_gizmo_state");
+    let mut gizmo_state: Option<ActiveGizmoState> = root.data_mut(|d| d.get_temp(gizmo_state_id));
+
+    let shift_held = modifiers.shift_key() || root.input(|i| i.modifiers.shift);
+    let ctrl_held = modifiers.control_key()
+        || modifiers.super_key()
+        || root.input(|i| i.modifiers.ctrl || i.modifiers.mac_cmd);
+    let alt_held = modifiers.alt_key() || root.input(|i| i.modifiers.alt);
+
+    let mouse_pos = root.input(|i| i.pointer.latest_pos());
+    let primary_down = root.input(|i| i.pointer.primary_down());
+    let primary_clicked = root.input(|i| i.pointer.primary_clicked());
+
+    // 5.1. Handle continuous CAD-grade drag updates with 1:1 cursor tracking along 3D projected axis
+    if let Some(state) = gizmo_state.as_mut()
+        && state.in_transaction
+    {
+        if primary_down {
+            root.output_mut(|o| o.cursor_icon = egui::CursorIcon::Grabbing);
+            if let Some(curr_m) = mouse_pos {
+                state.hud_pos = curr_m + egui::vec2(18.0, -18.0);
+                let delta_m = curr_m - state.mouse_start;
+                let d_screen = delta_m.x * state.screen_dir.x + delta_m.y * state.screen_dir.y;
+                let mut d_mm = f64::from(d_screen) / state.points_per_mm;
+                if ctrl_held {
+                    d_mm *= 0.1;
+                }
+                if shift_held {
+                    let snap_step = match state.kind {
+                        ActiveGizmoKind::EdgeFillet { .. }
+                        | ActiveGizmoKind::EdgeChamfer { .. } => 1.0,
+                        _ => 5.0,
+                    };
+                    d_mm = (d_mm / snap_step).round() * snap_step;
+                }
+                let diff = d_mm - state.applied_dist_mm;
+                if diff.abs() > 1.0e-5 {
+                    match state.kind {
+                        ActiveGizmoKind::FaceTranslate { node_id, dir, .. } => {
+                            let m = w3d_core::kernel::Mat4::from_translation(dir * diff);
+                            let _ = editor.document_mut().transform(node_id, &m);
+                        }
+                        ActiveGizmoKind::FaceExtrude {
+                            node_id,
+                            face_id,
+                            is_negative,
+                        } => {
+                            let eff = if is_negative { -diff } else { diff };
+                            let _ = editor.document_mut().push_pull_face(node_id, face_id, eff);
+                        }
+                        ActiveGizmoKind::EdgeFillet { .. }
+                        | ActiveGizmoKind::EdgeChamfer { .. } => {}
+                    }
+                    state.applied_dist_mm = d_mm;
+                }
+                state.drag_dist_mm = d_mm;
+                state.text_buffer = format!("{:.1}", d_mm);
+            }
+
+            // Draw Infinite Guideline along constraint axis across the screen
             let painter = root.painter();
-            let screen_points: Vec<_> = sketch
-                .points
-                .iter()
-                .filter_map(|&(u, v)| project(u, v))
-                .collect();
-
-            for i in 0..screen_points.len().saturating_sub(1) {
-                painter.line_segment(
-                    [screen_points[i], screen_points[i + 1]],
-                    egui::Stroke::new(2.5, egui::Color32::from_rgb(0, 220, 255)),
-                );
-            }
-            if screen_points.len() >= 3 {
-                painter.line_segment(
-                    [*screen_points.last().unwrap(), screen_points[0]],
-                    egui::Stroke::new(1.5, egui::Color32::from_rgb(255, 200, 0)),
-                );
-            }
-
-            for (idx, &pt) in screen_points.iter().enumerate() {
-                let color = if idx == 0 {
-                    egui::Color32::from_rgb(255, 200, 0)
-                } else {
-                    egui::Color32::from_rgb(0, 240, 255)
-                };
-                painter.circle_filled(pt, 5.0, color);
+            let p_inf_a = project_3d(state.origin_3d - state.dir_3d * 2000.0)
+                .unwrap_or(state.screen_origin - state.screen_dir * 3000.0);
+            let p_inf_b = project_3d(state.origin_3d + state.dir_3d * 2000.0)
+                .unwrap_or(state.screen_origin + state.screen_dir * 3000.0);
+            painter.line_segment(
+                [p_inf_a, p_inf_b],
+                egui::Stroke::new(1.5, state.color.linear_multiply(0.4)),
+            );
+        } else {
+            // Drag completed: commit transaction cleanly
+            editor.document_mut().commit_transaction();
+            state.in_transaction = false;
+            state.focus_needed = true;
+            match state.kind {
+                ActiveGizmoKind::FaceTranslate { .. } => {
+                    editor.set_status(format!(
+                        "desplazado objeto {:+.1} mm a lo largo de la cara normal",
+                        state.drag_dist_mm
+                    ));
+                }
+                ActiveGizmoKind::FaceExtrude {
+                    face_id,
+                    is_negative,
+                    ..
+                } => {
+                    let eff = if is_negative {
+                        -state.drag_dist_mm
+                    } else {
+                        state.drag_dist_mm
+                    };
+                    editor.set_status(format!("extruida cara #{face_id} by {eff:+.1} mm"));
+                }
+                ActiveGizmoKind::EdgeFillet { .. } => {
+                    execute_command(editor, Command::FilletRadius(state.drag_dist_mm.max(0.1)));
+                }
+                ActiveGizmoKind::EdgeChamfer { .. } => {
+                    execute_command(
+                        editor,
+                        Command::ChamferDistance(state.drag_dist_mm.max(0.1)),
+                    );
+                }
             }
         }
     }
 
-    // 5. Floating 3D Translate Gizmo Overlay (Bottom Right Viewport)
-    if !editor.selection().is_empty() {
-        egui::Window::new("3D Gizmo Translate")
-            .anchor(egui::Align2::RIGHT_BOTTOM, egui::vec2(-16.0, -40.0))
-            .resizable(false)
-            .collapsible(false)
-            .show(root, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label("X:");
-                    if ui.button("-5").clicked() {
-                        execute_command(
-                            editor,
-                            Command::TranslateSelection(w3d_core::kernel::Vec3::new(
-                                -5.0, 0.0, 0.0,
-                            )),
-                        );
-                    }
-                    if ui.button("+5").clicked() {
-                        execute_command(
-                            editor,
-                            Command::TranslateSelection(w3d_core::kernel::Vec3::new(5.0, 0.0, 0.0)),
-                        );
-                    }
+    // 5.2. Contextual Manipulators by Selection Hierarchy
+    // State A: Edge Selected -> Show Fillet (Curvar) and Chamfer (Chaflán) arrows at midpoint
+    if let Some((node_id, edge_idx, p0, p1)) = editor.selected_edge() {
+        let mid = w3d_core::kernel::Vec3::new(
+            f64::from(p0[0] + p1[0]) * 0.5,
+            f64::from(p0[1] + p1[1]) * 0.5,
+            f64::from(p0[2] + p1[2]) * 0.5,
+        );
+        let center = editor
+            .document()
+            .bounds(node_id)
+            .map(|b| b.center())
+            .unwrap_or(w3d_core::kernel::Vec3::ZERO);
+        let out_dir = (mid - center)
+            .normalize(1.0e-9)
+            .unwrap_or(w3d_core::kernel::Vec3::Z);
+        let p0_vec =
+            w3d_core::kernel::Vec3::new(f64::from(p0[0]), f64::from(p0[1]), f64::from(p0[2]));
+        let p1_vec =
+            w3d_core::kernel::Vec3::new(f64::from(p1[0]), f64::from(p1[1]), f64::from(p1[2]));
+        let edge_dir = (p1_vec - p0_vec)
+            .normalize(1.0e-9)
+            .unwrap_or(w3d_core::kernel::Vec3::X);
+        let mut perp_dir = edge_dir.cross(out_dir);
+        if perp_dir.dot(perp_dir) < 1.0e-6 {
+            perp_dir = edge_dir.cross(w3d_core::kernel::Vec3::Y);
+        }
+        let perp_dir = perp_dir.normalize(1.0e-9).unwrap_or(out_dir);
 
-                    ui.label("Y:");
-                    if ui.button("-5").clicked() {
-                        execute_command(
-                            editor,
-                            Command::TranslateSelection(w3d_core::kernel::Vec3::new(
-                                0.0, -5.0, 0.0,
-                            )),
-                        );
-                    }
-                    if ui.button("+5").clicked() {
-                        execute_command(
-                            editor,
-                            Command::TranslateSelection(w3d_core::kernel::Vec3::new(0.0, 5.0, 0.0)),
-                        );
-                    }
+        let arrow_len = 24.0;
+        let p_fillet_tip = mid + perp_dir * arrow_len;
+        let chamfer_dir = (perp_dir + out_dir).normalize(1.0e-9).unwrap_or(perp_dir);
+        let p_chamfer_tip = mid + chamfer_dir * arrow_len;
 
-                    ui.label("Z:");
-                    if ui.button("-5").clicked() {
-                        execute_command(
-                            editor,
-                            Command::TranslateSelection(w3d_core::kernel::Vec3::new(
-                                0.0, 0.0, -5.0,
-                            )),
-                        );
-                    }
-                    if ui.button("+5").clicked() {
-                        execute_command(
-                            editor,
-                            Command::TranslateSelection(w3d_core::kernel::Vec3::new(0.0, 0.0, 5.0)),
-                        );
-                    }
+        if let (Some(m_2d), Some(f_2d), Some(c_2d)) = (
+            project_3d(mid),
+            project_3d(p_fillet_tip),
+            project_3d(p_chamfer_tip),
+        ) {
+            let f_rect = egui::Rect::from_two_pos(m_2d, f_2d).expand(14.0);
+            let f_id = egui::Id::new(("edge_fillet_arrow", node_id, edge_idx));
+            let f_resp = root.interact(f_rect, f_id, egui::Sense::click_and_drag());
+
+            let c_rect = egui::Rect::from_two_pos(m_2d, c_2d).expand(14.0);
+            let c_id = egui::Id::new(("edge_chamfer_arrow", node_id, edge_idx));
+            let c_resp = root.interact(c_rect, c_id, egui::Sense::click_and_drag());
+
+            let painter = root.painter();
+            painter.circle_filled(m_2d, 5.0, egui::Color32::from_rgb(255, 215, 0));
+            painter.circle_stroke(
+                m_2d,
+                7.0,
+                egui::Stroke::new(1.5, egui::Color32::from_rgb(255, 255, 255)),
+            );
+
+            let is_any_drag = gizmo_state.as_ref().is_some_and(|s| s.in_transaction);
+            let fillet_hovered = !is_any_drag
+                && f_resp.hovered()
+                && mouse_pos.is_some_and(|m| hit_test_arrow(m, m_2d, f_2d, 14.0));
+            let chamfer_hovered = !is_any_drag
+                && c_resp.hovered()
+                && mouse_pos.is_some_and(|m| hit_test_arrow(m, m_2d, c_2d, 14.0));
+
+            if f_resp.dragged() || c_resp.dragged() {
+                root.output_mut(|o| o.cursor_icon = egui::CursorIcon::Grabbing);
+            } else if fillet_hovered || chamfer_hovered {
+                root.output_mut(|o| o.cursor_icon = egui::CursorIcon::Grab);
+            }
+
+            if (f_resp.drag_started()
+                || (fillet_hovered && (primary_clicked || (primary_down && !is_any_drag))))
+                && !is_any_drag
+                && let Some((s0, sdir, ppm)) = axis_screen_metrics(mid, perp_dir)
+            {
+                editor.document_mut().begin_transaction("Fillet Edge");
+                editor.cancel_drag();
+                let start_m = mouse_pos.unwrap_or(f_2d);
+                gizmo_state = Some(ActiveGizmoState {
+                    kind: ActiveGizmoKind::EdgeFillet { node_id },
+                    origin_3d: mid,
+                    dir_3d: perp_dir,
+                    screen_origin: s0,
+                    screen_dir: sdir,
+                    points_per_mm: ppm,
+                    mouse_start: start_m,
+                    hud_pos: start_m + egui::vec2(18.0, -18.0),
+                    drag_dist_mm: 1.0,
+                    applied_dist_mm: 0.0,
+                    text_buffer: String::from("1.0"),
+                    focus_needed: true,
+                    in_transaction: true,
+                    label: "Curvar",
+                    color: egui::Color32::from_rgb(80, 240, 140),
                 });
-            });
-    }
+            }
 
-    // 6. Floating Sub-object Inspector Overlay (Left Viewport)
-    if let Some((node_id, face_id)) = editor.selected_face()
+            if (c_resp.drag_started()
+                || (chamfer_hovered && (primary_clicked || (primary_down && !is_any_drag))))
+                && !is_any_drag
+                && let Some((s0, sdir, ppm)) = axis_screen_metrics(mid, chamfer_dir)
+            {
+                editor.document_mut().begin_transaction("Chamfer Edge");
+                editor.cancel_drag();
+                let start_m = mouse_pos.unwrap_or(c_2d);
+                gizmo_state = Some(ActiveGizmoState {
+                    kind: ActiveGizmoKind::EdgeChamfer { node_id },
+                    origin_3d: mid,
+                    dir_3d: chamfer_dir,
+                    screen_origin: s0,
+                    screen_dir: sdir,
+                    points_per_mm: ppm,
+                    mouse_start: start_m,
+                    hud_pos: start_m + egui::vec2(18.0, -18.0),
+                    drag_dist_mm: 1.0,
+                    applied_dist_mm: 0.0,
+                    text_buffer: String::from("1.0"),
+                    focus_needed: true,
+                    in_transaction: true,
+                    label: "Chaflán",
+                    color: egui::Color32::from_rgb(255, 200, 40),
+                });
+            }
+
+            let is_fillet_active = gizmo_state.as_ref().is_some_and(
+                |s| matches!(s.kind, ActiveGizmoKind::EdgeFillet { node_id: n } if n == node_id),
+            );
+            let is_chamfer_active = gizmo_state.as_ref().is_some_and(
+                |s| matches!(s.kind, ActiveGizmoKind::EdgeChamfer { node_id: n } if n == node_id),
+            );
+
+            draw_arrow_3d(
+                painter,
+                m_2d,
+                f_2d,
+                egui::Color32::from_rgb(80, 240, 140),
+                3.5,
+                fillet_hovered || is_fillet_active,
+            );
+
+            draw_arrow_3d(
+                painter,
+                m_2d,
+                c_2d,
+                egui::Color32::from_rgb(255, 200, 40),
+                3.5,
+                chamfer_hovered || is_chamfer_active,
+            );
+        }
+    }
+    // State B: Face Selected -> Show Positive and Negative Normal Extrude arrows at centroid
+    else if let Some((node_id, face_id)) = editor.selected_face()
         && let Some(metrics) = editor.face_metrics(node_id, face_id)
     {
-        egui::Window::new(format!("Sub-object Inspector [Face #{face_id}]"))
-            .anchor(egui::Align2::LEFT_BOTTOM, egui::vec2(240.0, -40.0))
-            .resizable(false)
-            .collapsible(true)
-            .show(root, |ui| {
-                ui.vertical(|ui| {
-                    ui.horizontal(|ui| {
-                        ui.label("Face ID:");
-                        ui.label(format!("#{face_id}"));
-                        ui.separator();
-                        ui.label("Mode:");
-                        ui.colored_label(
-                            egui::Color32::from_rgb(50, 180, 255),
-                            format!("{:?}", editor.selection_mode()),
-                        );
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("Surface Area:");
-                        ui.label(format!("{:.3} mm²", metrics.area));
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("Face Normal:");
-                        ui.label(format!(
-                            "[{:.3}, {:.3}, {:.3}]",
-                            metrics.normal.x, metrics.normal.y, metrics.normal.z
-                        ));
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("Centroid:");
-                        ui.label(format!(
-                            "[{:.2}, {:.2}, {:.2}]",
-                            metrics.centroid.x, metrics.centroid.y, metrics.centroid.z
-                        ));
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("Triangles:");
-                        ui.label(format!("{}", metrics.triangle_count));
-                    });
-                    ui.separator();
-                    ui.label("↔ Direct Face Extrude Normal Gizmo:");
-                    ui.horizontal(|ui| {
-                        if ui.button("−10 mm").clicked() {
-                            execute_command(editor, Command::PushPullFace(-10.0));
-                        }
-                        if ui.button("−5 mm").clicked() {
-                            execute_command(editor, Command::PushPullFace(-5.0));
-                        }
-                        if ui.button("+5 mm").clicked() {
-                            execute_command(editor, Command::PushPullFace(5.0));
-                        }
-                        if ui.button("+10 mm").clicked() {
-                            execute_command(editor, Command::PushPullFace(10.0));
-                        }
-                        if ui.button("+25 mm").clicked() {
-                            execute_command(editor, Command::PushPullFace(25.0));
-                        }
-                    });
-                    ui.separator();
-                    ui.horizontal(|ui| {
-                        if ui.button("Deselect Sub-object").clicked() {
-                            editor.clear_selected_face();
-                        }
-                        if ui.button("Fillet [R]").clicked() {
-                            execute_command(editor, Command::Fillet);
-                        }
-                        if ui.button("Chamfer [C]").clicked() {
-                            execute_command(editor, Command::Chamfer);
-                        }
-                        if ui.button("Shell [H]").clicked() {
-                            execute_command(editor, Command::Shell(1.5));
-                        }
-                    });
+        let centroid = metrics.centroid;
+        let normal = metrics.normal;
+
+        let base_arrow_len = 32.0;
+        let p_pos = centroid + normal * base_arrow_len;
+        let p_neg = centroid - normal * (base_arrow_len * 0.7);
+
+        if let (Some(c_2d), Some(pos_2d), Some(neg_2d)) =
+            (project_3d(centroid), project_3d(p_pos), project_3d(p_neg))
+        {
+            let pos_rect = egui::Rect::from_two_pos(c_2d, pos_2d).expand(14.0);
+            let pos_id = egui::Id::new(("face_pos_extrude", node_id, face_id));
+            let pos_resp = root.interact(pos_rect, pos_id, egui::Sense::click_and_drag());
+
+            let neg_rect = egui::Rect::from_two_pos(c_2d, neg_2d).expand(14.0);
+            let neg_id = egui::Id::new(("face_neg_extrude", node_id, face_id));
+            let neg_resp = root.interact(neg_rect, neg_id, egui::Sense::click_and_drag());
+
+            let painter = root.painter();
+            painter.circle_filled(c_2d, 5.0, egui::Color32::WHITE);
+            painter.circle_stroke(
+                c_2d,
+                7.0,
+                egui::Stroke::new(1.5, egui::Color32::from_rgb(0, 230, 255)),
+            );
+
+            let is_any_drag = gizmo_state.as_ref().is_some_and(|s| s.in_transaction);
+            let pos_hovered = !is_any_drag
+                && pos_resp.hovered()
+                && mouse_pos.is_some_and(|m| hit_test_arrow(m, c_2d, pos_2d, 14.0));
+            let neg_hovered = !is_any_drag
+                && neg_resp.hovered()
+                && mouse_pos.is_some_and(|m| hit_test_arrow(m, c_2d, neg_2d, 14.0));
+
+            if pos_resp.dragged() || neg_resp.dragged() {
+                root.output_mut(|o| o.cursor_icon = egui::CursorIcon::Grabbing);
+            } else if pos_hovered || neg_hovered {
+                root.output_mut(|o| o.cursor_icon = egui::CursorIcon::Grab);
+            }
+
+            // Start Positive Extrude drag on click
+            if (pos_resp.drag_started()
+                || (pos_hovered && (primary_clicked || (primary_down && !is_any_drag))))
+                && !is_any_drag
+                && let Some((s0, sdir, ppm)) = axis_screen_metrics(centroid, normal)
+            {
+                editor.document_mut().begin_transaction("Extrude Face");
+                editor.cancel_drag();
+                let start_m = mouse_pos.unwrap_or(pos_2d);
+                gizmo_state = Some(ActiveGizmoState {
+                    kind: ActiveGizmoKind::FaceExtrude {
+                        node_id,
+                        face_id,
+                        is_negative: false,
+                    },
+                    origin_3d: centroid,
+                    dir_3d: normal,
+                    screen_origin: s0,
+                    screen_dir: sdir,
+                    points_per_mm: ppm,
+                    mouse_start: start_m,
+                    hud_pos: start_m + egui::vec2(18.0, -18.0),
+                    drag_dist_mm: 0.0,
+                    applied_dist_mm: 0.0,
+                    text_buffer: String::from("0.0"),
+                    focus_needed: true,
+                    in_transaction: true,
+                    label: "+Extruir",
+                    color: egui::Color32::from_rgb(0, 230, 255),
                 });
+            }
+
+            // Start Negative Extrude drag on click
+            if (neg_resp.drag_started()
+                || (neg_hovered && (primary_clicked || (primary_down && !is_any_drag))))
+                && !is_any_drag
+                && let Some((s0, sdir, ppm)) = axis_screen_metrics(centroid, -normal)
+            {
+                editor
+                    .document_mut()
+                    .begin_transaction("Extrude Face Inward");
+                editor.cancel_drag();
+                let start_m = mouse_pos.unwrap_or(neg_2d);
+                gizmo_state = Some(ActiveGizmoState {
+                    kind: ActiveGizmoKind::FaceExtrude {
+                        node_id,
+                        face_id,
+                        is_negative: true,
+                    },
+                    origin_3d: centroid,
+                    dir_3d: -normal,
+                    screen_origin: s0,
+                    screen_dir: sdir,
+                    points_per_mm: ppm,
+                    mouse_start: start_m,
+                    hud_pos: start_m + egui::vec2(18.0, -18.0),
+                    drag_dist_mm: 0.0,
+                    applied_dist_mm: 0.0,
+                    text_buffer: String::from("0.0"),
+                    focus_needed: true,
+                    in_transaction: true,
+                    label: "−Extruir",
+                    color: egui::Color32::from_rgb(255, 140, 30),
+                });
+            }
+
+            let is_pos_active = gizmo_state.as_ref().is_some_and(|s| {
+                matches!(
+                    s.kind,
+                    ActiveGizmoKind::FaceExtrude {
+                        node_id: n,
+                        face_id: f,
+                        is_negative: false
+                    } if n == node_id && f == face_id
+                )
             });
+            let is_neg_active = gizmo_state.as_ref().is_some_and(|s| {
+                matches!(
+                    s.kind,
+                    ActiveGizmoKind::FaceExtrude {
+                        node_id: n,
+                        face_id: f,
+                        is_negative: true
+                    } if n == node_id && f == face_id
+                )
+            });
+
+            draw_arrow_3d(
+                painter,
+                c_2d,
+                pos_2d,
+                egui::Color32::from_rgb(0, 230, 255),
+                4.0,
+                pos_hovered || is_pos_active,
+            );
+
+            draw_arrow_3d(
+                painter,
+                c_2d,
+                neg_2d,
+                egui::Color32::from_rgb(255, 140, 30),
+                4.0,
+                neg_hovered || is_neg_active,
+            );
+        }
     }
+    // State C: Object Selected -> Show Normal Direction Extrude/Displace Arrows on all visible faces
+    else if !editor.selection().is_empty() {
+        let selected_ids = editor.selection();
+        let first_id = selected_ids[0];
+
+        // Fetch metrics for all faces of the selected body
+        let faces = editor.node_faces_metrics(first_id);
+        let cam = editor.camera();
+        let eye_pos = cam.eye();
+        let view_dir = (cam.target - eye_pos)
+            .normalize(1.0e-9)
+            .unwrap_or(w3d_core::kernel::Vec3::Z);
+
+        for face in &faces {
+            let centroid = face.centroid;
+            let normal = face.normal;
+
+            // Check if face is facing towards camera (front-facing)
+            let to_cam = (eye_pos - centroid).normalize(1.0e-9).unwrap_or(-view_dir);
+            if to_cam.dot(normal) < -0.15 {
+                // Back-facing face, skip to avoid visual clutter
+                continue;
+            }
+
+            let arrow_len = 28.0;
+            let p_base = project_3d(centroid);
+            let p_tip = project_3d(centroid + normal * arrow_len);
+
+            if let (Some(b_2d), Some(t_2d)) = (p_base, p_tip) {
+                let arrow_rect = egui::Rect::from_two_pos(b_2d, t_2d).expand(14.0);
+                let arrow_id = egui::Id::new(("obj_face_arrow", first_id, face.face_id));
+                let resp = root.interact(arrow_rect, arrow_id, egui::Sense::click_and_drag());
+
+                let painter = root.painter();
+                painter.circle_filled(b_2d, 4.0, egui::Color32::WHITE);
+                painter.circle_stroke(
+                    b_2d,
+                    6.0,
+                    egui::Stroke::new(1.2, egui::Color32::from_rgb(0, 200, 240)),
+                );
+
+                let is_any_drag = gizmo_state.as_ref().is_some_and(|s| s.in_transaction);
+                let is_hovered = !is_any_drag
+                    && resp.hovered()
+                    && mouse_pos.is_some_and(|m| hit_test_arrow(m, b_2d, t_2d, 14.0));
+                let is_active = gizmo_state.as_ref().is_some_and(|s| {
+                    matches!(
+                        s.kind,
+                        ActiveGizmoKind::FaceExtrude { node_id, face_id, .. }
+                        | ActiveGizmoKind::FaceTranslate { node_id, face_id, .. }
+                        if node_id == first_id && face_id == face.face_id
+                    )
+                });
+
+                if resp.dragged() || is_active {
+                    root.output_mut(|o| o.cursor_icon = egui::CursorIcon::Grabbing);
+                } else if is_hovered {
+                    root.output_mut(|o| o.cursor_icon = egui::CursorIcon::Grab);
+                }
+
+                if (resp.drag_started()
+                    || (is_hovered && (primary_clicked || (primary_down && !is_any_drag))))
+                    && !is_any_drag
+                    && let Some((s0, sdir, ppm)) = axis_screen_metrics(centroid, normal)
+                {
+                    let do_translate = alt_held;
+                    let action_title = if do_translate {
+                        "Desplazar Objeto"
+                    } else {
+                        "Extruir Cara"
+                    };
+                    editor.document_mut().begin_transaction(action_title);
+                    editor.cancel_drag();
+                    let start_m = mouse_pos.unwrap_or(t_2d);
+                    gizmo_state = Some(ActiveGizmoState {
+                        kind: if do_translate {
+                            ActiveGizmoKind::FaceTranslate {
+                                node_id: first_id,
+                                face_id: face.face_id,
+                                dir: normal,
+                            }
+                        } else {
+                            ActiveGizmoKind::FaceExtrude {
+                                node_id: first_id,
+                                face_id: face.face_id,
+                                is_negative: false,
+                            }
+                        },
+                        origin_3d: centroid,
+                        dir_3d: normal,
+                        screen_origin: s0,
+                        screen_dir: sdir,
+                        points_per_mm: ppm,
+                        mouse_start: start_m,
+                        hud_pos: start_m + egui::vec2(18.0, -18.0),
+                        drag_dist_mm: 0.0,
+                        applied_dist_mm: 0.0,
+                        text_buffer: String::from("0.0"),
+                        focus_needed: true,
+                        in_transaction: true,
+                        label: if do_translate { "Desplazar" } else { "Extruir" },
+                        color: if do_translate {
+                            egui::Color32::from_rgb(255, 160, 40)
+                        } else {
+                            egui::Color32::from_rgb(0, 220, 255)
+                        },
+                    });
+                }
+
+                let arrow_color = if is_active || is_hovered {
+                    egui::Color32::from_rgb(255, 215, 0)
+                } else {
+                    egui::Color32::from_rgb(0, 220, 255)
+                };
+
+                draw_arrow_3d(
+                    painter,
+                    b_2d,
+                    t_2d,
+                    arrow_color,
+                    if is_hovered || is_active { 4.5 } else { 3.2 },
+                    is_hovered || is_active,
+                );
+            }
+        }
+
+        // Quick Rotation Helpers at bottom of selected object
+        if let Ok(bounds) = editor.document().bounds(first_id) {
+            let center = bounds.center();
+            let b_bottom = w3d_core::kernel::Vec3::new(center.x, bounds.min.y, center.z);
+            if let Some(bottom_2d) = project_3d(b_bottom) {
+                egui::Area::new(egui::Id::new("obj_rot_center_badge"))
+                    .fixed_pos(bottom_2d + egui::vec2(-45.0, 10.0))
+                    .show(root, |ui| {
+                        ui.horizontal(|ui| {
+                            if ui
+                                .button("⟲ X")
+                                .on_hover_text("Rotar +15° en eje X")
+                                .clicked()
+                            {
+                                execute_command(
+                                    editor,
+                                    Command::RotateSelection {
+                                        axis: w3d_core::kernel::Vec3::X,
+                                        angle_deg: 15.0,
+                                    },
+                                );
+                            }
+                            if ui
+                                .button("⟳ Y")
+                                .on_hover_text("Rotar +15° en eje Y")
+                                .clicked()
+                            {
+                                execute_command(
+                                    editor,
+                                    Command::RotateSelection {
+                                        axis: w3d_core::kernel::Vec3::Y,
+                                        angle_deg: 15.0,
+                                    },
+                                );
+                            }
+                            if ui
+                                .button("⟲ Z")
+                                .on_hover_text("Rotar +15° en eje Z")
+                                .clicked()
+                            {
+                                execute_command(
+                                    editor,
+                                    Command::RotateSelection {
+                                        axis: w3d_core::kernel::Vec3::Z,
+                                        angle_deg: 15.0,
+                                    },
+                                );
+                            }
+                        });
+                    });
+            }
+        }
+    }
+
+    // 5.3. Floating CAD HUD Pill (Sleek glass pill with active measurement and direct typing)
+    let mut gizmo_dismiss = false;
+    if let Some(state) = gizmo_state.as_mut() {
+        let area_resp = egui::Area::new(egui::Id::new("active_cad_hud_pill"))
+            .fixed_pos(state.hud_pos)
+            .order(egui::Order::Foreground)
+            .show(root, |ui| {
+                egui::Frame::popup(ui.style())
+                    .fill(egui::Color32::from_rgba_premultiplied(18, 22, 28, 240))
+                    .stroke(egui::Stroke::new(1.5, state.color))
+                    .corner_radius(6.0)
+                    .inner_margin(egui::Margin::symmetric(8, 4))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                egui::RichText::new(format!("{}:", state.label))
+                                    .color(state.color)
+                                    .strong(),
+                            );
+                            if shift_held {
+                                ui.label(
+                                    egui::RichText::new("[SNAP 5mm]")
+                                        .color(egui::Color32::from_rgb(0, 255, 160))
+                                        .size(10.0),
+                                );
+                            }
+                            if ctrl_held {
+                                ui.label(
+                                    egui::RichText::new("[FINE 0.1x]")
+                                        .color(egui::Color32::from_rgb(255, 215, 0))
+                                        .size(10.0),
+                                );
+                            }
+
+                            let text_edit = egui::TextEdit::singleline(&mut state.text_buffer)
+                                .desired_width(50.0);
+                            let resp = ui.add(text_edit);
+                            if state.focus_needed && !state.in_transaction {
+                                resp.request_focus();
+                                state.focus_needed = false;
+                            }
+                            ui.label("mm");
+
+                            let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
+                            if (ui.button("✔").clicked() || enter)
+                                && let Ok(val) = state.text_buffer.trim().parse::<f64>()
+                            {
+                                let diff = val - state.applied_dist_mm;
+                                if diff.abs() > 1.0e-5 {
+                                    match state.kind {
+                                        ActiveGizmoKind::FaceTranslate { node_id, dir, .. } => {
+                                            let m = w3d_core::kernel::Mat4::from_translation(
+                                                dir * diff,
+                                            );
+                                            let _ = editor.document_mut().transform(node_id, &m);
+                                        }
+                                        ActiveGizmoKind::FaceExtrude {
+                                            node_id,
+                                            face_id,
+                                            is_negative,
+                                        } => {
+                                            let eff = if is_negative { -diff } else { diff };
+                                            let _ = editor
+                                                .document_mut()
+                                                .push_pull_face(node_id, face_id, eff);
+                                        }
+                                        ActiveGizmoKind::EdgeFillet { .. } => {
+                                            execute_command(
+                                                editor,
+                                                Command::FilletRadius(val.max(0.1)),
+                                            );
+                                        }
+                                        ActiveGizmoKind::EdgeChamfer { .. } => {
+                                            execute_command(
+                                                editor,
+                                                Command::ChamferDistance(val.max(0.1)),
+                                            );
+                                        }
+                                    }
+                                    state.applied_dist_mm = val;
+                                    state.drag_dist_mm = val;
+                                }
+                                editor.document_mut().commit_transaction();
+                                gizmo_dismiss = true;
+                            }
+
+                            if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                                if state.in_transaction {
+                                    editor.document_mut().commit_transaction();
+                                    execute_command(editor, Command::Undo);
+                                }
+                                gizmo_dismiss = true;
+                            }
+                        });
+                    });
+            });
+
+        // When resting in HUD mode, if user clicked outside the HUD pill rect, dismiss the HUD
+        if !state.in_transaction
+            && primary_clicked
+            && mouse_pos.is_some_and(|m| !area_resp.response.rect.contains(m))
+        {
+            gizmo_dismiss = true;
+        }
+    }
+
+    if gizmo_dismiss {
+        gizmo_state = None;
+    }
+
+    *gizmo_active = gizmo_state.as_ref().is_some_and(|s| s.in_transaction);
+
+    // Persist active gizmo state across frames in egui temp memory
+    root.data_mut(|d| d.insert_temp(gizmo_state_id, gizmo_state));
 }
 
 /// A free function rather than a method: borrowing the fields separately is

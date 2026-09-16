@@ -34,7 +34,9 @@ pub enum Command {
     CancelSketch,
     AddSketchPoint(f64, f64),
     Fillet,
+    FilletRadius(f64),
     Chamfer,
+    ChamferDistance(f64),
     PushPullFace(f64),
     Shell(f64),
     MeasureDistance,
@@ -43,11 +45,16 @@ pub enum Command {
     Undo,
     Redo,
     ClearSelection,
+    Escape,
     SelectAll,
     ZoomToFit,
     SetView(ViewDirection),
     SetSelectionMode(SelectionMode),
     TranslateSelection(Vec3),
+    RotateSelection {
+        axis: Vec3,
+        angle_deg: f64,
+    },
     Save,
     SaveAs,
     Open,
@@ -100,6 +107,11 @@ pub enum Input {
     },
     Up {
         button: Button,
+    },
+    ModifiersChanged {
+        additive: bool,
+        ctrl: bool,
+        alt: bool,
     },
     Scroll(f64),
 }
@@ -256,9 +268,28 @@ impl<K: GeometryKernel> Editor<K> {
         self.selected_face = None;
     }
 
+    pub fn clear_selected_edge(&mut self) {
+        self.selected_edge = None;
+    }
+
+    pub fn escape(&mut self)
+    where
+        K: Default,
+    {
+        self.run(Command::Escape);
+    }
+
     pub fn clear_hovered_face(&mut self) {
         self.hovered_face = None;
         self.hovered_body = None;
+    }
+
+    pub fn cancel_drag(&mut self) {
+        self.drag = None;
+    }
+
+    pub fn is_dragging(&self) -> bool {
+        self.drag.is_some()
     }
 
     pub fn hover_picked(&mut self, pick: Pick) {
@@ -290,6 +321,31 @@ impl<K: GeometryKernel> Editor<K> {
     ) -> Option<w3d_core::kernel::FaceMetrics> {
         let mesh = self.doc.mesh(node_id).ok()?;
         mesh.face_metrics(face_id)
+    }
+
+    pub fn node_faces_metrics(&mut self, node_id: NodeId) -> Vec<w3d_core::kernel::FaceMetrics> {
+        let Ok(mesh) = self.doc.mesh(node_id) else {
+            return Vec::new();
+        };
+        let mut seen = std::collections::BTreeSet::new();
+        for &fid in &mesh.face_of_triangle {
+            seen.insert(fid);
+        }
+        let mut list = Vec::new();
+        for fid in seen {
+            if let Some(metrics) = mesh.face_metrics(fid)
+                && metrics.area > 1e-6
+            {
+                list.push(metrics);
+            }
+        }
+        list
+    }
+
+    pub fn select_face(&mut self, node_id: NodeId, face_id: u32) {
+        self.selected_face = Some((node_id, face_id));
+        self.selected_edge = None;
+        self.status = format!("selected face #{face_id}");
     }
 
     pub fn selection_mode(&self) -> SelectionMode {
@@ -340,6 +396,10 @@ impl<K: GeometryKernel> Editor<K> {
 
     pub fn status(&self) -> &str {
         &self.status
+    }
+
+    pub fn set_status(&mut self, status: impl Into<String>) {
+        self.status = status.into();
     }
 
     pub fn viewport(&self) -> (u32, u32) {
@@ -492,6 +552,31 @@ impl<K: GeometryKernel> Editor<K> {
                     additive: drag.additive,
                 }
             }
+            Input::ModifiersChanged {
+                additive,
+                ctrl,
+                alt,
+            } => {
+                if let Some(drag) = &mut self.drag {
+                    drag.additive = additive;
+                    drag.ctrl = ctrl;
+                    drag.alt = alt;
+                    if drag.moved {
+                        if drag.additive {
+                            self.status = String::from("Camera: Pan (Shift)");
+                        } else if drag.ctrl {
+                            self.status = String::from("Camera: Zoom / Dolly (Ctrl)");
+                        } else if drag.alt {
+                            self.status = String::from("Camera / Face: Extrude (Alt)");
+                        } else {
+                            self.status = String::from("Camera: Orbit");
+                        }
+                    }
+                    Reaction::Redraw
+                } else {
+                    Reaction::Nothing
+                }
+            }
             Input::Scroll(delta) => {
                 self.camera.dolly((delta * 0.1).exp());
                 Reaction::Redraw
@@ -513,6 +598,7 @@ impl<K: GeometryKernel> Editor<K> {
             .filter(|(id, _, _, _)| self.doc.is_selected(*id) && self.hovered_edge.is_on())
         {
             self.selected_edge = Some((id, edge_idx, p0, p1));
+            self.selected_face = None;
             if !additive {
                 self.doc.clear_selection();
             }
@@ -767,7 +853,9 @@ impl<K: GeometryKernel> Editor<K> {
                 }
             }
             Command::Fillet => self.fillet(1.0),
+            Command::FilletRadius(r) => self.fillet(r),
             Command::Chamfer => self.chamfer(1.0),
+            Command::ChamferDistance(d) => self.chamfer(d),
             Command::PushPullFace(d) => self.push_pull_face(d),
             Command::Shell(t) => self.shell(t),
             Command::MeasureDistance => self.measure_distance(),
@@ -784,7 +872,43 @@ impl<K: GeometryKernel> Editor<K> {
             Command::ClearSelection => {
                 self.doc.clear_selection();
                 self.selected_face = None;
+                self.selected_edge = None;
                 Ok(String::from("selection cleared"))
+            }
+            Command::Escape => {
+                if self.sketch_state.active {
+                    self.sketch_state.active = false;
+                    self.sketch_state.points.clear();
+                    Ok(String::from("sketch cancelled"))
+                } else if self.selected_edge.is_some() {
+                    self.selected_edge = None;
+                    let name = self
+                        .selection()
+                        .first()
+                        .map(|&id| self.name_of(id))
+                        .unwrap_or_default();
+                    Ok(format!("deselected edge · {name} selected"))
+                } else if self.selected_face.is_some() {
+                    self.selected_face = None;
+                    let name = self
+                        .selection()
+                        .first()
+                        .map(|&id| self.name_of(id))
+                        .unwrap_or_default();
+                    Ok(format!("deselected face · {name} selected"))
+                } else if !self.selection().is_empty() {
+                    let name = self
+                        .selection()
+                        .first()
+                        .map(|&id| self.name_of(id))
+                        .unwrap_or_default();
+                    self.doc.clear_selection();
+                    self.selected_face = None;
+                    self.selected_edge = None;
+                    Ok(format!("deselected {name}"))
+                } else {
+                    Ok(String::from("nothing selected"))
+                }
             }
             Command::SelectAll => {
                 let ids: Vec<_> = self.doc.nodes().map(|(id, _)| id).collect();
@@ -831,6 +955,33 @@ impl<K: GeometryKernel> Editor<K> {
                     }
                     self.doc.commit_transaction();
                     Ok(format!("translated {} object(s)", selected.len()))
+                }
+            }
+            Command::RotateSelection { axis, angle_deg } => {
+                let selected = self.selection();
+                if selected.is_empty() {
+                    Err(String::from("nothing selected to rotate"))
+                } else {
+                    self.doc.begin_transaction("Rotate");
+                    let radians = angle_deg.to_radians();
+                    for &id in &selected {
+                        let center = self
+                            .doc
+                            .bounds(id)
+                            .map(|b| b.center())
+                            .unwrap_or(Vec3::ZERO);
+                        let m = w3d_core::kernel::Mat4::from_translation(center)
+                            .mul(&w3d_core::kernel::Mat4::from_axis_angle(
+                                axis, radians, 1.0e-12,
+                            ))
+                            .mul(&w3d_core::kernel::Mat4::from_translation(-center));
+                        let _ = self.doc.transform(id, &m);
+                    }
+                    self.doc.commit_transaction();
+                    Ok(format!(
+                        "rotated {} object(s) by {angle_deg:.1}°",
+                        selected.len()
+                    ))
                 }
             }
         };
@@ -1568,6 +1719,55 @@ mod tests {
     }
 
     #[test]
+    fn mouse_release_and_cancel_drag_prevent_stuck_drag_state() {
+        let mut e = editor();
+        e.run(Command::AddBox);
+
+        // 1. Regular click & release: drag must be cleared and subsequent move does not orbit
+        e.input(Input::Down {
+            x: 100.0,
+            y: 100.0,
+            button: Button::Left,
+            additive: false,
+            ctrl: false,
+            alt: false,
+        });
+        assert!(e.is_dragging());
+        e.input(Input::Up {
+            button: Button::Left,
+        });
+        assert!(!e.is_dragging());
+
+        // Moving without holding a button must NOT orbit the camera
+        let cam_before = *e.camera();
+        e.input(Input::Move { x: 150.0, y: 150.0 });
+        assert_eq!(
+            *e.camera(),
+            cam_before,
+            "cursor move without button must never orbit camera"
+        );
+
+        // 2. Preempted drag (e.g. gizmo arrow clicked and calls cancel_drag)
+        e.input(Input::Down {
+            x: 100.0,
+            y: 100.0,
+            button: Button::Left,
+            additive: false,
+            ctrl: false,
+            alt: false,
+        });
+        assert!(e.is_dragging());
+        e.cancel_drag();
+        assert!(!e.is_dragging());
+        e.input(Input::Move { x: 200.0, y: 200.0 });
+        assert_eq!(
+            *e.camera(),
+            cam_before,
+            "cancelled drag must never orbit camera"
+        );
+    }
+
+    #[test]
     fn dragging_with_the_middle_button_pans_and_never_selects() {
         let mut e = editor();
         let before = *e.camera();
@@ -1633,6 +1833,67 @@ mod tests {
             e.camera().target,
             before.target,
             "ctrl drag does not pan target"
+        );
+    }
+
+    #[test]
+    fn modifiers_changed_during_drag_switches_behavior_mid_movement() {
+        let mut e = editor();
+        let initial = *e.camera();
+
+        // 1. Start drag with NO modifier -> Orbit
+        e.input(Input::Down {
+            x: 10.0,
+            y: 10.0,
+            button: Button::Left,
+            additive: false,
+            ctrl: false,
+            alt: false,
+        });
+        e.input(Input::Move { x: 50.0, y: 10.0 });
+        let after_orbit = *e.camera();
+        assert_ne!(after_orbit.yaw, initial.yaw, "orbit changes yaw");
+        assert_eq!(after_orbit.target, initial.target, "orbit keeps target");
+
+        // 2. Press SHIFT mid-movement -> switches to Pan
+        e.input(Input::ModifiersChanged {
+            additive: true,
+            ctrl: false,
+            alt: false,
+        });
+        e.input(Input::Move { x: 90.0, y: 10.0 });
+        let after_pan = *e.camera();
+        assert_ne!(
+            after_pan.target, after_orbit.target,
+            "pressing shift mid-drag switches to pan"
+        );
+        assert_eq!(after_pan.yaw, after_orbit.yaw, "pan keeps yaw");
+
+        // 3. Press CTRL mid-movement -> switches to Dolly/Zoom
+        e.input(Input::ModifiersChanged {
+            additive: false,
+            ctrl: true,
+            alt: false,
+        });
+        e.input(Input::Move { x: 90.0, y: 60.0 });
+        let after_zoom = *e.camera();
+        assert_ne!(
+            after_zoom.distance, after_pan.distance,
+            "pressing ctrl mid-drag switches to zoom"
+        );
+        assert_eq!(after_zoom.target, after_pan.target, "zoom keeps target");
+
+        // 4. Release all modifiers mid-movement -> switches back to Orbit
+        e.input(Input::ModifiersChanged {
+            additive: false,
+            ctrl: false,
+            alt: false,
+        });
+        e.input(Input::Move { x: 130.0, y: 60.0 });
+        let after_orbit2 = *e.camera();
+        assert_ne!(
+            after_orbit2.yaw, after_zoom.yaw,
+            "releasing modifiers mid-drag switches back to orbit"
         );
     }
 
@@ -2261,5 +2522,103 @@ mod tests {
                 && (bounds.max - Vec3::new(6.0, 3.0, 20.0)).length() < 1e-9,
             "a 6 x 3 sketch extruded 20 came out as {bounds:?}"
         );
+    }
+
+    #[test]
+    fn hierarchical_selection_and_escape_navigation() {
+        let mut e = editor();
+        e.set_viewport(800, 600);
+        e.run(Command::AddBox);
+        let id = e.selection()[0];
+        assert_eq!(e.selection(), vec![id]);
+        assert_eq!(e.selected_face(), None);
+        assert_eq!(e.selected_edge(), None);
+
+        // 1. With element selected: select face
+        e.picked_with_hit(Some((id, 0)), false);
+        assert_eq!(e.selected_face(), Some((id, 0)));
+        assert_eq!(e.selected_edge(), None);
+        assert_eq!(e.selection(), vec![id]);
+
+        // 2. With face selected: switch to another face
+        e.picked_with_hit(Some((id, 1)), false);
+        assert_eq!(e.selected_face(), Some((id, 1)));
+        assert_eq!(e.selected_edge(), None);
+
+        // 3. With face selected: switch to edge
+        let p0 = [0.0, 0.0, 0.0];
+        let p1 = [20.0, 0.0, 0.0];
+        e.hovered_edge = EdgeHover::On((id, 4, p0, p1));
+        e.picked(Pick::MISS, false);
+        assert_eq!(e.selected_edge(), Some((id, 4, p0, p1)));
+        assert_eq!(e.selected_face(), None);
+        assert_eq!(e.selection(), vec![id]);
+
+        // 4. With edge selected: switch to another edge
+        let p2 = [20.0, 20.0, 0.0];
+        e.hovered_edge = EdgeHover::On((id, 5, p1, p2));
+        e.picked(Pick::MISS, false);
+        assert_eq!(e.selected_edge(), Some((id, 5, p1, p2)));
+        assert_eq!(e.selected_face(), None);
+
+        // 5. With edge selected: switch to face
+        e.hovered_edge = EdgeHover::None;
+        e.picked_with_hit(Some((id, 2)), false);
+        assert_eq!(e.selected_face(), Some((id, 2)));
+        assert_eq!(e.selected_edge(), None);
+
+        // 6. With face selected: ESC deselects face, leaves object selected
+        e.escape();
+        assert_eq!(e.selected_face(), None);
+        assert_eq!(e.selected_edge(), None);
+        assert_eq!(
+            e.selection(),
+            vec![id],
+            "object remains selected after face ESC"
+        );
+
+        // 7. Select edge again
+        e.hovered_edge = EdgeHover::On((id, 2, p0, p1));
+        e.picked(Pick::MISS, false);
+        assert_eq!(e.selected_edge(), Some((id, 2, p0, p1)));
+
+        // 8. With edge selected: ESC deselects edge, leaves object selected
+        e.escape();
+        assert_eq!(e.selected_edge(), None);
+        assert_eq!(e.selected_face(), None);
+        assert_eq!(
+            e.selection(),
+            vec![id],
+            "object remains selected after edge ESC"
+        );
+
+        // 9. With object selected: ESC deselects object
+        e.escape();
+        assert_eq!(
+            e.selection(),
+            Vec::<NodeId>::new(),
+            "object deselected after ESC"
+        );
+    }
+
+    #[test]
+    fn rotate_selection_command_rotates_selected_body_bounds() {
+        let mut e = editor();
+        e.run(Command::AddBox);
+        let id = e.selection()[0];
+        let initial_bounds = e.document().bounds(id).unwrap();
+
+        // Rotate 90 degrees around Z axis
+        e.run(Command::RotateSelection {
+            axis: Vec3::Z,
+            angle_deg: 90.0,
+        });
+        assert_eq!(e.status(), "rotated 1 object(s) by 90.0°");
+
+        // Undo restores rotation
+        e.run(Command::Undo);
+        let undone_bounds = e.document().bounds(id).unwrap();
+        assert!((undone_bounds.min - initial_bounds.min).length() < 1e-6);
+        assert!((undone_bounds.max - initial_bounds.max).length() < 1e-6);
     }
 }

@@ -120,7 +120,7 @@ THREAD_RUSTFLAGS := -C target-feature=+atomics,+bulk-memory,+mutable-globals \
   -C link-arg=--export=__tls_size \
   -C link-arg=--export=__tls_align
 
-.PHONY: web web-threaded web-both web-opt web-serve web-test app app-test
+.PHONY: web web-threaded web-both web-opt web-serve web-test app up.app up.web app-test
 ## The document the page boots on, written by the kernel that will read it
 ## back. Not a check, and not committed: a generated file in the tree is a file
 ## that can be older than its generator and still look authoritative.
@@ -209,11 +209,26 @@ web-opt: web
 web-serve: web
 	python3 web/serve.py
 
+## Development mode: build the wasm and serve it in one step.
+## Pass VARIANT=threaded to build and serve the threaded variant too.
+## Pass NO_ISOLATION=1 to omit COOP/COEP (the loader must degrade visibly).
+up.web: web
+	python3 web/serve.py $(if $(NO_ISOLATION),--no-isolation)
+
 ## The modeller, in a real window. Needs `xvfb-run` and a rasteriser:
 ##   apt install xvfb mesa-vulkan-drivers libxkbcommon-x11-0
 ## `--features occt` swaps the fake kernel for OpenCASCADE.
 app:
 	$(CARGO) build -p w3d-app
+
+## Development mode: build and run the desktop modeller in one step.
+## Pass KERNEL=occt or KERNEL=truck to select a real geometry backend.
+## Pass FEATURES=... to add arbitrary cargo features.
+KERNEL ?= fake
+up.app:
+	$(CARGO) run -p w3d-app $(if $(filter occt,$(KERNEL)),--features occt) \
+	    $(if $(filter truck,$(KERNEL)),--features truck) \
+	    $(if $(FEATURES),--features $(FEATURES))
 
 app-test: app
 	python3 tools/app_smoke.py
