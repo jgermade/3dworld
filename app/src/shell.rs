@@ -21,6 +21,7 @@ use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{Window, WindowId};
 
 use crate::editor::{Button, Command, Editor, Input, Reaction};
+use crate::gizmo;
 use crate::scene::Scene;
 
 /// How the modeller was asked to run. A window that closes itself after a
@@ -49,6 +50,19 @@ pub struct Options {
     pub save_as: Option<std::path::PathBuf>,
     pub test_pick_face: bool,
     pub test_pick_edge: bool,
+}
+
+/// What the manipulators are doing, as the window's event handling needs to
+/// know it.
+///
+/// `dragging` takes the pointer away from the camera; `open` takes only the
+/// `Escape` key, because a readout that is merely open must not stop the
+/// viewport orbiting — the version this replaced could not tell the two apart
+/// and left the mouse stuck down.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct GizmoStatus {
+    pub dragging: bool,
+    pub open: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -81,7 +95,7 @@ struct Live<K: GeometryKernel + Default> {
     modifiers: ModifiersState,
     cursor: (f64, f64),
     ribbon_tab: RibbonTab,
-    gizmo_active: bool,
+    gizmo: GizmoStatus,
     /// Where `--screenshot` copies the frame *before* it is presented. A
     /// presented surface texture is destroyed, so reading one back afterwards
     /// is a validation error — the copy has to happen in the same encoder that
@@ -288,7 +302,7 @@ impl<K: GeometryKernel + Default> ApplicationHandler for Shell<K> {
             modifiers: ModifiersState::empty(),
             cursor: (0.0, 0.0),
             ribbon_tab: RibbonTab::default(),
-            gizmo_active: false,
+            gizmo: GizmoStatus::default(),
             capture,
             options: self.options.clone(),
             frames: 0,
@@ -346,7 +360,7 @@ impl<K: GeometryKernel + Default> ApplicationHandler for Shell<K> {
                     alt: live.modifiers.alt_key(),
                 });
                 // If a gizmo is actively dragging, cancel any editor drag and let gizmo handle movement
-                if live.gizmo_active {
+                if live.gizmo.dragging {
                     live.editor.cancel_drag();
                     return;
                 }
@@ -367,7 +381,7 @@ impl<K: GeometryKernel + Default> ApplicationHandler for Shell<K> {
                 };
                 let reaction = match state {
                     ElementState::Pressed => {
-                        if response.consumed || live.gizmo_active {
+                        if response.consumed || live.gizmo.dragging {
                             live.editor.cancel_drag();
                             Reaction::Nothing
                         } else {
@@ -404,6 +418,12 @@ impl<K: GeometryKernel + Default> ApplicationHandler for Shell<K> {
             WindowEvent::KeyboardInput { event, .. } => {
                 // If egui text edit wants keyboard input, don't execute 3dworld single-key shortcuts.
                 if live.egui.egui_ctx().egui_wants_keyboard_input() {
+                    return;
+                }
+                // An open manipulator owns `Escape`: it cancels the handle, and
+                // the selection stays where it was.
+                if live.gizmo.open && event.logical_key == Key::Named(NamedKey::Escape) {
+                    live.window.request_redraw();
                     return;
                 }
                 if event.state.is_pressed()
@@ -663,7 +683,7 @@ impl<K: GeometryKernel + Default> Live<K> {
                 &mut self.renderer,
                 self.modifiers,
                 &mut self.ribbon_tab,
-                &mut self.gizmo_active,
+                &mut self.gizmo,
             )
         });
         self.egui
@@ -858,7 +878,7 @@ fn chrome<K: GeometryKernel + Default>(
     renderer: &mut Renderer,
     modifiers: ModifiersState,
     active_tab: &mut RibbonTab,
-    gizmo_active: &mut bool,
+    gizmo: &mut GizmoStatus,
 ) {
     // 1. Top Ribbon Bar Panel
     egui::Panel::top("ribbon_panel").show(root, |ui| {
@@ -1274,7 +1294,12 @@ fn chrome<K: GeometryKernel + Default>(
             });
         });
 
-    let screen = root.max_rect();
+    // The scene is drawn over the *whole* window, with the panels on top of it,
+    // so a 3D point's place on screen is measured against the window. Named
+    // outright rather than taken from the root `Ui`, whose rect happens to be
+    // the same today and is not the thing being relied on. In points, not
+    // pixels: that part the HiDPI fix got right.
+    let screen = root.ctx().viewport_rect();
     let sw = f64::from(screen.width());
     let sh = f64::from(screen.height());
     let (vw, vh) = editor.viewport();
@@ -1391,773 +1416,727 @@ fn chrome<K: GeometryKernel + Default>(
         }
     }
 
-    // 5. Professional CAD-Grade 3D Manipulators (Gizmos)
-    let hit_test_arrow =
-        |mouse: egui::Pos2, from: egui::Pos2, to: egui::Pos2, tolerance: f32| -> bool {
-            let d = to - from;
-            let len_sq = d.length_sq();
-            if len_sq < 1.0 {
-                return (mouse - to).length() <= tolerance;
-            }
-            let t = ((mouse - from).dot(d) / len_sq).clamp(0.0, 1.0);
-            let proj = from + d * t;
-            (mouse - proj).length() <= tolerance
-        };
-
-    let axis_screen_metrics = |p0: w3d_core::kernel::Vec3,
-                               dir: w3d_core::kernel::Vec3|
-     -> Option<(egui::Pos2, egui::Vec2, f64)> {
-        let s0 = project_3d(p0)?;
-        let test_dist = 10.0;
-        let s1 = project_3d(p0 + dir * test_dist)?;
-        let delta = s1 - s0;
-        let len = delta.length();
-        if len < 0.5 {
-            return None;
-        }
-        let screen_dir = delta / len;
-        let points_per_mm = f64::from(len) / test_dist;
-        Some((s0, screen_dir, points_per_mm))
+    // ---- 5. The manipulators --------------------------------------------
+    //
+    // The arithmetic is in [`crate::gizmo`], where a test can reach it. What is
+    // left here is where the handles are, what they look like, and the three
+    // moments that matter: grabbing one, letting it go, and typing a number
+    // into the box it leaves behind.
+    //
+    // Two things this does not do, both of which it used to. It does not claim
+    // the bounding box of a diagonal arrow — a press is on a handle only if it
+    // is on the *shaft*, so the viewport around a selected part still orbits
+    // and still picks. And it does not touch geometry while the mouse is
+    // moving: a drag is a number until it is let go, which is one kernel call
+    // and one undo step per drag rather than per frame.
+    let mods = gizmo::Mods {
+        snap: modifiers.shift_key() || root.input(|i| i.modifiers.shift),
+        fine: modifiers.control_key()
+            || modifiers.super_key()
+            || root.input(|i| i.modifiers.ctrl || i.modifiers.mac_cmd),
     };
+    // Handles belong to the viewport, not to the chrome: what the panels cover
+    // is theirs, and an arrow that runs under the ribbon is clipped there
+    // rather than drawn over a row of buttons.
+    let stage = root.available_rect_before_wrap();
+    let pointer = root
+        .input(|i| i.pointer.latest_pos())
+        .filter(|at| stage.contains(*at));
+    let held = root.input(|i| i.pointer.primary_down());
+    let pressed = root.input(|i| i.pointer.primary_pressed());
 
-    #[derive(Clone, Debug, PartialEq)]
-    enum ActiveGizmoKind {
-        FaceTranslate {
-            node_id: w3d_core::NodeId,
-            face_id: u32,
-            dir: w3d_core::kernel::Vec3,
-        },
-        FaceExtrude {
-            node_id: w3d_core::NodeId,
-            face_id: u32,
-            is_negative: bool,
-        },
-        EdgeFillet {
-            node_id: w3d_core::NodeId,
-        },
-        EdgeChamfer {
-            node_id: w3d_core::NodeId,
-        },
-    }
+    let session_slot = egui::Id::new("w3d_gizmo_session");
+    let mut session: Option<gizmo::Session> = root.data_mut(|d| d.get_temp(session_slot));
 
-    #[derive(Clone, Debug)]
-    struct ActiveGizmoState {
-        kind: ActiveGizmoKind,
-        origin_3d: w3d_core::kernel::Vec3,
-        dir_3d: w3d_core::kernel::Vec3,
-        screen_origin: egui::Pos2,
-        screen_dir: egui::Vec2,
-        points_per_mm: f64,
-        mouse_start: egui::Pos2,
-        hud_pos: egui::Pos2,
-        drag_dist_mm: f64,
-        applied_dist_mm: f64,
-        text_buffer: String,
-        focus_needed: bool,
-        in_transaction: bool,
-        label: &'static str,
-        color: egui::Color32,
-    }
-
-    let gizmo_state_id = egui::Id::new("live_active_gizmo_state");
-    let mut gizmo_state: Option<ActiveGizmoState> = root.data_mut(|d| d.get_temp(gizmo_state_id));
-
-    let shift_held = modifiers.shift_key() || root.input(|i| i.modifiers.shift);
-    let ctrl_held = modifiers.control_key()
-        || modifiers.super_key()
-        || root.input(|i| i.modifiers.ctrl || i.modifiers.mac_cmd);
-    let alt_held = modifiers.alt_key() || root.input(|i| i.modifiers.alt);
-
-    let mouse_pos = root.input(|i| i.pointer.latest_pos());
-    let primary_down = root.input(|i| i.pointer.primary_down());
-    let primary_clicked = root.input(|i| i.pointer.primary_clicked());
-
-    // 5.1. Handle continuous CAD-grade drag updates with 1:1 cursor tracking along 3D projected axis
-    if let Some(state) = gizmo_state.as_mut()
-        && state.in_transaction
-    {
-        if primary_down {
+    // 5.1. A drag in flight. It reads the cursor, draws where it would land,
+    // and applies nothing until the button comes up.
+    if let Some(state) = session.as_mut().filter(|s| s.dragging) {
+        if held {
+            if let Some(at) = pointer {
+                state.track(at, mods);
+            }
             root.output_mut(|o| o.cursor_icon = egui::CursorIcon::Grabbing);
-            if let Some(curr_m) = mouse_pos {
-                state.hud_pos = curr_m + egui::vec2(18.0, -18.0);
-                let delta_m = curr_m - state.mouse_start;
-                let d_screen = delta_m.x * state.screen_dir.x + delta_m.y * state.screen_dir.y;
-                let mut d_mm = f64::from(d_screen) / state.points_per_mm;
-                if ctrl_held {
-                    d_mm *= 0.1;
-                }
-                if shift_held {
-                    let snap_step = match state.kind {
-                        ActiveGizmoKind::EdgeFillet { .. }
-                        | ActiveGizmoKind::EdgeChamfer { .. } => 1.0,
-                        _ => 5.0,
-                    };
-                    d_mm = (d_mm / snap_step).round() * snap_step;
-                }
-                let diff = d_mm - state.applied_dist_mm;
-                if diff.abs() > 1.0e-5 {
-                    match state.kind {
-                        ActiveGizmoKind::FaceTranslate { node_id, dir, .. } => {
-                            let m = w3d_core::kernel::Mat4::from_translation(dir * diff);
-                            let _ = editor.document_mut().transform(node_id, &m);
-                        }
-                        ActiveGizmoKind::FaceExtrude {
-                            node_id,
-                            face_id,
-                            is_negative,
-                        } => {
-                            let eff = if is_negative { -diff } else { diff };
-                            let _ = editor.document_mut().push_pull_face(node_id, face_id, eff);
-                        }
-                        ActiveGizmoKind::EdgeFillet { .. }
-                        | ActiveGizmoKind::EdgeChamfer { .. } => {}
-                    }
-                    state.applied_dist_mm = d_mm;
-                }
-                state.drag_dist_mm = d_mm;
-                state.text_buffer = format!("{:.1}", d_mm);
-            }
 
-            // Draw Infinite Guideline along constraint axis across the screen
-            let painter = root.painter();
-            let p_inf_a = project_3d(state.origin_3d - state.dir_3d * 2000.0)
-                .unwrap_or(state.screen_origin - state.screen_dir * 3000.0);
-            let p_inf_b = project_3d(state.origin_3d + state.dir_3d * 2000.0)
-                .unwrap_or(state.screen_origin + state.screen_dir * 3000.0);
-            painter.line_segment(
-                [p_inf_a, p_inf_b],
-                egui::Stroke::new(1.5, state.color.linear_multiply(0.4)),
-            );
-        } else {
-            // Drag completed: commit transaction cleanly
-            editor.document_mut().commit_transaction();
-            state.in_transaction = false;
-            state.focus_needed = true;
-            match state.kind {
-                ActiveGizmoKind::FaceTranslate { .. } => {
-                    editor.set_status(format!(
-                        "desplazado objeto {:+.1} mm a lo largo de la cara normal",
-                        state.drag_dist_mm
-                    ));
-                }
-                ActiveGizmoKind::FaceExtrude {
-                    face_id,
-                    is_negative,
-                    ..
-                } => {
-                    let eff = if is_negative {
-                        -state.drag_dist_mm
-                    } else {
-                        state.drag_dist_mm
-                    };
-                    editor.set_status(format!("extruida cara #{face_id} by {eff:+.1} mm"));
-                }
-                ActiveGizmoKind::EdgeFillet { .. } => {
-                    execute_command(editor, Command::FilletRadius(state.drag_dist_mm.max(0.1)));
-                }
-                ActiveGizmoKind::EdgeChamfer { .. } => {
-                    execute_command(
-                        editor,
-                        Command::ChamferDistance(state.drag_dist_mm.max(0.1)),
-                    );
-                }
+            let painter = root.painter().with_clip_rect(stage);
+            if !state.handle.is_angular() {
+                // The line the drag is constrained to, across the whole
+                // viewport, in the handle's own colour.
+                let far = 1.0e4;
+                let a = project_3d(state.anchor - state.direction * far)
+                    .unwrap_or(state.axis.origin - state.axis.dir * 4000.0);
+                let b = project_3d(state.anchor + state.direction * far)
+                    .unwrap_or(state.axis.origin + state.axis.dir * 4000.0);
+                painter.line_segment(
+                    [a, b],
+                    egui::Stroke::new(1.0, gizmo_colour(state.handle).linear_multiply(0.35)),
+                );
             }
+        } else {
+            state.dragging = false;
+            state.focus_wanted = true;
+            apply_pending(editor, state);
         }
     }
 
-    // 5.2. Contextual Manipulators by Selection Hierarchy
-    // State A: Edge Selected -> Show Fillet (Curvar) and Chamfer (Chaflán) arrows at midpoint
-    if let Some((node_id, edge_idx, p0, p1)) = editor.selected_edge() {
+    // 5.2. The preview, for a drag that has not been applied yet.
+    if let Some(state) = session.as_ref().filter(|s| s.dragging) {
+        let colour = gizmo_colour(state.handle);
+        match state.handle {
+            gizmo::Handle::PushPull { node, face, .. } => {
+                if let Some(outline) = editor.face_outline(node, face) {
+                    let offset = state.direction * state.value;
+                    let here: Vec<_> = outline.iter().filter_map(|&p| project_3d(p)).collect();
+                    let there: Vec<_> = outline
+                        .iter()
+                        .filter_map(|&p| project_3d(p + offset))
+                        .collect();
+                    let painter = root.painter().with_clip_rect(stage);
+                    if here.len() == outline.len() && there.len() == outline.len() {
+                        for i in 0..there.len() {
+                            let j = (i + 1) % there.len();
+                            painter
+                                .line_segment([there[i], there[j]], egui::Stroke::new(2.0, colour));
+                            painter.line_segment(
+                                [here[i], there[i]],
+                                egui::Stroke::new(1.0, colour.linear_multiply(0.5)),
+                            );
+                        }
+                    }
+                }
+            }
+            gizmo::Handle::Translate { axis } => {
+                ghost_box(
+                    root,
+                    stage,
+                    editor,
+                    &project_3d,
+                    &w3d_core::kernel::Mat4::from_translation(axis * state.value),
+                    colour,
+                );
+            }
+            gizmo::Handle::Rotate { axis } => {
+                let centre = state.anchor;
+                let m = w3d_core::kernel::Mat4::from_translation(centre)
+                    .mul(&w3d_core::kernel::Mat4::from_axis_angle(
+                        axis,
+                        state.value.to_radians(),
+                        1.0e-12,
+                    ))
+                    .mul(&w3d_core::kernel::Mat4::from_translation(-centre));
+                ghost_box(root, stage, editor, &project_3d, &m, colour);
+            }
+            gizmo::Handle::Fillet | gizmo::Handle::Chamfer => {}
+        }
+    }
+
+    // 5.3. The handles for whatever is selected. One set, never three at once:
+    // an edge is a blend, a face is a pull, a body is a move and a turn.
+    let mut handles: Vec<Candidate> = Vec::new();
+    let eye = editor.camera().eye();
+
+    if let Some((node_id, _, p0, p1)) = editor.selected_edge() {
         let mid = w3d_core::kernel::Vec3::new(
             f64::from(p0[0] + p1[0]) * 0.5,
             f64::from(p0[1] + p1[1]) * 0.5,
             f64::from(p0[2] + p1[2]) * 0.5,
         );
-        let center = editor
-            .document()
-            .bounds(node_id)
-            .map(|b| b.center())
-            .unwrap_or(w3d_core::kernel::Vec3::ZERO);
-        let out_dir = (mid - center)
+        // The tessellation's box, not the kernel's: `Document::bounds` costs a
+        // fresh tessellation on `truck`, and this runs on every frame.
+        let body_box = editor.document_mut().mesh_bounds(node_id).ok();
+        let centre = body_box.map_or(w3d_core::kernel::Vec3::ZERO, |b| b.center());
+        let out = (mid - centre)
             .normalize(1.0e-9)
             .unwrap_or(w3d_core::kernel::Vec3::Z);
-        let p0_vec =
-            w3d_core::kernel::Vec3::new(f64::from(p0[0]), f64::from(p0[1]), f64::from(p0[2]));
-        let p1_vec =
-            w3d_core::kernel::Vec3::new(f64::from(p1[0]), f64::from(p1[1]), f64::from(p1[2]));
-        let edge_dir = (p1_vec - p0_vec)
+        let edge = (w3d_core::kernel::Vec3::new(
+            f64::from(p1[0] - p0[0]),
+            f64::from(p1[1] - p0[1]),
+            f64::from(p1[2] - p0[2]),
+        ))
+        .normalize(1.0e-9)
+        .unwrap_or(w3d_core::kernel::Vec3::X);
+        let across = edge
+            .cross(out)
             .normalize(1.0e-9)
-            .unwrap_or(w3d_core::kernel::Vec3::X);
-        let mut perp_dir = edge_dir.cross(out_dir);
-        if perp_dir.dot(perp_dir) < 1.0e-6 {
-            perp_dir = edge_dir.cross(w3d_core::kernel::Vec3::Y);
+            .unwrap_or(w3d_core::kernel::Vec3::Y);
+        let span = screen_span(editor, mid, &project_3d, 90.0);
+
+        handles.push(Candidate::arrow(
+            gizmo::Handle::Fillet,
+            mid,
+            out,
+            span,
+            &project_3d,
+        ));
+        handles.push(Candidate::arrow(
+            gizmo::Handle::Chamfer,
+            mid,
+            (out + across).normalize(1.0e-9).unwrap_or(across),
+            span,
+            &project_3d,
+        ));
+    } else if let Some((node_id, face_id)) = editor.selected_face() {
+        if let Some(metrics) = editor.face_metrics(node_id, face_id) {
+            let span = metrics.area.sqrt().max(5.0) * 0.8;
+            handles.push(Candidate::arrow(
+                gizmo::Handle::PushPull {
+                    node: node_id,
+                    face: face_id,
+                    outward: true,
+                },
+                metrics.centroid,
+                metrics.normal,
+                span,
+                &project_3d,
+            ));
+            handles.push(Candidate::arrow(
+                gizmo::Handle::PushPull {
+                    node: node_id,
+                    face: face_id,
+                    outward: false,
+                },
+                metrics.centroid,
+                -metrics.normal,
+                span * 0.7,
+                &project_3d,
+            ));
         }
-        let perp_dir = perp_dir.normalize(1.0e-9).unwrap_or(out_dir);
-
-        let arrow_len = 24.0;
-        let p_fillet_tip = mid + perp_dir * arrow_len;
-        let chamfer_dir = (perp_dir + out_dir).normalize(1.0e-9).unwrap_or(perp_dir);
-        let p_chamfer_tip = mid + chamfer_dir * arrow_len;
-
-        if let (Some(m_2d), Some(f_2d), Some(c_2d)) = (
-            project_3d(mid),
-            project_3d(p_fillet_tip),
-            project_3d(p_chamfer_tip),
-        ) {
-            let f_rect = egui::Rect::from_two_pos(m_2d, f_2d).expand(14.0);
-            let f_id = egui::Id::new(("edge_fillet_arrow", node_id, edge_idx));
-            let f_resp = root.interact(f_rect, f_id, egui::Sense::click_and_drag());
-
-            let c_rect = egui::Rect::from_two_pos(m_2d, c_2d).expand(14.0);
-            let c_id = egui::Id::new(("edge_chamfer_arrow", node_id, edge_idx));
-            let c_resp = root.interact(c_rect, c_id, egui::Sense::click_and_drag());
-
-            let painter = root.painter();
-            painter.circle_filled(m_2d, 5.0, egui::Color32::from_rgb(255, 215, 0));
-            painter.circle_stroke(
-                m_2d,
-                7.0,
-                egui::Stroke::new(1.5, egui::Color32::from_rgb(255, 255, 255)),
-            );
-
-            let is_any_drag = gizmo_state.as_ref().is_some_and(|s| s.in_transaction);
-            let fillet_hovered = !is_any_drag
-                && f_resp.hovered()
-                && mouse_pos.is_some_and(|m| hit_test_arrow(m, m_2d, f_2d, 14.0));
-            let chamfer_hovered = !is_any_drag
-                && c_resp.hovered()
-                && mouse_pos.is_some_and(|m| hit_test_arrow(m, m_2d, c_2d, 14.0));
-
-            if f_resp.dragged() || c_resp.dragged() {
-                root.output_mut(|o| o.cursor_icon = egui::CursorIcon::Grabbing);
-            } else if fillet_hovered || chamfer_hovered {
-                root.output_mut(|o| o.cursor_icon = egui::CursorIcon::Grab);
-            }
-
-            if (f_resp.drag_started()
-                || (fillet_hovered && (primary_clicked || (primary_down && !is_any_drag))))
-                && !is_any_drag
-                && let Some((s0, sdir, ppm)) = axis_screen_metrics(mid, perp_dir)
-            {
-                editor.document_mut().begin_transaction("Fillet Edge");
-                editor.cancel_drag();
-                let start_m = mouse_pos.unwrap_or(f_2d);
-                gizmo_state = Some(ActiveGizmoState {
-                    kind: ActiveGizmoKind::EdgeFillet { node_id },
-                    origin_3d: mid,
-                    dir_3d: perp_dir,
-                    screen_origin: s0,
-                    screen_dir: sdir,
-                    points_per_mm: ppm,
-                    mouse_start: start_m,
-                    hud_pos: start_m + egui::vec2(18.0, -18.0),
-                    drag_dist_mm: 1.0,
-                    applied_dist_mm: 0.0,
-                    text_buffer: String::from("1.0"),
-                    focus_needed: true,
-                    in_transaction: true,
-                    label: "Curvar",
-                    color: egui::Color32::from_rgb(80, 240, 140),
-                });
-            }
-
-            if (c_resp.drag_started()
-                || (chamfer_hovered && (primary_clicked || (primary_down && !is_any_drag))))
-                && !is_any_drag
-                && let Some((s0, sdir, ppm)) = axis_screen_metrics(mid, chamfer_dir)
-            {
-                editor.document_mut().begin_transaction("Chamfer Edge");
-                editor.cancel_drag();
-                let start_m = mouse_pos.unwrap_or(c_2d);
-                gizmo_state = Some(ActiveGizmoState {
-                    kind: ActiveGizmoKind::EdgeChamfer { node_id },
-                    origin_3d: mid,
-                    dir_3d: chamfer_dir,
-                    screen_origin: s0,
-                    screen_dir: sdir,
-                    points_per_mm: ppm,
-                    mouse_start: start_m,
-                    hud_pos: start_m + egui::vec2(18.0, -18.0),
-                    drag_dist_mm: 1.0,
-                    applied_dist_mm: 0.0,
-                    text_buffer: String::from("1.0"),
-                    focus_needed: true,
-                    in_transaction: true,
-                    label: "Chaflán",
-                    color: egui::Color32::from_rgb(255, 200, 40),
-                });
-            }
-
-            let is_fillet_active = gizmo_state.as_ref().is_some_and(
-                |s| matches!(s.kind, ActiveGizmoKind::EdgeFillet { node_id: n } if n == node_id),
-            );
-            let is_chamfer_active = gizmo_state.as_ref().is_some_and(
-                |s| matches!(s.kind, ActiveGizmoKind::EdgeChamfer { node_id: n } if n == node_id),
-            );
-
-            draw_arrow_3d(
-                painter,
-                m_2d,
-                f_2d,
-                egui::Color32::from_rgb(80, 240, 140),
-                3.5,
-                fillet_hovered || is_fillet_active,
-            );
-
-            draw_arrow_3d(
-                painter,
-                m_2d,
-                c_2d,
-                egui::Color32::from_rgb(255, 200, 40),
-                3.5,
-                chamfer_hovered || is_chamfer_active,
-            );
+    } else if let Some(bounds) = selection_bounds(editor) {
+        let centre = bounds.center();
+        // A manipulator is the same size on screen whatever the part is: sized
+        // off the solid, it ran off the top of the window on a part the view
+        // was framed to, and shrank to nothing on an assembly. The arrows stand
+        // clear of the rings on purpose — a handle you have to aim between two
+        // others is a handle you grab the wrong one of.
+        let span = screen_span(editor, centre, &project_3d, 120.0);
+        let ring_span = screen_span(editor, centre, &project_3d, 78.0);
+        for axis in [
+            w3d_core::kernel::Vec3::X,
+            w3d_core::kernel::Vec3::Y,
+            w3d_core::kernel::Vec3::Z,
+        ] {
+            handles.push(Candidate::arrow(
+                gizmo::Handle::Translate { axis },
+                centre,
+                axis,
+                span,
+                &project_3d,
+            ));
+            handles.push(Candidate::ring(
+                gizmo::Handle::Rotate { axis },
+                centre,
+                axis,
+                ring_span,
+                eye,
+                &project_3d,
+            ));
         }
     }
-    // State B: Face Selected -> Show Positive and Negative Normal Extrude arrows at centroid
-    else if let Some((node_id, face_id)) = editor.selected_face()
-        && let Some(metrics) = editor.face_metrics(node_id, face_id)
+
+    // 5.4. Hovering, and grabbing. A handle is grabbed by its shaft or its
+    // ring, never by the box around it.
+    let busy = session.as_ref().is_some_and(|s| s.dragging);
+    let hovered = pointer.filter(|_| !busy).and_then(|at| {
+        handles
+            .iter()
+            .position(|c| c.hit(at, gizmo::GRAB_TOLERANCE))
+    });
+
+    if let Some(index) = hovered {
+        root.output_mut(|o| o.cursor_icon = egui::CursorIcon::Grab);
+        if pressed && let Some(at) = pointer {
+            let candidate = &handles[index];
+            if let Some(mut started) = candidate.session(at, eye) {
+                // The press reached the editor too — egui only learns a handle
+                // is under the cursor a frame later. Cancelling here is what
+                // keeps a grab from also orbiting the camera, and what keeps
+                // the release from being read as a click on whatever is behind.
+                editor.cancel_drag();
+                started.track(at, mods);
+                session = Some(started);
+            }
+        }
+    }
+
+    // While the cursor is on a handle, one small widget under it tells egui the
+    // pointer is spoken for, so the next press does not reach the viewport. It
+    // is the size of the cursor, not the size of the arrow's bounding box.
+    if (hovered.is_some() || busy)
+        && let Some(at) = pointer
     {
-        let centroid = metrics.centroid;
-        let normal = metrics.normal;
-
-        let base_arrow_len = 32.0;
-        let p_pos = centroid + normal * base_arrow_len;
-        let p_neg = centroid - normal * (base_arrow_len * 0.7);
-
-        if let (Some(c_2d), Some(pos_2d), Some(neg_2d)) =
-            (project_3d(centroid), project_3d(p_pos), project_3d(p_neg))
-        {
-            let pos_rect = egui::Rect::from_two_pos(c_2d, pos_2d).expand(14.0);
-            let pos_id = egui::Id::new(("face_pos_extrude", node_id, face_id));
-            let pos_resp = root.interact(pos_rect, pos_id, egui::Sense::click_and_drag());
-
-            let neg_rect = egui::Rect::from_two_pos(c_2d, neg_2d).expand(14.0);
-            let neg_id = egui::Id::new(("face_neg_extrude", node_id, face_id));
-            let neg_resp = root.interact(neg_rect, neg_id, egui::Sense::click_and_drag());
-
-            let painter = root.painter();
-            painter.circle_filled(c_2d, 5.0, egui::Color32::WHITE);
-            painter.circle_stroke(
-                c_2d,
-                7.0,
-                egui::Stroke::new(1.5, egui::Color32::from_rgb(0, 230, 255)),
-            );
-
-            let is_any_drag = gizmo_state.as_ref().is_some_and(|s| s.in_transaction);
-            let pos_hovered = !is_any_drag
-                && pos_resp.hovered()
-                && mouse_pos.is_some_and(|m| hit_test_arrow(m, c_2d, pos_2d, 14.0));
-            let neg_hovered = !is_any_drag
-                && neg_resp.hovered()
-                && mouse_pos.is_some_and(|m| hit_test_arrow(m, c_2d, neg_2d, 14.0));
-
-            if pos_resp.dragged() || neg_resp.dragged() {
-                root.output_mut(|o| o.cursor_icon = egui::CursorIcon::Grabbing);
-            } else if pos_hovered || neg_hovered {
-                root.output_mut(|o| o.cursor_icon = egui::CursorIcon::Grab);
-            }
-
-            // Start Positive Extrude drag on click
-            if (pos_resp.drag_started()
-                || (pos_hovered && (primary_clicked || (primary_down && !is_any_drag))))
-                && !is_any_drag
-                && let Some((s0, sdir, ppm)) = axis_screen_metrics(centroid, normal)
-            {
-                editor.document_mut().begin_transaction("Extrude Face");
-                editor.cancel_drag();
-                let start_m = mouse_pos.unwrap_or(pos_2d);
-                gizmo_state = Some(ActiveGizmoState {
-                    kind: ActiveGizmoKind::FaceExtrude {
-                        node_id,
-                        face_id,
-                        is_negative: false,
-                    },
-                    origin_3d: centroid,
-                    dir_3d: normal,
-                    screen_origin: s0,
-                    screen_dir: sdir,
-                    points_per_mm: ppm,
-                    mouse_start: start_m,
-                    hud_pos: start_m + egui::vec2(18.0, -18.0),
-                    drag_dist_mm: 0.0,
-                    applied_dist_mm: 0.0,
-                    text_buffer: String::from("0.0"),
-                    focus_needed: true,
-                    in_transaction: true,
-                    label: "+Extruir",
-                    color: egui::Color32::from_rgb(0, 230, 255),
-                });
-            }
-
-            // Start Negative Extrude drag on click
-            if (neg_resp.drag_started()
-                || (neg_hovered && (primary_clicked || (primary_down && !is_any_drag))))
-                && !is_any_drag
-                && let Some((s0, sdir, ppm)) = axis_screen_metrics(centroid, -normal)
-            {
-                editor
-                    .document_mut()
-                    .begin_transaction("Extrude Face Inward");
-                editor.cancel_drag();
-                let start_m = mouse_pos.unwrap_or(neg_2d);
-                gizmo_state = Some(ActiveGizmoState {
-                    kind: ActiveGizmoKind::FaceExtrude {
-                        node_id,
-                        face_id,
-                        is_negative: true,
-                    },
-                    origin_3d: centroid,
-                    dir_3d: -normal,
-                    screen_origin: s0,
-                    screen_dir: sdir,
-                    points_per_mm: ppm,
-                    mouse_start: start_m,
-                    hud_pos: start_m + egui::vec2(18.0, -18.0),
-                    drag_dist_mm: 0.0,
-                    applied_dist_mm: 0.0,
-                    text_buffer: String::from("0.0"),
-                    focus_needed: true,
-                    in_transaction: true,
-                    label: "−Extruir",
-                    color: egui::Color32::from_rgb(255, 140, 30),
-                });
-            }
-
-            let is_pos_active = gizmo_state.as_ref().is_some_and(|s| {
-                matches!(
-                    s.kind,
-                    ActiveGizmoKind::FaceExtrude {
-                        node_id: n,
-                        face_id: f,
-                        is_negative: false
-                    } if n == node_id && f == face_id
-                )
-            });
-            let is_neg_active = gizmo_state.as_ref().is_some_and(|s| {
-                matches!(
-                    s.kind,
-                    ActiveGizmoKind::FaceExtrude {
-                        node_id: n,
-                        face_id: f,
-                        is_negative: true
-                    } if n == node_id && f == face_id
-                )
-            });
-
-            draw_arrow_3d(
-                painter,
-                c_2d,
-                pos_2d,
-                egui::Color32::from_rgb(0, 230, 255),
-                4.0,
-                pos_hovered || is_pos_active,
-            );
-
-            draw_arrow_3d(
-                painter,
-                c_2d,
-                neg_2d,
-                egui::Color32::from_rgb(255, 140, 30),
-                4.0,
-                neg_hovered || is_neg_active,
-            );
-        }
-    }
-    // State C: Object Selected -> Show Normal Direction Extrude/Displace Arrows on all visible faces
-    else if !editor.selection().is_empty() {
-        let selected_ids = editor.selection();
-        let first_id = selected_ids[0];
-
-        // Fetch metrics for all faces of the selected body
-        let faces = editor.node_faces_metrics(first_id);
-        let cam = editor.camera();
-        let eye_pos = cam.eye();
-        let view_dir = (cam.target - eye_pos)
-            .normalize(1.0e-9)
-            .unwrap_or(w3d_core::kernel::Vec3::Z);
-
-        for face in &faces {
-            let centroid = face.centroid;
-            let normal = face.normal;
-
-            // Check if face is facing towards camera (front-facing)
-            let to_cam = (eye_pos - centroid).normalize(1.0e-9).unwrap_or(-view_dir);
-            if to_cam.dot(normal) < -0.15 {
-                // Back-facing face, skip to avoid visual clutter
-                continue;
-            }
-
-            let arrow_len = 28.0;
-            let p_base = project_3d(centroid);
-            let p_tip = project_3d(centroid + normal * arrow_len);
-
-            if let (Some(b_2d), Some(t_2d)) = (p_base, p_tip) {
-                let arrow_rect = egui::Rect::from_two_pos(b_2d, t_2d).expand(14.0);
-                let arrow_id = egui::Id::new(("obj_face_arrow", first_id, face.face_id));
-                let resp = root.interact(arrow_rect, arrow_id, egui::Sense::click_and_drag());
-
-                let painter = root.painter();
-                painter.circle_filled(b_2d, 4.0, egui::Color32::WHITE);
-                painter.circle_stroke(
-                    b_2d,
-                    6.0,
-                    egui::Stroke::new(1.2, egui::Color32::from_rgb(0, 200, 240)),
-                );
-
-                let is_any_drag = gizmo_state.as_ref().is_some_and(|s| s.in_transaction);
-                let is_hovered = !is_any_drag
-                    && resp.hovered()
-                    && mouse_pos.is_some_and(|m| hit_test_arrow(m, b_2d, t_2d, 14.0));
-                let is_active = gizmo_state.as_ref().is_some_and(|s| {
-                    matches!(
-                        s.kind,
-                        ActiveGizmoKind::FaceExtrude { node_id, face_id, .. }
-                        | ActiveGizmoKind::FaceTranslate { node_id, face_id, .. }
-                        if node_id == first_id && face_id == face.face_id
-                    )
-                });
-
-                if resp.dragged() || is_active {
-                    root.output_mut(|o| o.cursor_icon = egui::CursorIcon::Grabbing);
-                } else if is_hovered {
-                    root.output_mut(|o| o.cursor_icon = egui::CursorIcon::Grab);
-                }
-
-                if (resp.drag_started()
-                    || (is_hovered && (primary_clicked || (primary_down && !is_any_drag))))
-                    && !is_any_drag
-                    && let Some((s0, sdir, ppm)) = axis_screen_metrics(centroid, normal)
-                {
-                    let do_translate = alt_held;
-                    let action_title = if do_translate {
-                        "Desplazar Objeto"
-                    } else {
-                        "Extruir Cara"
-                    };
-                    editor.document_mut().begin_transaction(action_title);
-                    editor.cancel_drag();
-                    let start_m = mouse_pos.unwrap_or(t_2d);
-                    gizmo_state = Some(ActiveGizmoState {
-                        kind: if do_translate {
-                            ActiveGizmoKind::FaceTranslate {
-                                node_id: first_id,
-                                face_id: face.face_id,
-                                dir: normal,
-                            }
-                        } else {
-                            ActiveGizmoKind::FaceExtrude {
-                                node_id: first_id,
-                                face_id: face.face_id,
-                                is_negative: false,
-                            }
-                        },
-                        origin_3d: centroid,
-                        dir_3d: normal,
-                        screen_origin: s0,
-                        screen_dir: sdir,
-                        points_per_mm: ppm,
-                        mouse_start: start_m,
-                        hud_pos: start_m + egui::vec2(18.0, -18.0),
-                        drag_dist_mm: 0.0,
-                        applied_dist_mm: 0.0,
-                        text_buffer: String::from("0.0"),
-                        focus_needed: true,
-                        in_transaction: true,
-                        label: if do_translate { "Desplazar" } else { "Extruir" },
-                        color: if do_translate {
-                            egui::Color32::from_rgb(255, 160, 40)
-                        } else {
-                            egui::Color32::from_rgb(0, 220, 255)
-                        },
-                    });
-                }
-
-                let arrow_color = if is_active || is_hovered {
-                    egui::Color32::from_rgb(255, 215, 0)
-                } else {
-                    egui::Color32::from_rgb(0, 220, 255)
-                };
-
-                draw_arrow_3d(
-                    painter,
-                    b_2d,
-                    t_2d,
-                    arrow_color,
-                    if is_hovered || is_active { 4.5 } else { 3.2 },
-                    is_hovered || is_active,
-                );
-            }
-        }
-
-        // Quick Rotation Helpers at bottom of selected object
-        if let Ok(bounds) = editor.document().bounds(first_id) {
-            let center = bounds.center();
-            let b_bottom = w3d_core::kernel::Vec3::new(center.x, bounds.min.y, center.z);
-            if let Some(bottom_2d) = project_3d(b_bottom) {
-                egui::Area::new(egui::Id::new("obj_rot_center_badge"))
-                    .fixed_pos(bottom_2d + egui::vec2(-45.0, 10.0))
-                    .show(root, |ui| {
-                        ui.horizontal(|ui| {
-                            if ui
-                                .button("⟲ X")
-                                .on_hover_text("Rotar +15° en eje X")
-                                .clicked()
-                            {
-                                execute_command(
-                                    editor,
-                                    Command::RotateSelection {
-                                        axis: w3d_core::kernel::Vec3::X,
-                                        angle_deg: 15.0,
-                                    },
-                                );
-                            }
-                            if ui
-                                .button("⟳ Y")
-                                .on_hover_text("Rotar +15° en eje Y")
-                                .clicked()
-                            {
-                                execute_command(
-                                    editor,
-                                    Command::RotateSelection {
-                                        axis: w3d_core::kernel::Vec3::Y,
-                                        angle_deg: 15.0,
-                                    },
-                                );
-                            }
-                            if ui
-                                .button("⟲ Z")
-                                .on_hover_text("Rotar +15° en eje Z")
-                                .clicked()
-                            {
-                                execute_command(
-                                    editor,
-                                    Command::RotateSelection {
-                                        axis: w3d_core::kernel::Vec3::Z,
-                                        angle_deg: 15.0,
-                                    },
-                                );
-                            }
-                        });
-                    });
-            }
-        }
+        let _ = root.interact(
+            egui::Rect::from_center_size(at, egui::vec2(26.0, 26.0)),
+            egui::Id::new("w3d_gizmo_grab"),
+            egui::Sense::click_and_drag(),
+        );
     }
 
-    // 5.3. Floating CAD HUD Pill (Sleek glass pill with active measurement and direct typing)
-    let mut gizmo_dismiss = false;
-    if let Some(state) = gizmo_state.as_mut() {
-        let area_resp = egui::Area::new(egui::Id::new("active_cad_hud_pill"))
-            .fixed_pos(state.hud_pos)
+    // 5.5. Drawing them.
+    let active = session.as_ref().map(|s| s.handle);
+    let painter = root.painter().with_clip_rect(stage);
+    for (index, candidate) in handles.iter().enumerate() {
+        let lit = hovered == Some(index) || active == Some(candidate.handle);
+        candidate.draw(&painter, &draw_arrow_3d, lit);
+    }
+
+    // 5.6. The readout: what the drag measures, and a box to type it into.
+    let mut dismiss = false;
+    if let Some(state) = session.as_mut() {
+        let colour = gizmo_colour(state.handle);
+        let area = egui::Area::new(egui::Id::new("w3d_gizmo_readout"))
+            .fixed_pos(state.readout_at)
             .order(egui::Order::Foreground)
-            .show(root, |ui| {
+            .show(root.ctx(), |ui| {
                 egui::Frame::popup(ui.style())
                     .fill(egui::Color32::from_rgba_premultiplied(18, 22, 28, 240))
-                    .stroke(egui::Stroke::new(1.5, state.color))
+                    .stroke(egui::Stroke::new(1.5, colour))
                     .corner_radius(6.0)
                     .inner_margin(egui::Margin::symmetric(8, 4))
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
                             ui.label(
-                                egui::RichText::new(format!("{}:", state.label))
-                                    .color(state.color)
+                                egui::RichText::new(state.handle.label())
+                                    .color(colour)
                                     .strong(),
                             );
-                            if shift_held {
+                            if mods.snap {
+                                let step = if state.handle.is_angular() {
+                                    format!("{:.0}°", gizmo::SNAP_ANGLE)
+                                } else if state.handle.is_blend() {
+                                    format!("{:.0} mm", gizmo::SNAP_DISTANCE_BLEND)
+                                } else {
+                                    format!("{:.0} mm", gizmo::SNAP_DISTANCE)
+                                };
                                 ui.label(
-                                    egui::RichText::new("[SNAP 5mm]")
+                                    egui::RichText::new(format!("paso {step}"))
                                         .color(egui::Color32::from_rgb(0, 255, 160))
                                         .size(10.0),
                                 );
                             }
-                            if ctrl_held {
+                            if mods.fine {
                                 ui.label(
-                                    egui::RichText::new("[FINE 0.1x]")
+                                    egui::RichText::new("fino ×0.1")
                                         .color(egui::Color32::from_rgb(255, 215, 0))
                                         .size(10.0),
                                 );
                             }
 
-                            let text_edit = egui::TextEdit::singleline(&mut state.text_buffer)
-                                .desired_width(50.0);
-                            let resp = ui.add(text_edit);
-                            if state.focus_needed && !state.in_transaction {
-                                resp.request_focus();
-                                state.focus_needed = false;
-                            }
-                            ui.label("mm");
-
-                            let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
-                            if (ui.button("✔").clicked() || enter)
-                                && let Ok(val) = state.text_buffer.trim().parse::<f64>()
-                            {
-                                let diff = val - state.applied_dist_mm;
-                                if diff.abs() > 1.0e-5 {
-                                    match state.kind {
-                                        ActiveGizmoKind::FaceTranslate { node_id, dir, .. } => {
-                                            let m = w3d_core::kernel::Mat4::from_translation(
-                                                dir * diff,
-                                            );
-                                            let _ = editor.document_mut().transform(node_id, &m);
+                            if state.dragging {
+                                ui.label(
+                                    egui::RichText::new(format!(
+                                        "{:+.2} {}",
+                                        state.value,
+                                        state.handle.unit()
+                                    ))
+                                    .monospace()
+                                    .strong(),
+                                );
+                                Outcome::Nothing
+                            } else {
+                                let box_ = ui.add(
+                                    egui::TextEdit::singleline(&mut state.text).desired_width(56.0),
+                                );
+                                if state.focus_wanted {
+                                    box_.request_focus();
+                                    state.focus_wanted = false;
+                                }
+                                ui.label(state.handle.unit());
+                                let entered = ui.input(|i| i.key_pressed(egui::Key::Enter));
+                                if ui.button("✔").clicked() || entered {
+                                    match state.text.trim().replace(',', ".").parse::<f64>() {
+                                        Ok(typed) => {
+                                            state.value = typed;
+                                            Outcome::Apply
                                         }
-                                        ActiveGizmoKind::FaceExtrude {
-                                            node_id,
-                                            face_id,
-                                            is_negative,
-                                        } => {
-                                            let eff = if is_negative { -diff } else { diff };
-                                            let _ = editor
-                                                .document_mut()
-                                                .push_pull_face(node_id, face_id, eff);
-                                        }
-                                        ActiveGizmoKind::EdgeFillet { .. } => {
-                                            execute_command(
-                                                editor,
-                                                Command::FilletRadius(val.max(0.1)),
-                                            );
-                                        }
-                                        ActiveGizmoKind::EdgeChamfer { .. } => {
-                                            execute_command(
-                                                editor,
-                                                Command::ChamferDistance(val.max(0.1)),
-                                            );
-                                        }
+                                        Err(_) => Outcome::Nothing,
                                     }
-                                    state.applied_dist_mm = val;
-                                    state.drag_dist_mm = val;
+                                } else if ui.button("✕").clicked()
+                                    || ui.input(|i| i.key_pressed(egui::Key::Escape))
+                                {
+                                    Outcome::Cancel
+                                } else {
+                                    Outcome::Nothing
                                 }
-                                editor.document_mut().commit_transaction();
-                                gizmo_dismiss = true;
                             }
-
-                            if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-                                if state.in_transaction {
-                                    editor.document_mut().commit_transaction();
-                                    execute_command(editor, Command::Undo);
-                                }
-                                gizmo_dismiss = true;
-                            }
-                        });
-                    });
+                        })
+                        .inner
+                    })
+                    .inner
             });
 
-        // When resting in HUD mode, if user clicked outside the HUD pill rect, dismiss the HUD
-        if !state.in_transaction
-            && primary_clicked
-            && mouse_pos.is_some_and(|m| !area_resp.response.rect.contains(m))
+        match area.inner {
+            Outcome::Apply => {
+                apply_pending(editor, state);
+                dismiss = true;
+            }
+            // Cancelling undoes what this session applied, and nothing else.
+            // The version this replaced undid one step unconditionally, so
+            // cancelling a handle that had done nothing ate the user's previous
+            // operation instead.
+            Outcome::Cancel => {
+                if state.touched_the_document() {
+                    execute_command(editor, Command::Undo);
+                }
+                dismiss = true;
+            }
+            Outcome::Nothing => {}
+        }
+
+        // A click anywhere else puts the readout away and belongs to the
+        // viewport, not to the gizmo.
+        if !state.dragging && pressed && pointer.is_some_and(|at| !area.response.rect.contains(at))
         {
-            gizmo_dismiss = true;
+            dismiss = true;
         }
     }
 
-    if gizmo_dismiss {
-        gizmo_state = None;
+    if dismiss || editor.selection().is_empty() {
+        session = None;
     }
 
-    *gizmo_active = gizmo_state.as_ref().is_some_and(|s| s.in_transaction);
+    gizmo.dragging = session.as_ref().is_some_and(|s| s.dragging);
+    gizmo.open = session.is_some();
+    root.data_mut(|d| d.insert_temp(session_slot, session));
+}
 
-    // Persist active gizmo state across frames in egui temp memory
-    root.data_mut(|d| d.insert_temp(gizmo_state_id, gizmo_state));
+/// What the readout asked for this frame.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum Outcome {
+    #[default]
+    Nothing,
+    Apply,
+    Cancel,
+}
+
+/// The CAD convention, and the one the viewport's axes already use: X red,
+/// Y green, Z blue, a pull in cyan, a blend in gold.
+fn gizmo_colour(handle: gizmo::Handle) -> egui::Color32 {
+    match handle {
+        gizmo::Handle::Translate { axis } | gizmo::Handle::Rotate { axis } => {
+            if axis.x != 0.0 {
+                egui::Color32::from_rgb(235, 80, 80)
+            } else if axis.y != 0.0 {
+                egui::Color32::from_rgb(90, 220, 110)
+            } else {
+                egui::Color32::from_rgb(90, 150, 255)
+            }
+        }
+        gizmo::Handle::PushPull { outward: true, .. } => egui::Color32::from_rgb(0, 230, 255),
+        gizmo::Handle::PushPull { outward: false, .. } => egui::Color32::from_rgb(255, 140, 30),
+        gizmo::Handle::Fillet => egui::Color32::from_rgb(80, 240, 140),
+        gizmo::Handle::Chamfer => egui::Color32::from_rgb(255, 200, 40),
+    }
+}
+
+/// One handle, placed on screen for this frame.
+struct Candidate {
+    handle: gizmo::Handle,
+    anchor: w3d_core::kernel::Vec3,
+    direction: w3d_core::kernel::Vec3,
+    world_len: f64,
+    /// An arrow's two ends, or empty for a ring.
+    ends: Option<(egui::Pos2, egui::Pos2)>,
+    /// A ring's projected outline, or empty for an arrow.
+    ring: Vec<egui::Pos2>,
+    /// A ring's centre on screen, which is what an angle is measured about.
+    centre: Option<egui::Pos2>,
+}
+
+impl Candidate {
+    fn arrow(
+        handle: gizmo::Handle,
+        anchor: w3d_core::kernel::Vec3,
+        direction: w3d_core::kernel::Vec3,
+        world_len: f64,
+        project: &impl Fn(w3d_core::kernel::Vec3) -> Option<egui::Pos2>,
+    ) -> Self {
+        let ends = project(anchor).zip(project(anchor + direction * world_len));
+        Self {
+            handle,
+            anchor,
+            direction,
+            world_len,
+            ends,
+            ring: Vec::new(),
+            centre: None,
+        }
+    }
+
+    fn ring(
+        handle: gizmo::Handle,
+        centre: w3d_core::kernel::Vec3,
+        axis: w3d_core::kernel::Vec3,
+        radius: f64,
+        eye: w3d_core::kernel::Vec3,
+        project: &impl Fn(w3d_core::kernel::Vec3) -> Option<egui::Pos2>,
+    ) -> Self {
+        let seed = if axis.x.abs() < 0.9 {
+            w3d_core::kernel::Vec3::X
+        } else {
+            w3d_core::kernel::Vec3::Y
+        };
+        let u = seed
+            .cross(axis)
+            .normalize(1.0e-12)
+            .unwrap_or(w3d_core::kernel::Vec3::X);
+        let v = axis.cross(u);
+        let mut ring = Vec::with_capacity(65);
+        for step in 0..=64 {
+            let t = f64::from(step) / 64.0 * std::f64::consts::TAU;
+            let p = centre + u * (radius * t.cos()) + v * (radius * t.sin());
+            // The far half of the ring is dropped rather than drawn through the
+            // solid: a handle you cannot see is a handle you grab by accident.
+            if (eye - p).dot(p - centre) < 0.0 {
+                ring.push(egui::Pos2::new(f32::NAN, f32::NAN));
+                continue;
+            }
+            match project(p) {
+                Some(at) => ring.push(at),
+                None => ring.push(egui::Pos2::new(f32::NAN, f32::NAN)),
+            }
+        }
+        Self {
+            handle,
+            anchor: centre,
+            direction: axis,
+            world_len: radius,
+            ends: None,
+            ring,
+            centre: project(centre),
+        }
+    }
+
+    fn hit(&self, at: egui::Pos2, tolerance: f32) -> bool {
+        if let Some((from, to)) = self.ends {
+            return gizmo::hit_segment(at, from, to, tolerance);
+        }
+        self.ring
+            .windows(2)
+            .filter(|w| w.iter().all(|p| p.x.is_finite() && p.y.is_finite()))
+            .any(|w| gizmo::hit_segment(at, w[0], w[1], tolerance))
+    }
+
+    /// The drag this handle starts, or `None` when it is edge-on and there is
+    /// no direction to drag it in.
+    fn session(&self, at: egui::Pos2, eye: w3d_core::kernel::Vec3) -> Option<gizmo::Session> {
+        if let Some((from, to)) = self.ends {
+            let axis = gizmo::ScreenAxis::new(from, to, self.world_len)?;
+            return Some(gizmo::Session::new(
+                self.handle,
+                self.anchor,
+                self.direction,
+                axis,
+                at,
+            ));
+        }
+        let mut started = gizmo::Session::new(
+            self.handle,
+            self.anchor,
+            self.direction,
+            gizmo::ScreenAxis {
+                origin: self.centre?,
+                dir: egui::vec2(1.0, 0.0),
+                points_per_unit: 1.0,
+            },
+            at,
+        );
+        // Turning the same way the cursor goes means knowing which way the axis
+        // points: seen from behind, a ring turns the other way.
+        started.facing = if self.direction.dot(eye - self.anchor) >= 0.0 {
+            1.0
+        } else {
+            -1.0
+        };
+        Some(started)
+    }
+
+    fn draw(
+        &self,
+        painter: &egui::Painter,
+        arrow: &impl Fn(&egui::Painter, egui::Pos2, egui::Pos2, egui::Color32, f32, bool),
+        lit: bool,
+    ) {
+        let colour = if lit {
+            egui::Color32::from_rgb(255, 215, 0)
+        } else {
+            gizmo_colour(self.handle)
+        };
+        if let Some((from, to)) = self.ends {
+            arrow(painter, from, to, colour, if lit { 4.5 } else { 3.0 }, lit);
+            return;
+        }
+        for pair in self.ring.windows(2) {
+            if pair.iter().any(|p| !p.x.is_finite() || !p.y.is_finite()) {
+                continue;
+            }
+            painter.line_segment(
+                [pair[0], pair[1]],
+                egui::Stroke::new(if lit { 3.5 } else { 2.0 }, colour),
+            );
+        }
+    }
+}
+
+/// How long a handle at `at` has to be, in document units, to come out
+/// `points` long on screen.
+///
+/// Measured across the screen rather than along any one axis, so all three
+/// arrows of a triad are the same length in the world and foreshorten the way
+/// the geometry does.
+fn screen_span<K: GeometryKernel + Default>(
+    editor: &Editor<K>,
+    at: w3d_core::kernel::Vec3,
+    project: &impl Fn(w3d_core::kernel::Vec3) -> Option<egui::Pos2>,
+    points: f32,
+) -> f64 {
+    let camera = editor.camera();
+    let forward = (camera.target - camera.eye())
+        .normalize(1.0e-12)
+        .unwrap_or(w3d_core::kernel::Vec3::Y);
+    let across = forward
+        .cross(w3d_render::camera::UP)
+        .normalize(1.0e-12)
+        .unwrap_or(w3d_core::kernel::Vec3::X);
+    // A unit of world, measured where the handle is: one probe, and the answer
+    // is in points per unit.
+    let Some((here, there)) = project(at).zip(project(at + across)) else {
+        return 10.0;
+    };
+    let per_unit = (there - here).length();
+    if per_unit < 1.0e-3 {
+        return 10.0;
+    }
+    f64::from(points / per_unit)
+}
+
+/// The box around everything selected, which is what the move and turn handles
+/// stand on.
+fn selection_bounds<K: GeometryKernel + Default>(
+    editor: &mut Editor<K>,
+) -> Option<w3d_core::kernel::Aabb> {
+    let mut bounds = w3d_core::kernel::Aabb::EMPTY;
+    for id in editor.selection() {
+        // `mesh_bounds` and not `bounds`: this is asked every frame, and on
+        // `truck` the kernel's answer is a tessellation — 2.4 seconds of one,
+        // on the solid the demo builds.
+        if let Ok(b) = editor.document_mut().mesh_bounds(id) {
+            bounds = bounds.union(&b);
+        }
+    }
+    (!bounds.is_empty()).then_some(bounds)
+}
+
+/// The selection's box, as it would be after `m` — the preview a drag draws
+/// instead of rebuilding the solid on every frame.
+fn ghost_box<K: GeometryKernel + Default>(
+    root: &mut egui::Ui,
+    stage: egui::Rect,
+    editor: &mut Editor<K>,
+    project: &impl Fn(w3d_core::kernel::Vec3) -> Option<egui::Pos2>,
+    m: &w3d_core::kernel::Mat4,
+    colour: egui::Color32,
+) {
+    let Some(bounds) = selection_bounds(editor) else {
+        return;
+    };
+    let (lo, hi) = (bounds.min, bounds.max);
+    let corners = [
+        w3d_core::kernel::Vec3::new(lo.x, lo.y, lo.z),
+        w3d_core::kernel::Vec3::new(hi.x, lo.y, lo.z),
+        w3d_core::kernel::Vec3::new(hi.x, hi.y, lo.z),
+        w3d_core::kernel::Vec3::new(lo.x, hi.y, lo.z),
+        w3d_core::kernel::Vec3::new(lo.x, lo.y, hi.z),
+        w3d_core::kernel::Vec3::new(hi.x, lo.y, hi.z),
+        w3d_core::kernel::Vec3::new(hi.x, hi.y, hi.z),
+        w3d_core::kernel::Vec3::new(lo.x, hi.y, hi.z),
+    ];
+    let screen: Vec<_> = corners
+        .iter()
+        .map(|&c| project(m.transform_point(c)))
+        .collect();
+    let painter = root.painter().with_clip_rect(stage);
+    for (a, b) in [
+        (0, 1),
+        (1, 2),
+        (2, 3),
+        (3, 0),
+        (4, 5),
+        (5, 6),
+        (6, 7),
+        (7, 4),
+        (0, 4),
+        (1, 5),
+        (2, 6),
+        (3, 7),
+    ] {
+        if let (Some(p), Some(q)) = (screen[a], screen[b]) {
+            painter.line_segment([p, q], egui::Stroke::new(1.5, colour.linear_multiply(0.8)));
+        }
+    }
+}
+
+/// Hands the document what a session owes it, as one operation.
+fn apply_pending<K: GeometryKernel + Default>(editor: &mut Editor<K>, state: &mut gizmo::Session) {
+    match state.pending() {
+        gizmo::Pending::Nothing => {}
+        gizmo::Pending::Add(delta) => {
+            run_handle(editor, state.handle, delta);
+            state.settled();
+        }
+        gizmo::Pending::Replace { value, undo_first } => {
+            if undo_first {
+                execute_command(editor, Command::Undo);
+            }
+            run_handle(editor, state.handle, value);
+            state.settled();
+        }
+    }
+}
+
+/// One handle, one command. Everything a manipulator does is something the
+/// keyboard and the ribbon can already do, which is what keeps a drag undoable
+/// and a status line honest.
+fn run_handle<K: GeometryKernel + Default>(
+    editor: &mut Editor<K>,
+    handle: gizmo::Handle,
+    amount: f64,
+) {
+    match handle {
+        gizmo::Handle::Translate { axis } => {
+            execute_command(editor, Command::TranslateSelection(axis * amount));
+        }
+        gizmo::Handle::Rotate { axis } => {
+            execute_command(
+                editor,
+                Command::RotateSelection {
+                    axis,
+                    angle_deg: amount,
+                },
+            );
+        }
+        gizmo::Handle::PushPull { node, outward, .. } => {
+            // The face *id* is deliberately not checked: a pull rebuilds the
+            // solid and the editor re-selects the same face under a new number.
+            // What has to still hold is that the pull is on the part the handle
+            // came from.
+            if editor.selected_face().map(|(n, _)| n) != Some(node) {
+                editor.set_status("that face is no longer selected, so nothing was pulled");
+                return;
+            }
+            let distance = if outward { amount } else { -amount };
+            execute_command(editor, Command::PushPullFace(distance));
+        }
+        gizmo::Handle::Fillet | gizmo::Handle::Chamfer => {
+            if amount <= 0.0 {
+                editor.set_status("a blend needs a positive size — drag the other way");
+                return;
+            }
+            if matches!(handle, gizmo::Handle::Fillet) {
+                execute_command(editor, Command::FilletRadius(amount));
+            } else {
+                execute_command(editor, Command::ChamferDistance(amount));
+            }
+        }
+    }
 }
 
 /// A free function rather than a method: borrowing the fields separately is
@@ -2208,4 +2187,123 @@ fn depth_texture(device: &wgpu::Device, width: u32, height: u32) -> wgpu::Textur
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
         view_formats: &[],
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::gizmo::{Handle, Mods, ScreenAxis, Session};
+    use egui::pos2;
+    use w3d_core::kernel::Vec3;
+    use w3d_kernel_fake::FakeKernel;
+
+    fn editor() -> Editor<FakeKernel> {
+        let mut editor = Editor::new(FakeKernel::default());
+        editor.run(Command::AddBox);
+        editor
+    }
+
+    /// Ten screen points to the world unit, along +x.
+    fn axis() -> ScreenAxis {
+        ScreenAxis::new(pos2(100.0, 100.0), pos2(200.0, 100.0), 10.0).unwrap()
+    }
+
+    fn session(handle: Handle) -> Session {
+        Session::new(handle, Vec3::ZERO, Vec3::X, axis(), pos2(100.0, 100.0))
+    }
+
+    #[test]
+    fn a_move_handle_becomes_one_translation_of_what_is_selected() {
+        let mut editor = editor();
+        let id = editor.selection()[0];
+        let before = editor.document().bounds(id).unwrap();
+
+        let mut state = session(Handle::Translate { axis: Vec3::X });
+        state.track(pos2(180.0, 100.0), Mods::default());
+        apply_pending(&mut editor, &mut state);
+
+        let after = editor.document().bounds(id).unwrap();
+        assert!(
+            (after.min.x - (before.min.x + 8.0)).abs() < 1.0e-9,
+            "{after:?}"
+        );
+        assert!((after.min.y - before.min.y).abs() < 1.0e-9);
+        assert_eq!(editor.document_mut().undo(), Some("Translate"));
+        assert_eq!(editor.document().bounds(id).unwrap(), before);
+    }
+
+    #[test]
+    fn a_second_reading_applies_the_difference_and_not_the_whole_of_it() {
+        let mut editor = editor();
+        let id = editor.selection()[0];
+        let before = editor.document().bounds(id).unwrap();
+
+        let mut state = session(Handle::Translate { axis: Vec3::X });
+        state.track(pos2(130.0, 100.0), Mods::default());
+        apply_pending(&mut editor, &mut state);
+        // The number typed into the readout after the drag.
+        state.value = 5.0;
+        apply_pending(&mut editor, &mut state);
+
+        let after = editor.document().bounds(id).unwrap();
+        assert!(
+            (after.min.x - (before.min.x + 5.0)).abs() < 1.0e-9,
+            "the second reading was added to the first instead of replacing it: {after:?}"
+        );
+    }
+
+    #[test]
+    fn a_turn_handle_becomes_one_rotation() {
+        let mut editor = editor();
+        let mut state = session(Handle::Rotate { axis: Vec3::Z });
+        state.value = 90.0;
+        apply_pending(&mut editor, &mut state);
+
+        assert!(editor.status().contains("rotated"), "{}", editor.status());
+        assert_eq!(editor.document_mut().undo(), Some("Rotate"));
+    }
+
+    #[test]
+    fn a_blend_that_the_backend_declines_says_so_and_changes_nothing() {
+        let mut editor = editor();
+        let id = editor.selection()[0];
+        let before = editor.document().bounds(id).unwrap();
+
+        let mut state = session(Handle::Fillet);
+        state.value = 1.5;
+        apply_pending(&mut editor, &mut state);
+
+        // The fake kernel fillets; what matters here is that whichever answer
+        // the backend gives reaches the status line rather than being dropped.
+        assert!(!editor.status().is_empty());
+        assert_eq!(editor.document().bounds(id).unwrap(), before);
+    }
+
+    #[test]
+    fn a_blend_dragged_backwards_is_refused_rather_than_clamped_to_a_crumb() {
+        let mut editor = editor();
+        let mut state = session(Handle::Fillet);
+        state.track(pos2(60.0, 100.0), Mods::default());
+        apply_pending(&mut editor, &mut state);
+
+        assert!(state.value < 0.0, "{}", state.value);
+        assert!(
+            editor.status().contains("positive"),
+            "a backwards drag should be refused, not rounded up: {}",
+            editor.status()
+        );
+    }
+
+    #[test]
+    fn a_session_that_applied_nothing_leaves_the_history_where_it_was() {
+        let mut editor = editor();
+        editor.document_mut().clear_history();
+
+        let mut state = session(Handle::Translate { axis: Vec3::X });
+        state.track(pos2(100.0, 140.0), Mods::default()); // across the axis: no travel along it
+        apply_pending(&mut editor, &mut state);
+
+        assert!(!state.touched_the_document());
+        assert_eq!(editor.document_mut().undo(), None);
+    }
 }

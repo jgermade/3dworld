@@ -7,10 +7,14 @@
 
 pub mod arena;
 pub mod document;
+pub mod face;
 pub mod history;
 
 pub use arena::{Arena, Id};
-pub use document::{Document, DocumentError, Loaded, LoadedNode, Node, NodeId, Uid, Unit};
+pub use document::{
+    Document, DocumentError, Loaded, LoadedNode, Node, NodeId, PushPull, Uid, Unit,
+};
+pub use face::{FaceError, FaceLoop, face_loop};
 pub use history::History;
 
 /// Re-exported so callers need one dependency, not two, and so that the

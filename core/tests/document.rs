@@ -903,3 +903,131 @@ fn compaction_keeps_the_tree_pointing_at_the_right_nodes() {
     );
     assert_eq!(d.depth_first().len(), d.len());
 }
+
+/// Which face of the fake kernel's box mesh points along `+axis`, and the
+/// distance its plane stands at.
+fn face_pointing(d: &mut Document<FakeKernel>, id: w3d_core::NodeId, axis: Vec3) -> u32 {
+    let mesh = d.mesh(id).unwrap().clone();
+    let mut ids: Vec<u32> = mesh.face_of_triangle.clone();
+    ids.sort_unstable();
+    ids.dedup();
+    ids.into_iter()
+        .find(|&f| {
+            mesh.face_metrics(f)
+                .is_some_and(|m| m.normal.dot(axis) > 0.99)
+        })
+        .expect("no face points that way")
+}
+
+#[test]
+fn pulling_a_face_adds_material_on_that_side_and_leaves_the_others_alone() {
+    let mut d = doc();
+    let id = d.add_box("Base", Vec3::new(2.0, 2.0, 2.0)).unwrap();
+    let before = d.bounds(id).unwrap();
+    let top = face_pointing(&mut d, id, Vec3::Z);
+
+    d.push_pull_face(id, top, 3.0).unwrap();
+
+    let after = d.bounds(id).unwrap();
+    assert!(
+        (after.max.z - (before.max.z + 3.0)).abs() < 1.0e-6,
+        "the pulled side did not move by what was asked: {before:?} -> {after:?}"
+    );
+    for (got, want) in [
+        (after.min.z, before.min.z),
+        (after.min.x, before.min.x),
+        (after.max.x, before.max.x),
+        (after.min.y, before.min.y),
+        (after.max.y, before.max.y),
+    ] {
+        assert!(
+            (got - want).abs() < 1.0e-6,
+            "push/pull moved a side it was not asked about: {before:?} -> {after:?}"
+        );
+    }
+}
+
+#[test]
+fn a_pull_is_one_undo_step_and_undo_puts_the_solid_back() {
+    let mut d = doc();
+    let id = d.add_box("Base", Vec3::new(2.0, 2.0, 2.0)).unwrap();
+    let before = d.bounds(id).unwrap();
+    let top = face_pointing(&mut d, id, Vec3::Z);
+
+    d.push_pull_face(id, top, 5.0).unwrap();
+    assert!(d.bounds(id).unwrap() != before);
+
+    assert_eq!(d.undo(), Some("Push/Pull Face"));
+    assert_eq!(d.bounds(id).unwrap(), before);
+}
+
+#[test]
+fn pushing_a_face_inward_cuts_rather_than_moving_the_part() {
+    let mut d = doc();
+    let id = d.add_box("Base", Vec3::new(4.0, 4.0, 4.0)).unwrap();
+    let body_before = d.node(id).unwrap().body;
+    let top = face_pointing(&mut d, id, Vec3::Z);
+
+    d.push_pull_face(id, top, -1.0).unwrap();
+
+    // The fake kernel keeps a boolean symbolic, so what this can assert is the
+    // shape of the edit: a new body, made by a difference, in one undo step.
+    // That the cut *lands* where it should is the truck suite's to say.
+    assert!(d.node(id).unwrap().body != body_before);
+    assert_eq!(d.undo(), Some("Push/Pull Face"));
+    assert_eq!(d.node(id).unwrap().body, body_before);
+}
+
+#[test]
+fn pulling_a_face_that_is_not_there_leaves_the_document_untouched() {
+    let mut d = doc();
+    let id = d.add_box("Base", Vec3::splat(2.0)).unwrap();
+    let before = d.node(id).unwrap().clone();
+    d.clear_history();
+
+    assert!(d.push_pull_face(id, 404, 1.0).is_err());
+
+    assert_eq!(d.node(id).unwrap(), &before);
+    assert_eq!(
+        d.undo(),
+        None,
+        "a failed push/pull left an undo step behind"
+    );
+}
+
+#[test]
+fn pulling_a_face_by_nothing_is_not_an_edit() {
+    let mut d = doc();
+    let id = d.add_box("Base", Vec3::splat(2.0)).unwrap();
+    let top = face_pointing(&mut d, id, Vec3::Z);
+    let body = d.node(id).unwrap().body;
+    d.clear_history();
+
+    d.push_pull_face(id, top, 0.0).unwrap();
+
+    assert_eq!(d.node(id).unwrap().body, body);
+    assert_eq!(d.undo(), None, "a zero pull left an undo step behind");
+}
+
+#[test]
+fn the_tessellations_box_is_the_solids_box_and_costs_no_kernel_call() {
+    let mut d = doc();
+    let id = d.add_box("Base", Vec3::new(2.0, 4.0, 6.0)).unwrap();
+
+    let exact = d.bounds(id).unwrap();
+    let cheap = d.mesh_bounds(id).unwrap();
+
+    // A flat-sided solid tessellates to its own corners, so the two agree
+    // outright here; on a curved one the mesh box is inside the solid's by the
+    // tessellation's chordal error, which is what the doc comment claims and
+    // what makes this the cheap answer rather than the same answer.
+    assert!((cheap.min - exact.min).length() < 1.0e-6, "{cheap:?}");
+    assert!((cheap.max - exact.max).length() < 1.0e-6, "{cheap:?}");
+}
+
+#[test]
+fn the_tessellations_box_refuses_a_group_rather_than_inventing_one() {
+    let mut d = doc();
+    let group = d.add_group("Assembly");
+    assert!(d.mesh_bounds(group).is_err());
+}

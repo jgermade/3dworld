@@ -15,6 +15,7 @@
 //! know what a GPU is, and the renderer must not know what a document is.
 
 pub mod editor;
+pub mod gizmo;
 pub mod scene;
 pub mod shell;
 
