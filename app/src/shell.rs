@@ -1540,10 +1540,10 @@ fn chrome<K: GeometryKernel + Default>(
             f64::from(p0[1] + p1[1]) * 0.5,
             f64::from(p0[2] + p1[2]) * 0.5,
         );
-        let centre = editor
-            .document()
-            .bounds(node_id)
-            .map_or(w3d_core::kernel::Vec3::ZERO, |b| b.center());
+        // The tessellation's box, not the kernel's: `Document::bounds` costs a
+        // fresh tessellation on `truck`, and this runs on every frame.
+        let body_box = editor.document_mut().mesh_bounds(node_id).ok();
+        let centre = body_box.map_or(w3d_core::kernel::Vec3::ZERO, |b| b.center());
         let out = (mid - centre)
             .normalize(1.0e-9)
             .unwrap_or(w3d_core::kernel::Vec3::Z);
@@ -1558,10 +1558,7 @@ fn chrome<K: GeometryKernel + Default>(
             .cross(out)
             .normalize(1.0e-9)
             .unwrap_or(w3d_core::kernel::Vec3::Y);
-        let span = editor
-            .document()
-            .bounds(node_id)
-            .map_or(20.0, |b| b.size().x.max(b.size().y).max(b.size().z) * 0.4);
+        let span = screen_span(editor, mid, &project_3d, 90.0);
 
         handles.push(Candidate::arrow(
             gizmo::Handle::Fillet,
@@ -2014,11 +2011,14 @@ fn screen_span<K: GeometryKernel + Default>(
 /// The box around everything selected, which is what the move and turn handles
 /// stand on.
 fn selection_bounds<K: GeometryKernel + Default>(
-    editor: &Editor<K>,
+    editor: &mut Editor<K>,
 ) -> Option<w3d_core::kernel::Aabb> {
     let mut bounds = w3d_core::kernel::Aabb::EMPTY;
     for id in editor.selection() {
-        if let Ok(b) = editor.document().bounds(id) {
+        // `mesh_bounds` and not `bounds`: this is asked every frame, and on
+        // `truck` the kernel's answer is a tessellation — 2.4 seconds of one,
+        // on the solid the demo builds.
+        if let Ok(b) = editor.document_mut().mesh_bounds(id) {
             bounds = bounds.union(&b);
         }
     }
@@ -2030,7 +2030,7 @@ fn selection_bounds<K: GeometryKernel + Default>(
 fn ghost_box<K: GeometryKernel + Default>(
     root: &mut egui::Ui,
     stage: egui::Rect,
-    editor: &Editor<K>,
+    editor: &mut Editor<K>,
     project: &impl Fn(w3d_core::kernel::Vec3) -> Option<egui::Pos2>,
     m: &w3d_core::kernel::Mat4,
     colour: egui::Color32,

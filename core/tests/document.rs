@@ -1008,3 +1008,26 @@ fn pulling_a_face_by_nothing_is_not_an_edit() {
     assert_eq!(d.node(id).unwrap().body, body);
     assert_eq!(d.undo(), None, "a zero pull left an undo step behind");
 }
+
+#[test]
+fn the_tessellations_box_is_the_solids_box_and_costs_no_kernel_call() {
+    let mut d = doc();
+    let id = d.add_box("Base", Vec3::new(2.0, 4.0, 6.0)).unwrap();
+
+    let exact = d.bounds(id).unwrap();
+    let cheap = d.mesh_bounds(id).unwrap();
+
+    // A flat-sided solid tessellates to its own corners, so the two agree
+    // outright here; on a curved one the mesh box is inside the solid's by the
+    // tessellation's chordal error, which is what the doc comment claims and
+    // what makes this the cheap answer rather than the same answer.
+    assert!((cheap.min - exact.min).length() < 1.0e-6, "{cheap:?}");
+    assert!((cheap.max - exact.max).length() < 1.0e-6, "{cheap:?}");
+}
+
+#[test]
+fn the_tessellations_box_refuses_a_group_rather_than_inventing_one() {
+    let mut d = doc();
+    let group = d.add_group("Assembly");
+    assert!(d.mesh_bounds(group).is_err());
+}

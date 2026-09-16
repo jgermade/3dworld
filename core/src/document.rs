@@ -1233,6 +1233,30 @@ impl<K: GeometryKernel> Document<K> {
             .fold(Aabb::EMPTY, |acc, b| acc.union(&b))
     }
 
+    /// The box around a body's *tessellation*: the cheap answer, for anything
+    /// that asks every frame.
+    ///
+    /// [`Document::bounds`] asks the kernel, and `TruckKernel::bounds`
+    /// tessellates the solid again at a finer sag than a viewport ever needs —
+    /// measured at 2.4 seconds a call on the 6,300-triangle solid the demo
+    /// builds. A manipulator that places itself on the selection asked for it
+    /// once a frame, which is what took the app's smoke test past its
+    /// three-minute limit. The mesh is already cached, because the renderer
+    /// needs it, so this is a walk over vertices and is exact to within the
+    /// tessellation's own chordal error.
+    ///
+    /// # Errors
+    /// The same as [`Document::mesh`]: an unknown node, a group, or a backend
+    /// that could not tessellate.
+    pub fn mesh_bounds(&mut self, id: NodeId) -> Result<Aabb> {
+        let mesh = self.mesh(id)?;
+        let mut box_ = Aabb::EMPTY;
+        for p in &mesh.positions {
+            box_.expand(Vec3::new(f64::from(p[0]), f64::from(p[1]), f64::from(p[2])));
+        }
+        Ok(box_)
+    }
+
     /// Tessellates on first ask and caches by body.
     pub fn mesh(&mut self, id: NodeId) -> Result<&Mesh> {
         let body = self.body_of(id)?;
