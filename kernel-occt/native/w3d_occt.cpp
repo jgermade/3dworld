@@ -9,6 +9,7 @@
 
 #include "w3d_occt.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <mutex>
@@ -352,6 +353,96 @@ int32_t w3d_occt_chamfer(W3dOcctContext *ctx, uint32_t body, double distance, ui
   });
 }
 
+namespace {
+
+/* The edges a per-edge blend was asked for, resolved against the shape's own
+ * edge map — the numbering `w3d_occt_tessellate` reports in `edge_of_line`.
+ *
+ * Deduplicated, because a caller that mapped picked wireframe segments to edges
+ * will name one edge once per segment, and `BRepFilletAPI::Add` on an edge it
+ * already holds is not something to find out about from OCCT. Sorted so that the
+ * blend is built in the shape's edge order rather than the order the user
+ * happened to click, which keeps the same selection giving the same solid. */
+int32_t resolve_edges(const TopoDS_Shape &shape, const uint32_t *edges, uint32_t edge_count,
+                      std::vector<TopoDS_Edge> &out) {
+  if (edge_count == 0 || edges == nullptr) {
+    return W3D_OCCT_ERR_DEGENERATE;
+  }
+  TopTools_IndexedMapOfShape edge_map;
+  TopExp::MapShapes(shape, TopAbs_EDGE, edge_map);
+  const uint32_t extent = static_cast<uint32_t>(edge_map.Extent());
+  std::vector<uint32_t> wanted(edges, edges + edge_count);
+  std::sort(wanted.begin(), wanted.end());
+  wanted.erase(std::unique(wanted.begin(), wanted.end()), wanted.end());
+  for (uint32_t id : wanted) {
+    if (id >= extent) {
+      return W3D_OCCT_ERR_DEGENERATE;
+    }
+    out.push_back(TopoDS::Edge(edge_map(static_cast<int>(id) + 1)));
+  }
+  return W3D_OCCT_OK;
+}
+
+} // namespace
+
+int32_t w3d_occt_fillet_edges(W3dOcctContext *ctx, uint32_t body, const uint32_t *edges,
+                              uint32_t edge_count, double radius, uint32_t *out) {
+  if (radius <= 0.0) {
+    return W3D_OCCT_ERR_DEGENERATE;
+  }
+  const TopoDS_Shape *s = ctx->find(body);
+  if (!s) {
+    return W3D_OCCT_ERR_UNKNOWN_BODY;
+  }
+  return guarded([&] {
+    std::vector<TopoDS_Edge> chosen;
+    const int32_t resolved = resolve_edges(*s, edges, edge_count, chosen);
+    if (resolved != W3D_OCCT_OK) {
+      return resolved;
+    }
+    BRepFilletAPI_MakeFillet maker(*s);
+    for (const TopoDS_Edge &edge : chosen) {
+      maker.Add(radius, edge);
+    }
+    maker.Build();
+    if (!maker.IsDone()) {
+      return fail("fillet operation failed: OpenCASCADE could not construct blend surfaces "
+                  "for the edges named");
+    }
+    *out = ctx->store(maker.Shape());
+    return W3D_OCCT_OK;
+  });
+}
+
+int32_t w3d_occt_chamfer_edges(W3dOcctContext *ctx, uint32_t body, const uint32_t *edges,
+                               uint32_t edge_count, double distance, uint32_t *out) {
+  if (distance <= 0.0) {
+    return W3D_OCCT_ERR_DEGENERATE;
+  }
+  const TopoDS_Shape *s = ctx->find(body);
+  if (!s) {
+    return W3D_OCCT_ERR_UNKNOWN_BODY;
+  }
+  return guarded([&] {
+    std::vector<TopoDS_Edge> chosen;
+    const int32_t resolved = resolve_edges(*s, edges, edge_count, chosen);
+    if (resolved != W3D_OCCT_OK) {
+      return resolved;
+    }
+    BRepFilletAPI_MakeChamfer maker(*s);
+    for (const TopoDS_Edge &edge : chosen) {
+      maker.Add(distance, edge);
+    }
+    maker.Build();
+    if (!maker.IsDone()) {
+      return fail("chamfer operation failed: OpenCASCADE could not construct bevel surfaces "
+                  "for the edges named");
+    }
+    *out = ctx->store(maker.Shape());
+    return W3D_OCCT_OK;
+  });
+}
+
 int32_t w3d_occt_shell(W3dOcctContext *ctx, uint32_t body, uint32_t face_id, double thickness, uint32_t *out) {
   if (thickness <= 0.0) {
     return W3D_OCCT_ERR_DEGENERATE;
@@ -599,6 +690,7 @@ struct MeshBuffers {
   std::vector<uint32_t> face_of_triangle;
   std::vector<float> line_positions;
   std::vector<uint32_t> line_indices;
+  std::vector<uint32_t> edge_of_line;
 };
 
 } // namespace
@@ -711,6 +803,7 @@ int32_t w3d_occt_tessellate(W3dOcctContext *ctx, uint32_t body, double sag,
         for (int i = 0; i < nodes.Length() - 1; ++i) {
           buf->line_indices.push_back(base + i);
           buf->line_indices.push_back(base + i + 1);
+          buf->edge_of_line.push_back(static_cast<uint32_t>(e - 1));
         }
       } else {
         Handle(Poly_Triangulation) tri;
@@ -730,6 +823,7 @@ int32_t w3d_occt_tessellate(W3dOcctContext *ctx, uint32_t body, double sag,
           for (int i = 0; i < nodes.Length() - 1; ++i) {
             buf->line_indices.push_back(base + i);
             buf->line_indices.push_back(base + i + 1);
+            buf->edge_of_line.push_back(static_cast<uint32_t>(e - 1));
           }
         }
       }
@@ -741,6 +835,7 @@ int32_t w3d_occt_tessellate(W3dOcctContext *ctx, uint32_t body, double sag,
     out->face_of_triangle = buf->face_of_triangle.data();
     out->line_positions = buf->line_positions.data();
     out->line_indices = buf->line_indices.data();
+    out->edge_of_line = buf->edge_of_line.data();
     out->vertex_count = static_cast<uint32_t>(buf->positions.size() / 3);
     out->triangle_count = static_cast<uint32_t>(buf->face_of_triangle.size());
     out->line_vertex_count = static_cast<uint32_t>(buf->line_positions.size() / 3);

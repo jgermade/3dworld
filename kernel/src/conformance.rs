@@ -423,6 +423,60 @@ pub fn run<K: GeometryKernel>(k: &mut K, tol: Tolerance, quality: Quality) -> Re
 
     check!(
         checks,
+        "an edge id, where a backend reports one, names an edge of the body",
+        {
+            // `edge_of_line` is optional — a backend may decline to say — but a
+            // *partly* filled one is not an option, because a caller that has to
+            // test every lookup will stop testing. So: empty, or one entry per
+            // segment, and every entry an edge this body has.
+            for (what, body) in [
+                ("box", k.create_box(Vec3::new(2.0, 3.0, 4.0))),
+                ("cylinder", k.create_cylinder(1.0, 3.0)),
+            ] {
+                let body = body.map_err(|e| e.to_string())?;
+                let mesh = k.tessellate(body, quality).map_err(|e| e.to_string())?;
+                if mesh.edge_of_line.is_empty() {
+                    continue;
+                }
+                require(
+                    mesh.edge_of_line.len() == mesh.line_count(),
+                    format!(
+                        "on the {what}, edge_of_line has {} entries for {} segments",
+                        mesh.edge_of_line.len(),
+                        mesh.line_count()
+                    ),
+                )?;
+                let highest = mesh.edge_of_line.iter().copied().max().unwrap_or(0);
+                require(
+                    highest != u32::MAX,
+                    format!("on the {what}, a segment reports no edge while others do"),
+                )?;
+
+                // Every id is an edge this body has. Deliberately *not* also
+                // "and every edge has a segment": an edge can be degenerate, or
+                // carry no polyline, and contribute nothing to a wireframe — so
+                // a gap in the ids used is a conforming backend describing its
+                // own solid, and a check that forbade one would fail correct
+                // code. What must hold is that no id points past the end.
+                let edges = k.topology(body).map_err(|e| e.to_string())?.edges;
+                require(
+                    highest < edges,
+                    format!("on the {what}, a segment names edge {highest} of a body with {edges}"),
+                )?;
+
+                // And the accessor agrees with the field, which is the only
+                // form in which a caller ever reads it.
+                require(
+                    mesh.edge_of_line(0).is_some(),
+                    format!("on the {what}, edge_of_line is full but the accessor declines it"),
+                )?;
+            }
+            Ok(())
+        }
+    );
+
+    check!(
+        checks,
         "a face id names one connected region of the surface",
         {
             // Contract, not geometry: `face_of_triangle` is what a selection, an
@@ -561,6 +615,68 @@ pub fn run<K: GeometryKernel>(k: &mut K, tol: Tolerance, quality: Quality) -> Re
                 (f, c) => Err(format!(
                     "one of the two edge operations is offered and the other is not: \
                      fillet {f:?}, chamfer {c:?}"
+                )),
+            }
+        }
+    );
+
+    check!(
+        checks,
+        "a per-edge blend names edges, refuses an empty selection and an id no edge has",
+        {
+            let b = k
+                .create_box(Vec3::new(10.0, 10.0, 10.0))
+                .map_err(|e| e.to_string())?;
+
+            // The empty case is the one worth a check of its own. "Blend the
+            // edges I selected" with an empty selection must not mean "blend
+            // all of them": that reading is a wrong answer a user sees as a
+            // ruined part, and it is the reading the whole-solid `fillet` makes
+            // unavoidable if this method does not exist.
+            match k.fillet_edges(b, &[], 1.0) {
+                Err(KernelError::Degenerate(_)) | Err(KernelError::Unsupported(_)) => Ok(()),
+                other => Err(format!("an empty edge selection returned {other:?}")),
+            }?;
+            match k.chamfer_edges(b, &[], 1.0) {
+                Err(KernelError::Degenerate(_)) | Err(KernelError::Unsupported(_)) => Ok(()),
+                other => Err(format!("an empty edge selection returned {other:?}")),
+            }?;
+
+            // An id past the end is a bad argument. `u32::MAX` is the id a
+            // caller gets from a mesh whose backend does not say which edge a
+            // line came from, so it is the one that will actually arrive.
+            match k.fillet_edges(b, &[u32::MAX], 1.0) {
+                Err(KernelError::Degenerate(_)) | Err(KernelError::Unsupported(_)) => Ok(()),
+                other => Err(format!("an edge id no edge has returned {other:?}")),
+            }?;
+
+            require(
+                k.fillet_edges(b, &[0], 0.0).is_err(),
+                "zero radius per-edge fillet accepted",
+            )?;
+
+            // Declinable with the whole-solid pair, and only with it. A build
+            // that offers one form and not the other leaves a user able to
+            // round everything and not one edge, which is the bug this work
+            // exists to remove rather than a limitation to live with.
+            let whole = k.fillet(b, 1.0);
+            match (k.fillet_edges(b, &[0], 1.0), k.chamfer_edges(b, &[0], 1.0)) {
+                (Ok(f), Ok(c)) => {
+                    require(f != b, "per-edge fillet returned the operand's handle")?;
+                    require(c != b, "per-edge chamfer returned the operand's handle")?;
+                    require(
+                        whole.is_ok(),
+                        "a backend blends named edges but declines the whole solid".to_string(),
+                    )
+                }
+                (Err(KernelError::Unsupported(_)), Err(KernelError::Unsupported(_))) => require(
+                    matches!(whole, Err(KernelError::Unsupported(_))),
+                    "a backend declines a per-edge blend but offers the whole-solid one"
+                        .to_string(),
+                ),
+                (f, c) => Err(format!(
+                    "one per-edge blend is offered and the other is not: \
+                     fillet_edges {f:?}, chamfer_edges {c:?}"
                 )),
             }
         }

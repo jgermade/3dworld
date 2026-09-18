@@ -373,6 +373,22 @@ impl GeometryKernel for Assembling {
     fn chamfer(&mut self, body: Body, distance: f64) -> w3d_core::kernel::Result<Body> {
         self.inner.chamfer(body, distance)
     }
+    fn fillet_edges(
+        &mut self,
+        body: Body,
+        edges: &[u32],
+        radius: f64,
+    ) -> w3d_core::kernel::Result<Body> {
+        self.inner.fillet_edges(body, edges, radius)
+    }
+    fn chamfer_edges(
+        &mut self,
+        body: Body,
+        edges: &[u32],
+        distance: f64,
+    ) -> w3d_core::kernel::Result<Body> {
+        self.inner.chamfer_edges(body, edges, distance)
+    }
     fn extrude(&mut self, profile: &Profile, distance: f64) -> w3d_core::kernel::Result<Body> {
         self.inner.extrude(profile, distance)
     }

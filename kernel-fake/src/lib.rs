@@ -204,6 +204,23 @@ impl FakeKernel {
             .and_then(Option::as_ref)
             .ok_or(KernelError::UnknownBody(body))
     }
+
+    /// The argument half of a per-edge blend, which is the same on every
+    /// backend: an empty selection and an id no edge has are both bad arguments.
+    fn check_edge_ids(&self, body: Body, edges: &[u32]) -> Result<()> {
+        if edges.is_empty() {
+            return Err(KernelError::Degenerate(
+                "no edges were named, and a per-edge blend does not mean all of them",
+            ));
+        }
+        let count = self.topology(body)?.edges;
+        if edges.iter().any(|e| *e >= count) {
+            return Err(KernelError::Degenerate(
+                "an edge id is not an edge of this body",
+            ));
+        }
+        Ok(())
+    }
 }
 
 impl GeometryKernel for FakeKernel {
@@ -294,6 +311,19 @@ impl GeometryKernel for FakeKernel {
         }
         let shape = self.get(body)?.clone();
         Ok(self.insert(shape))
+    }
+
+    /// Bookkeeping, like `fillet`: the ids are checked against the edge count
+    /// this backend reports, so a caller passing nonsense is told here rather
+    /// than on the backend that does geometry.
+    fn fillet_edges(&mut self, body: Body, edges: &[u32], radius: f64) -> Result<Body> {
+        self.check_edge_ids(body, edges)?;
+        self.fillet(body, radius)
+    }
+
+    fn chamfer_edges(&mut self, body: Body, edges: &[u32], distance: f64) -> Result<Body> {
+        self.check_edge_ids(body, edges)?;
+        self.chamfer(body, distance)
     }
 
     /// A box of the profile's extent, standing on the plane — which is what the

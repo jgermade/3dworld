@@ -755,6 +755,36 @@ impl<K: GeometryKernel> Document<K> {
         Ok(())
     }
 
+    /// Rounds the named edges of one node's solid, and leaves the rest sharp.
+    ///
+    /// The undo step is labelled apart from the whole-solid `Fillet`, because a
+    /// user who has just rounded one corner and one who has just rounded every
+    /// corner want to read different words in the history.
+    pub fn fillet_edges(&mut self, id: NodeId, edges: &[u32], radius: f64) -> Result<()> {
+        let before = self.node(id)?.clone();
+        let body = self.kernel.fillet_edges(before.body, edges, radius)?;
+        let body = self.track(body);
+        let after = Node {
+            body,
+            ..before.clone()
+        };
+        self.replace(id, "Fillet edge", before, after);
+        Ok(())
+    }
+
+    /// Bevels the named edges of one node's solid, and leaves the rest sharp.
+    pub fn chamfer_edges(&mut self, id: NodeId, edges: &[u32], distance: f64) -> Result<()> {
+        let before = self.node(id)?.clone();
+        let body = self.kernel.chamfer_edges(before.body, edges, distance)?;
+        let body = self.track(body);
+        let after = Node {
+            body,
+            ..before.clone()
+        };
+        self.replace(id, "Chamfer edge", before, after);
+        Ok(())
+    }
+
     pub fn shell(&mut self, id: NodeId, face_id: u32, thickness: f64) -> Result<()> {
         let before = self.node(id)?.clone();
         let body = self.kernel.shell(before.body, face_id, thickness)?;

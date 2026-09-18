@@ -322,5 +322,8 @@ fn build_edge_tube_mesh(p0: [f32; 3], p1: [f32; 3], radius: f32) -> Mesh {
         face_of_triangle,
         line_positions: vec![p0, p1],
         line_indices: vec![0, 1],
+        // Decoration, not a solid: this line is the arrow's own shaft and
+        // belongs to no body's topology, so there is no edge for it to name.
+        edge_of_line: Vec::new(),
     }
 }

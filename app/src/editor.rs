@@ -37,6 +37,10 @@ pub enum Command {
     FilletRadius(f64),
     Chamfer,
     ChamferDistance(f64),
+    /// Round the *selected edge*, and leave the rest of the solid sharp.
+    FilletSelectedEdge(f64),
+    /// Bevel the *selected edge*, and leave the rest of the solid sharp.
+    ChamferSelectedEdge(f64),
     PushPullFace(f64),
     Shell(f64),
     MeasureDistance,
@@ -874,6 +878,8 @@ impl<K: GeometryKernel> Editor<K> {
             Command::FilletRadius(r) => self.fillet(r),
             Command::Chamfer => self.chamfer(1.0),
             Command::ChamferDistance(d) => self.chamfer(d),
+            Command::FilletSelectedEdge(r) => self.blend_selected_edge(r, true),
+            Command::ChamferSelectedEdge(d) => self.blend_selected_edge(d, false),
             Command::PushPullFace(d) => self.push_pull_face(d),
             Command::Shell(t) => self.shell(t),
             Command::MeasureDistance => self.measure_distance(),
@@ -1099,6 +1105,64 @@ impl<K: GeometryKernel> Editor<K> {
             Err(why.unwrap_or_else(|| String::from("fillet failed on selected objects")))
         } else {
             Ok(format!("filleted {count} object(s)"))
+        }
+    }
+
+    /// Blends the one edge the user picked.
+    ///
+    /// The translation this does is the whole point of the work it belongs to.
+    /// What a pick yields is a *wireframe segment* — `selected_edge`'s `u32` is
+    /// an index into the mesh's line list, which is a tessellation's idea of an
+    /// edge and changes with the sag — and what a kernel blends is a
+    /// topological edge. `Mesh::edge_of_line` is the map between them, and
+    /// where a backend does not draw one the honest answer is to refuse:
+    /// blending "whatever edge that segment might be" is how a user loses a
+    /// corner they did not choose.
+    fn blend_selected_edge(&mut self, size: f64, round: bool) -> Result<String, String> {
+        let verb = if round { "redondear" } else { "chaflanar" };
+        let Some((id, segment, _, _)) = self.selected_edge else {
+            return Err(format!("{verb} necesita una arista seleccionada"));
+        };
+        if size <= 0.0 {
+            return Err(format!("{verb} necesita un tamaño positivo"));
+        }
+
+        let edge = {
+            let mesh = self
+                .doc
+                .mesh(id)
+                .map_err(|e| format!("no se pudo mallar el sólido: {e}"))?;
+            mesh.edge_of_line(segment as usize)
+        };
+        let Some(edge) = edge else {
+            return Err(String::from(
+                "este motor no dice a qué arista pertenece un segmento,                  así que no puede redondear una sola",
+            ));
+        };
+
+        let label = if round { "Fillet edge" } else { "Chamfer edge" };
+        self.doc.begin_transaction(label);
+        let outcome = if round {
+            self.doc.fillet_edges(id, &[edge], size)
+        } else {
+            self.doc.chamfer_edges(id, &[edge], size)
+        };
+        self.doc.commit_transaction();
+
+        match outcome {
+            // A blend rebuilds the solid and renumbers its edges, so the
+            // segment that was picked names something else now — the same
+            // hazard a pull has with a face id, and answered the same way:
+            // drop the selection rather than keep one that has moved.
+            Ok(()) => {
+                self.selected_edge = None;
+                Ok(format!(
+                    "{} arista #{edge} de {} a {size:.2} mm",
+                    if round { "redondeada" } else { "chaflanada" },
+                    self.name_of(id)
+                ))
+            }
+            Err(e) => Err(e.to_string()),
         }
     }
 
@@ -2058,6 +2122,39 @@ mod tests {
         e.run(Command::AddBox);
         e.picked(hit(NOTHING - 1), false);
         assert!(e.status().contains("no longer there"), "{}", e.status());
+    }
+
+    #[test]
+    fn a_per_edge_blend_needs_an_edge_and_says_so() {
+        // The command reaches for `selected_edge`, so with nothing picked it
+        // must refuse rather than fall back to the whole solid — which is the
+        // behaviour the per-edge path exists to replace.
+        let mut e = editor();
+        e.run(Command::AddBox);
+        let before = e.document().len();
+        e.run(Command::FilletSelectedEdge(1.0));
+        assert!(
+            e.status().contains("arista"),
+            "the refusal should name what is missing, got {}",
+            e.status()
+        );
+        assert_eq!(
+            e.document().len(),
+            before,
+            "a refused blend changed the document"
+        );
+    }
+
+    #[test]
+    fn a_per_edge_blend_refuses_a_non_positive_size() {
+        let mut e = editor();
+        e.run(Command::AddBox);
+        e.run(Command::ChamferSelectedEdge(0.0));
+        assert!(
+            e.status().contains("positivo") || e.status().contains("arista"),
+            "got {}",
+            e.status()
+        );
     }
 
     #[test]

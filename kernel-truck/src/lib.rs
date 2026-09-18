@@ -59,6 +59,40 @@ impl TruckKernel {
         self.solids.get(&body).ok_or(KernelError::UnknownBody(body))
     }
 
+    /// The distinct edges of a solid, counted the way [`number_edges`] numbers
+    /// them — so an id this accepts is an id a mesh of the same body could have
+    /// reported, which is what makes the check worth making on a backend that
+    /// then declines the blend anyway.
+    fn distinct_edges(&self, body: Body) -> Result<u32> {
+        let solid = self.get(body)?;
+        let mut faces: Vec<([f64; 7], &Face)> = solid
+            .boundaries()
+            .iter()
+            .flat_map(|shell| shell.face_iter())
+            .map(|face| (face_key(face), face))
+            .collect();
+        faces.sort_by(|a, b| key_order(&a.0, &b.0));
+        Ok(number_edges(&faces).len() as u32)
+    }
+
+    /// The argument half of a per-edge blend. Checked before the decline, so
+    /// that "this build cannot blend" and "that is not an edge of this body"
+    /// remain two different answers to two different mistakes.
+    fn check_edge_ids(&self, body: Body, edges: &[u32]) -> Result<()> {
+        if edges.is_empty() {
+            return Err(KernelError::Degenerate(
+                "no edges were named, and a per-edge blend does not mean all of them",
+            ));
+        }
+        let count = self.distinct_edges(body)?;
+        if edges.iter().any(|e| *e >= count) {
+            return Err(KernelError::Degenerate(
+                "an edge id is not an edge of this body",
+            ));
+        }
+        Ok(())
+    }
+
     /// The tolerance a boolean is actually run at, which is not the document's.
     ///
     /// `truck-shapeops` uses this number twice: to decide whether two points
@@ -142,6 +176,31 @@ fn key_order(a: &[f64; 7], b: &[f64; 7]) -> std::cmp::Ordering {
         .unwrap_or(std::cmp::Ordering::Equal)
 }
 
+/// A solid's distinct edges, numbered — the id space `Mesh::edge_of_line` and
+/// the per-edge blends both speak.
+///
+/// It is not [`Topology::edges`], and the difference is not a rounding: that
+/// counts each edge *once per face that uses it*, so a cube reports 24 where it
+/// has 12. A blend names an edge, not a face's use of one, so the numbering here
+/// is over distinct edges and a shared edge gets one id.
+type EdgeIds = HashMap<EdgeID, u32>;
+
+/// Numbered in the order the *sorted* faces walk them, which is the same
+/// determinism argument the sort itself exists for: an id that depended on which
+/// thread finished first would be an id a saved selection could not survive.
+fn number_edges(faces: &[([f64; 7], &Face)]) -> EdgeIds {
+    let mut ids = EdgeIds::new();
+    for (_, face) in faces {
+        for wire in face.absolute_boundaries() {
+            for edge in wire.edge_iter() {
+                let next = ids.len() as u32;
+                ids.entry(edge.id()).or_insert(next);
+            }
+        }
+    }
+    ids
+}
+
 /// One face's triangles, in a mesh of its own with indices from zero.
 ///
 /// Standalone rather than appended into a shared `Mesh`, and that is the whole
@@ -155,7 +214,7 @@ fn key_order(a: &[f64; 7], b: &[f64; 7]) -> std::cmp::Ordering {
 /// bounded by an intersection curve — which is every face a boolean makes —
 /// came out whole. `truck-meshalgo`'s triangulation reads the loops, so this is
 /// the boundary's mesh rather than the surface's.
-fn mesh_face(face: &Face, sag: f64, face_idx: u32) -> Mesh {
+fn mesh_face(face: &Face, sag: f64, face_idx: u32, edge_ids: &EdgeIds) -> Mesh {
     let mut out = Mesh::default();
     let shell: Shell = vec![face.clone()].into();
     let meshed = shell.triangulation(sag);
@@ -164,18 +223,30 @@ fn mesh_face(face: &Face, sag: f64, face_idx: u32) -> Mesh {
     // polylines below *are* what divided the boundary curves, so the wireframe
     // and the surface meet on shared points rather than on two approximations
     // of one curve that disagree by the sag.
+    //
+    // The *identity* of each edge comes from the untriangulated face zipped
+    // alongside, not from the meshed one: `triangulation` rebuilds the wires
+    // with polylines for curves, and an id read off the copy is an id in a
+    // numbering nothing else shares. The two walks have the same shape, which
+    // is what makes the zip sound.
     for meshed_face in meshed.face_iter() {
-        for wire in meshed_face.absolute_boundaries() {
-            for edge in wire.edge_iter() {
+        for (wire, source_wire) in meshed_face
+            .absolute_boundaries()
+            .iter()
+            .zip(face.absolute_boundaries().iter())
+        {
+            for (edge, source_edge) in wire.edge_iter().zip(source_wire.edge_iter()) {
                 let polyline = edge.curve();
                 let base = out.line_positions.len() as u32;
                 for p in polyline.iter() {
                     out.line_positions
                         .push([p.x as f32, p.y as f32, p.z as f32]);
                 }
+                let edge_id = edge_ids.get(&source_edge.id()).copied().unwrap_or(u32::MAX);
                 for i in 1..polyline.len() as u32 {
                     out.line_indices.push(base + i - 1);
                     out.line_indices.push(base + i);
+                    out.edge_of_line.push(edge_id);
                 }
             }
         }
@@ -278,6 +349,9 @@ fn append_face(out: &mut Mesh, face: Mesh) {
     out.line_positions.extend(face.line_positions);
     out.line_indices
         .extend(face.line_indices.into_iter().map(|i| i + line_base));
+    // Edge ids are the solid's, not the face's, so they are appended as they
+    // are — the offset above is for vertex indices only.
+    out.edge_of_line.extend(face.edge_of_line);
 }
 
 /// The face a [`Profile`] describes, on the XY plane at z = 0.
@@ -650,6 +724,20 @@ impl GeometryKernel for TruckKernel {
         ))
     }
 
+    /// Declined with `fillet`, and for the same missing surface. The arguments
+    /// are still checked first: a caller debugging its edge ids should get the
+    /// same answer here as on the backend that can blend, so that "this build
+    /// cannot" and "that id is not an edge" stay two different sentences.
+    fn fillet_edges(&mut self, body: Body, edges: &[u32], radius: f64) -> Result<Body> {
+        self.check_edge_ids(body, edges)?;
+        self.fillet(body, radius)
+    }
+
+    fn chamfer_edges(&mut self, body: Body, edges: &[u32], distance: f64) -> Result<Body> {
+        self.check_edge_ids(body, edges)?;
+        self.chamfer(body, distance)
+    }
+
     /// The profile, swept along +Z — which is what the trait says and what this
     /// did not do. It called `create_box` or `create_cylinder` with the
     /// profile's two numbers, so a polygon became a 20 x 20 slab and every
@@ -867,6 +955,10 @@ impl GeometryKernel for TruckKernel {
         // rather than trusted.
         let sag = quality.sag.max(1.0e-5);
 
+        // Built once, on this thread, from the sorted faces — so every face's
+        // mesh reports the same id for a shared edge whichever thread meshes it.
+        let edge_ids = number_edges(&faces);
+
         // `collect` on an indexed parallel iterator yields the sorted order,
         // whatever order the work finished in. The two arms differ in where
         // the face is meshed and in nothing else.
@@ -874,13 +966,13 @@ impl GeometryKernel for TruckKernel {
         let meshed: Vec<Mesh> = faces
             .par_iter()
             .enumerate()
-            .map(|(i, (_, face))| mesh_face(face, sag, i as u32))
+            .map(|(i, (_, face))| mesh_face(face, sag, i as u32, &edge_ids))
             .collect();
         #[cfg(not(feature = "parallel"))]
         let meshed: Vec<Mesh> = faces
             .iter()
             .enumerate()
-            .map(|(i, (_, face))| mesh_face(face, sag, i as u32))
+            .map(|(i, (_, face))| mesh_face(face, sag, i as u32, &edge_ids))
             .collect();
 
         let mut out_mesh = Mesh::default();

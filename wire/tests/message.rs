@@ -28,6 +28,7 @@ fn body(faces: &[usize]) -> Mesh {
         face_of_triangle: Vec::new(),
         line_positions: Vec::new(),
         line_indices: Vec::new(),
+        edge_of_line: Vec::new(),
     };
     for (f, &triangles) in faces.iter().enumerate() {
         let base = mesh.positions.len() as u32;
@@ -65,6 +66,7 @@ fn shares_a_vertex() -> Mesh {
         face_of_triangle: vec![3, 9],
         line_positions: Vec::new(),
         line_indices: Vec::new(),
+        edge_of_line: Vec::new(),
     }
 }
 
@@ -79,6 +81,7 @@ fn two_fans_sharing_a_vertex() -> Mesh {
         face_of_triangle: Vec::new(),
         line_positions: Vec::new(),
         line_indices: Vec::new(),
+        edge_of_line: Vec::new(),
     };
     // Face 3: hub 0, rim 1..=7.
     for t in 0..6u32 {
@@ -793,6 +796,7 @@ fn interleaved_faces_are_regrouped_deterministically() {
         face_of_triangle: vec![5, 6, 5, 6],
         line_positions: Vec::new(),
         line_indices: Vec::new(),
+        edge_of_line: Vec::new(),
     };
     let chunks = split_by_face(&mesh, 2, Addressing::whole(0)).unwrap();
     let faces: Vec<Vec<u32>> = chunks
