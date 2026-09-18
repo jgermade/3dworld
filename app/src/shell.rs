@@ -12,7 +12,7 @@
 
 use std::sync::Arc;
 
-use w3d_core::kernel::{BooleanOp, GeometryKernel};
+use w3d_core::kernel::{BooleanOp, Capability, GeometryKernel};
 use w3d_render::{Gpu, PickPending, Renderer, Viewport};
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
@@ -871,6 +871,43 @@ impl<K: GeometryKernel + Default> Live<K> {
 
 /// The chrome. Redesigned with an Office Ribbon UI style layout: top tabbed ribbon,
 /// left outliner tree, and bottom status bar.
+/// A Ribbon button that the build behind it can actually serve.
+///
+/// Returns whether it was clicked, so it drops into the `if ui.button(..)`
+/// shape the rest of this file is written in.
+///
+/// Two reasons a control can be unavailable, and they are kept apart because
+/// they mean opposite things to a user. `enabled` is about the *document*:
+/// nothing is selected, no face is picked — press something else and the
+/// button comes back. A missing [`Capability`] is about the *build*: it will
+/// not come back today, and the only useful next step is a different build. So
+/// the capability is checked second and its sentence wins, because "select an
+/// object first" is actively misleading advice for an operation that is not
+/// there.
+///
+/// The sentence itself is [`Capability::absence`], which lives beside the enum
+/// rather than here: the same words belong in a status bar, a log and a
+/// tooltip, and a UI that writes its own wording is a UI where the three drift
+/// apart.
+fn capable<K: GeometryKernel + Default>(
+    ui: &mut egui::Ui,
+    editor: &Editor<K>,
+    cap: Capability,
+    enabled: bool,
+    label: &str,
+) -> bool {
+    let supported = editor.supports(cap);
+    let button = ui.add_enabled(enabled && supported, egui::Button::new(label));
+    if supported {
+        button.clicked()
+    } else {
+        // Hover text on a disabled widget, so the answer is one hover away
+        // rather than one press and a glance at the status bar.
+        button.on_disabled_hover_text(cap.absence());
+        false
+    }
+}
+
 fn chrome<K: GeometryKernel + Default>(
     root: &mut egui::Ui,
     editor: &mut Editor<K>,
@@ -944,9 +981,21 @@ fn chrome<K: GeometryKernel + Default>(
                         if ui.button("Revolve").clicked() {
                             execute_command(editor, Command::AddRevolve);
                         }
-                        if ui.button("Sweep").clicked() {
+                        // Gated, because this button's path has three points
+                        // and so bends. A backend that sweeps only in a
+                        // straight line declines it — which is why the
+                        // capability is named for the bend and not for the
+                        // sweep.
+                        if capable(ui, editor, Capability::BentSweep, true, "Sweep") {
                             execute_command(editor, Command::AddSweep);
                         }
+                        // **Not** gated, and that is the same distinction read
+                        // the other way: this button lofts between *two*
+                        // profiles, which every backend does.
+                        // `MultiSectionLoft` is about a third section, so
+                        // guarding this with it would grey out a control that
+                        // works — the failure mode a capability query is
+                        // supposed to remove, arriving by way of the query.
                         if ui.button("Loft").clicked() {
                             execute_command(editor, Command::AddLoft);
                         }
@@ -1000,28 +1049,29 @@ fn chrome<K: GeometryKernel + Default>(
                     ui.label("Features");
                     ui.horizontal(|ui| {
                         let face_selected = editor.selected_face().is_some();
-                        if ui
-                            .add_enabled(one_or_more, egui::Button::new("Fillet [R]"))
-                            .clicked()
-                        {
+                        // Three of these four were offered on every build until
+                        // 2026-09-18 and did nothing on the default one: the
+                        // browser and the desktop both run `truck`, which has
+                        // neither a rolling-ball surface nor an offset one, and
+                        // a user found that out by pressing the button and
+                        // reading the status bar. See register item 8.
+                        if capable(ui, editor, Capability::Blend, one_or_more, "Fillet [R]") {
                             execute_command(editor, Command::Fillet);
                         }
-                        if ui
-                            .add_enabled(one_or_more, egui::Button::new("Chamfer [C]"))
-                            .clicked()
-                        {
+                        if capable(ui, editor, Capability::Blend, one_or_more, "Chamfer [C]") {
                             execute_command(editor, Command::Chamfer);
                         }
+                        // No capability guards this one. Push/pull is built out
+                        // of an extrude and a boolean, which every backend has;
+                        // what it needs is a selected face, and that is a
+                        // property of the selection rather than of the build.
                         if ui
                             .add_enabled(face_selected, egui::Button::new("Push/Pull [P]"))
                             .clicked()
                         {
                             execute_command(editor, Command::PushPullFace(5.0));
                         }
-                        if ui
-                            .add_enabled(one_or_more, egui::Button::new("Shell [H]"))
-                            .clicked()
-                        {
+                        if capable(ui, editor, Capability::Shell, one_or_more, "Shell [H]") {
                             execute_command(editor, Command::Shell(1.5));
                         }
                     });
@@ -1136,10 +1186,10 @@ fn chrome<K: GeometryKernel + Default>(
                 ui.group(|ui| {
                     ui.label("CAD Interchange");
                     ui.horizontal(|ui| {
-                        if ui.button("Import STEP...").clicked() {
+                        if capable(ui, editor, Capability::StepImport, true, "Import STEP...") {
                             execute_command(editor, Command::ImportStep);
                         }
-                        if ui.button("Export STEP...").clicked() {
+                        if capable(ui, editor, Capability::StepExport, true, "Export STEP...") {
                             execute_command(editor, Command::ExportStep);
                         }
                     });
@@ -1534,7 +1584,16 @@ fn chrome<K: GeometryKernel + Default>(
     let mut handles: Vec<Candidate> = Vec::new();
     let eye = editor.camera().eye();
 
-    if let Some((node_id, _, p0, p1)) = editor.selected_edge() {
+    // The blend handles are drawn only where a blend can happen. A handle a
+    // user can grab, drag and read a radius off, that then reports the build
+    // has no rolling-ball surface, is worse than no handle: it costs the
+    // gesture before it gives the answer. Both capabilities, for the reason
+    // `Editor::blend_selected_edge` gives — the gesture needs a backend that
+    // blends a named edge and one that can name the edge under the cursor.
+    let can_blend_an_edge =
+        editor.supports(Capability::Blend) && editor.supports(Capability::EdgeIdentity);
+
+    if let (true, Some((node_id, _, p0, p1))) = (can_blend_an_edge, editor.selected_edge()) {
         let mid = w3d_core::kernel::Vec3::new(
             f64::from(p0[0] + p1[0]) * 0.5,
             f64::from(p0[1] + p1[1]) * 0.5,

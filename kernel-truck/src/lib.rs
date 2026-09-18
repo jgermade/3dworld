@@ -16,8 +16,8 @@ use truck_meshalgo::tessellation::{MeshableShape, MeshedShape};
 use truck_modeling::*;
 use truck_polymesh::PolygonMesh;
 use w3d_kernel::{
-    Aabb, Body, BooleanOp, GeometryKernel, Import, KernelError, Mat4, Mesh, Profile, Quality,
-    Result, SketchPlane, Tolerance, Topology, Vec3,
+    Aabb, Body, BooleanOp, Capability, GeometryKernel, Import, KernelError, Mat4, Mesh, Profile,
+    Quality, Result, SketchPlane, Tolerance, Topology, Vec3,
 };
 
 pub struct TruckKernel {
@@ -485,6 +485,41 @@ impl GeometryKernel for TruckKernel {
     /// [`TruckKernel::singular`] and the register.
     fn does_geometry(&self) -> bool {
         true
+    }
+
+    /// Four `false`s, and every one of them is a decline this backend already
+    /// makes in words — the query says the same thing before the user presses
+    /// the button rather than after.
+    ///
+    /// `Blend` is one answer for four methods because there is one missing
+    /// thing behind them: a rolling-ball surface, which `truck` has no builder
+    /// for. `Shell` wants an offset surface, and it has none of that either.
+    /// `BentSweep` and `MultiSectionLoft` are both really this backend's
+    /// boolean: following a polyline means unioning the segments, and a third
+    /// section means stitching two shells, and the coincident-face case both
+    /// are made of is the one it declines.
+    ///
+    /// **`EdgeIdentity` is the `true` in the list**, and it is the one worth
+    /// saying out loud: this backend cannot blend an edge and can still *name*
+    /// one. `number_edges` numbers the solid's distinct edges and `mesh_face`
+    /// reads the id off the untriangulated face, so a caller that only wants to
+    /// tell a user which edge they are hovering gets an answer here. A single
+    /// "can this do edges" bit would have had to choose, and either choice is
+    /// wrong about half of what this backend does.
+    ///
+    /// What is *not* here is the boolean. It declines a body with a pole, and
+    /// two boxes sharing a coplanar face, and that is a property of the
+    /// operands rather than of the build — see [`Capability`].
+    fn supports(&self, cap: Capability) -> bool {
+        match cap {
+            Capability::Blend
+            | Capability::Shell
+            | Capability::BentSweep
+            | Capability::MultiSectionLoft
+            | Capability::StepImport
+            | Capability::StepExport => false,
+            Capability::EdgeIdentity => true,
+        }
     }
 
     fn create_box(&mut self, size: Vec3) -> Result<Body> {

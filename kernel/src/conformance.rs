@@ -41,8 +41,8 @@
 //! kernel that cannot subtract one box from another is not a kernel.
 
 use crate::{
-    Aabb, Body, BooleanOp, GeometryKernel, KernelError, Mat4, Mesh, Profile, Quality, Tolerance,
-    Vec3,
+    Aabb, Body, BooleanOp, Capability, GeometryKernel, KernelError, Mat4, Mesh, Profile, Quality,
+    SketchPlane, Tolerance, Vec3,
 };
 
 pub struct Check {
@@ -1041,6 +1041,60 @@ pub fn run<K: GeometryKernel>(k: &mut K, tol: Tolerance, quality: Quality) -> Re
         }
     );
 
+    check!(
+        checks,
+        "what a backend says it can do is what it does, in both directions",
+        {
+            // The check that makes `supports` worth asking. A query nothing
+            // holds to the code is a second opinion about the backend kept in
+            // a different file, and it goes stale the first time an operation
+            // learns or forgets something — silently, because the only symptom
+            // is a button in the wrong state, and a button that is wrongly
+            // *disabled* is never reported as a bug by the user who needed it.
+            //
+            // Both directions, and the second one is the one that costs
+            // something: a `false` the backend then performs is as much a lie
+            // as a `true` it declines. Without it a backend passes by saying
+            // `false` to everything, which is exactly the migration a busy
+            // author would write.
+            //
+            // `Unsupported` alone is the contradiction. A probe answering
+            // `Degenerate` or `Failed` was *attempted* — the operation exists
+            // and did not like this input — and that is what `true` claimed.
+            // Reading any `Err` as a decline would fail a correct backend
+            // whose probe fixture happens to be hard for it.
+            for cap in Capability::ALL {
+                let before = k.supports(cap);
+                let declined = probe_declines(k, cap)?;
+                // A capability is a property of the build, so asking twice
+                // across an operation must not change the answer. A backend
+                // that lowered a flag after a failure would describe a state
+                // no caller can reason about and no UI can show.
+                require(
+                    k.supports(cap) == before,
+                    format!(
+                        "supports({cap}) changed from {before} to {} after being probed",
+                        !before
+                    ),
+                )?;
+                match (before, declined) {
+                    (true, true) => {
+                        return Err(format!(
+                            "the backend says it does {cap} and answered Unsupported when asked to"
+                        ));
+                    }
+                    (false, false) => {
+                        return Err(format!(
+                            "the backend says it does not do {cap} and then did it"
+                        ));
+                    }
+                    _ => {}
+                }
+            }
+            Ok(())
+        }
+    );
+
     if k.does_geometry() {
         geometry_checks(k, tol, quality, &mut checks);
     }
@@ -1049,6 +1103,121 @@ pub fn run<K: GeometryKernel>(k: &mut K, tol: Tolerance, quality: Quality) -> Re
         kernel: k.name(),
         checks,
         geometry: k.does_geometry(),
+    }
+}
+
+/// Ask a backend to *do* `cap`, and report only whether it declined.
+///
+/// `Ok(true)` means the operation answered [`KernelError::Unsupported`];
+/// `Ok(false)` means it did something else, which includes succeeding and
+/// includes failing on the merits. `Err` is reserved for the fixture itself
+/// falling over — a box that cannot be made is not a verdict about a
+/// capability, and reporting it as one would blame the wrong method.
+///
+/// **Each probe is the smallest call that can only be refused for the reason
+/// the capability names**, which is what makes the two directions of the check
+/// meaningful:
+///
+/// - The blend probe is one radius on one box, well inside its bounds, because
+///   a radius a solid cannot take is `Degenerate` and would read as "attempted"
+///   either way — true, and uninformative.
+/// - The sweep probe has **three** points and the loft probe **three**
+///   sections, since those are the counts the capabilities are named for. A
+///   two-point sweep is a different operation that `TruckKernel` performs, and
+///   probing with one would have it claim a capability it has not got.
+/// - The STEP import probe is deliberately handed prose. A backend that reads
+///   STEP answers `Failed` — it tried, and those are not STEP bytes — and one
+///   that does not answers `Unsupported`, so the two are told apart by the
+///   distinction the contract already draws rather than by a valid fixture
+///   this file would have to carry.
+/// - [`Capability::EdgeIdentity`] is not an operation, so "declined" is
+///   `edge_of_line` reporting `None`: the same answer a caller gets, through
+///   the same accessor, rather than an inspection of the vector's length.
+fn probe_declines<K: GeometryKernel>(
+    k: &mut K,
+    cap: Capability,
+) -> core::result::Result<bool, String> {
+    let unsupported = |r: &crate::Result<Body>| matches!(r, Err(KernelError::Unsupported(_)));
+    let b = k
+        .create_box(Vec3::splat(10.0))
+        .map_err(|e| format!("the probe's own box could not be built: {e}"))?;
+    match cap {
+        // All four, and not one of them standing for the rest: the contract
+        // binds them together, so a backend that declines three and performs
+        // the fourth is broken in a way a single probe would not see.
+        Capability::Blend => {
+            let r = [
+                k.fillet(b, 1.0),
+                k.chamfer(b, 1.0),
+                k.fillet_edges(b, &[0], 1.0),
+                k.chamfer_edges(b, &[0], 1.0),
+            ];
+            let declined = r.iter().filter(|x| unsupported(x)).count();
+            if declined != 0 && declined != 4 {
+                return Err(format!(
+                    "{declined} of the four blends answered Unsupported; \
+                     the contract binds them into one capability, so it must be 0 or 4: {r:?}"
+                ));
+            }
+            Ok(declined == 4)
+        }
+        // Face 0 exists on any box, so a refusal here is about hollowing
+        // rather than about the id.
+        Capability::Shell => Ok(unsupported(&k.shell(b, 0, 1.0))),
+        Capability::BentSweep => {
+            let path = [
+                Vec3::new(0.0, 0.0, 0.0),
+                Vec3::new(0.0, 0.0, 10.0),
+                Vec3::new(10.0, 0.0, 20.0),
+            ];
+            let profile = Profile::Circle { radius: 2.0 };
+            Ok(unsupported(&k.sweep(&profile, &path)))
+        }
+        Capability::MultiSectionLoft => {
+            let profiles = [
+                Profile::Circle { radius: 4.0 },
+                Profile::Circle { radius: 2.0 },
+                Profile::Circle { radius: 3.0 },
+            ];
+            let planes = [
+                SketchPlane {
+                    origin: Vec3::new(0.0, 0.0, 0.0),
+                    ..SketchPlane::default()
+                },
+                SketchPlane {
+                    origin: Vec3::new(0.0, 0.0, 5.0),
+                    ..SketchPlane::default()
+                },
+                SketchPlane {
+                    origin: Vec3::new(0.0, 0.0, 10.0),
+                    ..SketchPlane::default()
+                },
+            ];
+            Ok(matches!(
+                k.loft(&profiles, &planes),
+                Err(KernelError::Unsupported(_))
+            ))
+        }
+        Capability::StepExport => Ok(matches!(
+            k.export_step(&[b]),
+            Err(KernelError::Unsupported(_))
+        )),
+        Capability::StepImport => Ok(matches!(
+            k.import_step(NOT_STEP),
+            Err(KernelError::Unsupported(_))
+        )),
+        Capability::EdgeIdentity => {
+            let mesh = k
+                .tessellate(b, Quality::display_default())
+                .map_err(|e| format!("the probe's own box could not be tessellated: {e}"))?;
+            // A mesh with no wireframe at all cannot answer the question, and
+            // is a mesh defect that `check_mesh` and the edge-identity check
+            // report against the method that owns them.
+            if mesh.line_count() == 0 {
+                return Err("the probe's box tessellated to no wireframe".to_string());
+            }
+            Ok(mesh.edge_of_line(0).is_none())
+        }
     }
 }
 

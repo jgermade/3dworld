@@ -447,6 +447,133 @@ impl Mesh {
     }
 }
 
+/// What a *build* will never do, so a caller can ask before offering it.
+///
+/// [`GeometryKernel::does_geometry`] is one bit, and it answers the only
+/// question the conformance suite had: whether to weigh an answer or merely
+/// check its shape. A **button** asks a different question, and by 2026-09-18
+/// there were seven of them behind that one bit — a user pressing Shell on the
+/// browser build found out it was not there by reading the status bar, which
+/// is finding out by pressing.
+///
+/// # What this can and cannot answer
+///
+/// It answers *"this build never does X"*. It does **not** answer *"this build
+/// will do X to this solid"*, and the difference is not a gap to be closed
+/// later — it is the reason the status bar still has to report a decline.
+///
+/// `TruckKernel` runs a boolean, so no capability here is missing for it; it
+/// declines a boolean on a body with a pole, and declines two boxes that share
+/// a coplanar face, and both of those are *this operand, today*. A query that
+/// tried to cover them would have to be handed the operands, at which point it
+/// is the operation with the work removed — and a backend would have two code
+/// paths that must agree about what it can do, which is one more than can be
+/// kept true. So: a capability is a property of the build, answerable with no
+/// arguments, and stable for the life of the process.
+///
+/// Both halves are checked. `conformance` probes every capability on every
+/// backend and requires the answer and the behaviour to agree **in both
+/// directions**: a `false` that the operation then performs is as much a lie as
+/// a `true` that answers [`KernelError::Unsupported`]. Only `Unsupported`
+/// counts as the contradiction — a probe that comes back `Degenerate` or
+/// `Failed` was *attempted*, which is what `true` claimed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum Capability {
+    /// Rounding and bevelling an edge: [`GeometryKernel::fillet`],
+    /// [`GeometryKernel::chamfer`], [`GeometryKernel::fillet_edges`] and
+    /// [`GeometryKernel::chamfer_edges`].
+    ///
+    /// **One capability for four methods, because the contract already binds
+    /// them into one.** A backend answers `Unsupported` from all four or from
+    /// none; splitting the query would let a build claim two and decline two,
+    /// and describe a state the seam forbids.
+    Blend,
+    /// Hollowing a solid: [`GeometryKernel::shell`]. Needs an offset surface,
+    /// which is a feature a kernel has or has not.
+    Shell,
+    /// Sweeping a profile along a path that **turns** — three or more points.
+    ///
+    /// Named for the bend, not for the sweep, because a sweep along a straight
+    /// line is a different operation with the same name and `TruckKernel` does
+    /// it. A backend that declines this still sweeps; a caller offering a
+    /// polyline path is the one that has to ask.
+    BentSweep,
+    /// Lofting through **more than two** sections.
+    ///
+    /// Named the same way and for the same reason: two sections is a homotopy
+    /// between two wires, three is that plus a stitch, and a backend can have
+    /// the first without the second.
+    MultiSectionLoft,
+    /// Reading a STEP file: [`GeometryKernel::import_step`].
+    StepImport,
+    /// Writing one: [`GeometryKernel::export_step`].
+    ///
+    /// Separate from [`Capability::StepImport`] although no backend yet has one
+    /// without the other, because they are separate methods with separate
+    /// failure modes and the conformance check that ties them together is
+    /// better as a check than as a missing enum variant.
+    StepExport,
+    /// Whether a tessellation says which topological edge a wireframe segment
+    /// came from — [`Mesh::edge_of_line`].
+    ///
+    /// **Not an operation, and it is here because a button needs it.** Turning
+    /// a click into a per-edge blend takes two capabilities, not one: the
+    /// backend must blend a named edge *and* be able to name the edge that was
+    /// clicked. `FakeKernel` has the first and not the second, which is the
+    /// case that proves the two are not the same question.
+    EdgeIdentity,
+}
+
+impl Capability {
+    /// Every capability, for a caller that reports on all of them — the
+    /// conformance probe, and a build's own "what can this do" line.
+    ///
+    /// An array rather than an iterator so that adding a variant without
+    /// adding it here is a length mismatch at compile time.
+    pub const ALL: [Capability; 7] = [
+        Capability::Blend,
+        Capability::Shell,
+        Capability::BentSweep,
+        Capability::MultiSectionLoft,
+        Capability::StepImport,
+        Capability::StepExport,
+        Capability::EdgeIdentity,
+    ];
+
+    /// What a user is missing, in words, for a tooltip on a disabled button or
+    /// a line in a status bar.
+    ///
+    /// Phrased as the absence rather than the feature, because that is the
+    /// sentence a disabled control owes: not "blending", but "this build
+    /// cannot round or bevel an edge".
+    pub fn absence(self) -> &'static str {
+        match self {
+            Capability::Blend => "this build cannot round or bevel an edge",
+            Capability::Shell => "this build cannot hollow a solid",
+            Capability::BentSweep => "this build sweeps along a straight path only",
+            Capability::MultiSectionLoft => "this build lofts between two profiles only",
+            Capability::StepImport => "this build cannot read a STEP file",
+            Capability::StepExport => "this build cannot write a STEP file",
+            Capability::EdgeIdentity => "this build cannot say which edge a line belongs to",
+        }
+    }
+}
+
+impl fmt::Display for Capability {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let s = match self {
+            Capability::Blend => "blend",
+            Capability::Shell => "shell",
+            Capability::BentSweep => "bent sweep",
+            Capability::MultiSectionLoft => "multi-section loft",
+            Capability::StepImport => "STEP import",
+            Capability::StepExport => "STEP export",
+            Capability::EdgeIdentity => "edge identity",
+        };
+        f.write_str(s)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum KernelError {
     /// The handle was never valid, or has been deleted.
@@ -501,6 +628,24 @@ pub trait GeometryKernel {
     /// box pass as a boolean or fails the one backend that never claimed
     /// otherwise. There is no default: a backend says which it is.
     fn does_geometry(&self) -> bool;
+
+    /// Whether this build does `cap` at all — see [`Capability`] for what that
+    /// question means and, more to the point, what it does not.
+    ///
+    /// **There is no default, deliberately, and for a second reason beyond the
+    /// one `does_geometry` gives.** A default would have to be `true` or
+    /// `false`, and each is wrong in a way that is invisible: `true` makes a
+    /// new backend claim everything until someone notices a disabled button
+    /// that should be enabled — which nobody reports as a bug — and `false`
+    /// makes it claim nothing, greying out controls that work. Requiring the
+    /// match means a capability added to the enum stops every backend
+    /// compiling, and the author of the new capability has to go and ask each
+    /// one, which is the conversation this seam exists to force.
+    ///
+    /// Answers must not depend on the body, the arguments, or how far through
+    /// the session it is: `conformance` calls this before and after the probe
+    /// and requires the same answer.
+    fn supports(&self, cap: Capability) -> bool;
 
     /// Origin-centred, `size` across.
     fn create_box(&mut self, size: Vec3) -> Result<Body>;

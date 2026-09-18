@@ -9,8 +9,8 @@ use crate::arena::{Arena, Id};
 use crate::history::{Edit, History};
 use std::collections::{HashMap, HashSet};
 use w3d_kernel::{
-    Aabb, Body, BooleanOp, GeometryKernel, KernelError, Mat4, Mesh, Quality, Tolerance, Topology,
-    Vec3,
+    Aabb, Body, BooleanOp, Capability, GeometryKernel, KernelError, Mat4, Mesh, Quality, Tolerance,
+    Topology, Vec3,
 };
 
 pub type NodeId = Id<Node>;
@@ -353,6 +353,23 @@ impl<K: GeometryKernel> Document<K> {
 
     pub fn kernel(&self) -> &K {
         &self.kernel
+    }
+
+    /// Whether the backend under this document does `cap` at all.
+    ///
+    /// Here rather than only on the kernel because the callers that need it are
+    /// UI, and `document().kernel().supports(..)` asks them to reach through
+    /// the seam for a question the document can answer. What it deliberately is
+    /// **not** is a place to cache the answer or to add a document's own
+    /// opinion: it forwards, so that there is one description of what a build
+    /// does and the conformance probe is holding it.
+    ///
+    /// A `true` here is not a promise the next call succeeds — see
+    /// [`Capability`]. It is only that the operation exists in this build, so a
+    /// control can be offered rather than greyed out, and a refusal that does
+    /// come back is about this solid.
+    pub fn supports(&self, cap: Capability) -> bool {
+        self.kernel.supports(cap)
     }
 
     pub fn history(&self) -> &History {
