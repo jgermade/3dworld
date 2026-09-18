@@ -2130,10 +2130,15 @@ fn run_handle<K: GeometryKernel + Default>(
                 editor.set_status("a blend needs a positive size — drag the other way");
                 return;
             }
+            // The edge the handle was drawn on, not every edge of the solid.
+            // Until the kernel trait had `fillet_edges` these issued
+            // `FilletRadius`, which blends the whole part — the handle stood on
+            // one edge and the label said so, which was honest and was still
+            // not what a user dragging it wants.
             if matches!(handle, gizmo::Handle::Fillet) {
-                execute_command(editor, Command::FilletRadius(amount));
+                execute_command(editor, Command::FilletSelectedEdge(amount));
             } else {
-                execute_command(editor, Command::ChamferDistance(amount));
+                execute_command(editor, Command::ChamferSelectedEdge(amount));
             }
         }
     }

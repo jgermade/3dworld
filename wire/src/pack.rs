@@ -232,6 +232,7 @@ mod tests {
             face_of_triangle: faces.to_vec(),
             line_positions: Vec::new(),
             line_indices: Vec::new(),
+            edge_of_line: Vec::new(),
         }
     }
 

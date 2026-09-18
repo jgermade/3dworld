@@ -146,6 +146,23 @@ fn sub_mesh(mesh: &Mesh, triangles: &[usize], take_lines: bool) -> Mesh {
         } else {
             Vec::new()
         },
+        // Carried with the lines it describes, for a caller that splits a mesh
+        // and keeps the halves in this process.
+        //
+        // **It does not survive being encoded.** `WIRE.md` has no section for
+        // it, so a mesh that goes out as bytes and comes back has no edge
+        // identity — empty, which `Mesh::edge_of_line` reports as "this backend
+        // does not say" rather than as a wrong id. That is deliberate: the
+        // browser's backend declines every blend, so edge ids would cross the
+        // boundary to be refused at the other end, and widening a versioned
+        // format ahead of a caller is how the format stops meaning anything.
+        // The day the browser has a kernel that blends, this is the line that
+        // has to change, and `RECORD` says so.
+        edge_of_line: if take_lines {
+            mesh.edge_of_line.clone()
+        } else {
+            Vec::new()
+        },
     }
 }
 

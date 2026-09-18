@@ -141,6 +141,7 @@ struct RawMesh {
     face_of_triangle: *const u32,
     line_positions: *const f32,
     line_indices: *const u32,
+    edge_of_line: *const u32,
     vertex_count: u32,
     triangle_count: u32,
     line_vertex_count: u32,
@@ -157,6 +158,7 @@ impl RawMesh {
             face_of_triangle: core::ptr::null(),
             line_positions: core::ptr::null(),
             line_indices: core::ptr::null(),
+            edge_of_line: core::ptr::null(),
             vertex_count: 0,
             triangle_count: 0,
             line_vertex_count: 0,
@@ -187,6 +189,22 @@ unsafe extern "C" {
     fn w3d_occt_delete(ctx: *mut Context, body: u32) -> i32;
     fn w3d_occt_fillet(ctx: *mut Context, body: u32, radius: f64, out: *mut u32) -> i32;
     fn w3d_occt_chamfer(ctx: *mut Context, body: u32, distance: f64, out: *mut u32) -> i32;
+    fn w3d_occt_fillet_edges(
+        ctx: *mut Context,
+        body: u32,
+        edges: *const u32,
+        edge_count: u32,
+        radius: f64,
+        out: *mut u32,
+    ) -> i32;
+    fn w3d_occt_chamfer_edges(
+        ctx: *mut Context,
+        body: u32,
+        edges: *const u32,
+        edge_count: u32,
+        distance: f64,
+        out: *mut u32,
+    ) -> i32;
     fn w3d_occt_shell(
         ctx: *mut Context,
         body: u32,
@@ -406,6 +424,45 @@ impl GeometryKernel for OcctKernel {
         Ok(Body::from_raw(id))
     }
 
+    /// The edges named, and nothing else. `edges` is passed as a pointer and a
+    /// length, so the empty case has to be caught on this side too: a null
+    /// pointer from an empty slice is not what the C side checks for.
+    fn fillet_edges(&mut self, body: Body, edges: &[u32], radius: f64) -> Result<Body> {
+        let mut id = 0u32;
+        check(
+            unsafe {
+                w3d_occt_fillet_edges(
+                    self.ctx,
+                    body.raw(),
+                    edges.as_ptr(),
+                    edges.len() as u32,
+                    radius,
+                    &mut id,
+                )
+            },
+            body,
+        )?;
+        Ok(Body::from_raw(id))
+    }
+
+    fn chamfer_edges(&mut self, body: Body, edges: &[u32], distance: f64) -> Result<Body> {
+        let mut id = 0u32;
+        check(
+            unsafe {
+                w3d_occt_chamfer_edges(
+                    self.ctx,
+                    body.raw(),
+                    edges.as_ptr(),
+                    edges.len() as u32,
+                    distance,
+                    &mut id,
+                )
+            },
+            body,
+        )?;
+        Ok(Body::from_raw(id))
+    }
+
     /// A prism over the profile's own outline, standing on the plane it was
     /// drawn on — which is what the trait says and what this did not do. It
     /// called `create_box` or `create_cylinder` with the profile's two numbers,
@@ -597,6 +654,11 @@ impl GeometryKernel for OcctKernel {
                 line_positions: chunks3(raw.line_positions, line_verts),
                 line_indices: if line_segs > 0 && !raw.line_indices.is_null() {
                     core::slice::from_raw_parts(raw.line_indices, line_segs * 2).to_vec()
+                } else {
+                    Vec::new()
+                },
+                edge_of_line: if line_segs > 0 && !raw.edge_of_line.is_null() {
+                    core::slice::from_raw_parts(raw.edge_of_line, line_segs).to_vec()
                 } else {
                     Vec::new()
                 },

@@ -25,7 +25,7 @@ use w3d_kernel_truck::TruckKernel;
 /// to catch. It is order-sensitive by construction: a merge that ran the faces
 /// in a different order produces the same *set* of vertices and a different
 /// checksum, which is the failure this test is for.
-fn fingerprint(mesh: &Mesh) -> (usize, usize, usize, u64, u64) {
+fn fingerprint(mesh: &Mesh) -> (usize, usize, usize, u64, u64, u64) {
     let mut positions: u64 = 0;
     for (i, p) in mesh.positions.iter().enumerate() {
         for (j, v) in p.iter().enumerate() {
@@ -39,12 +39,24 @@ fn fingerprint(mesh: &Mesh) -> (usize, usize, usize, u64, u64) {
     for (i, f) in mesh.face_of_triangle.iter().enumerate() {
         faces = faces.rotate_left(5).wrapping_add(*f as u64 + i as u64);
     }
+    // `edge_of_line` joined the mesh when the kernel trait grew a per-edge
+    // blend, and it is output like any other: an id that depended on which
+    // thread finished first would be an id a *stored blend* was wrong about,
+    // which is worse than a wrong colour. Added to the fingerprint on
+    // 2026-09-18, and the literals below were re-recorded in the same act —
+    // they moved because this function grew a component, not because a mesh
+    // changed.
+    let mut edges: u64 = 0;
+    for (i, e) in mesh.edge_of_line.iter().enumerate() {
+        edges = edges.rotate_left(5).wrapping_add(*e as u64 + i as u64);
+    }
     (
         mesh.positions.len(),
         mesh.normals.len(),
         mesh.indices.len(),
         positions,
         faces,
+        edges,
     )
 }
 
@@ -108,9 +120,16 @@ fn tessellation_is_independent_of_the_thread_count() {
 /// Recorded from the sequential path and asserted against both, in the order
 /// [`cases`] returns. See the note at the top of the file on why these are
 /// literals rather than two runs compared in one process.
-const FINGERPRINTS: [(usize, usize, usize, u64, u64); 3] = [
+const FINGERPRINTS: [(usize, usize, usize, u64, u64, u64); 3] = [
     // box: six planar faces, four vertices each
-    (24, 24, 36, 14095475103671264770, 1236065057125872),
+    (
+        24,
+        24,
+        36,
+        14095475103671264770,
+        1236065057125872,
+        16815202147016075296,
+    ),
     // cylinder: a disc swept along the axis — four lateral faces and two caps,
     // and a cap triangulated over its whole disc rather than gridded over the
     // square the disc is inscribed in, which is most of the vertex count
@@ -120,10 +139,18 @@ const FINGERPRINTS: [(usize, usize, usize, u64, u64); 3] = [
         18438,
         15871330935632557431,
         14858392254419109789,
+        14435484911307075045,
     ),
     // drilled plate: six planar faces and the wall of the hole, the top and
     // bottom bounded by a circle that no parameter range describes
-    (3425, 3425, 18882, 809326082532109153, 11939554635547878893),
+    (
+        3425,
+        3425,
+        18882,
+        809326082532109153,
+        11939554635547878893,
+        16600163193542640383,
+    ),
 ];
 
 /// `w3d-web`'s threaded variant tessellates through `rayon`, which requires the

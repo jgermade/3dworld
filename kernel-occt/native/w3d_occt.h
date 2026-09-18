@@ -70,6 +70,9 @@ typedef struct {
   const uint32_t *face_of_triangle; /* triangle_count */
   const float *line_positions;   /* 3 * line_vertex_count */
   const uint32_t *line_indices;  /* 2 * line_segment_count */
+  const uint32_t *edge_of_line;  /* line_segment_count; the edge each segment
+                                  * came from, in the same numbering the
+                                  * per-edge blends below take */
   uint32_t vertex_count;
   uint32_t triangle_count;
   uint32_t line_vertex_count;
@@ -96,6 +99,16 @@ int32_t w3d_occt_copy(W3dOcctContext *ctx, uint32_t body, uint32_t *out);
 int32_t w3d_occt_delete(W3dOcctContext *ctx, uint32_t body);
 int32_t w3d_occt_fillet(W3dOcctContext *ctx, uint32_t body, double radius, uint32_t *out);
 int32_t w3d_occt_chamfer(W3dOcctContext *ctx, uint32_t body, double distance, uint32_t *out);
+
+/* Per-edge blends. `edges` are indices into the shape's own edge map — the
+ * numbering `edge_of_line` above reports — and `edge_count` of 0 is
+ * W3D_OCCT_ERR_DEGENERATE rather than "every edge": the whole-solid form is the
+ * call above, and a caller whose selection came back empty is telling us about
+ * a bug, not asking for the maximum. Repeats name one edge once. */
+int32_t w3d_occt_fillet_edges(W3dOcctContext *ctx, uint32_t body, const uint32_t *edges,
+                              uint32_t edge_count, double radius, uint32_t *out);
+int32_t w3d_occt_chamfer_edges(W3dOcctContext *ctx, uint32_t body, const uint32_t *edges,
+                               uint32_t edge_count, double distance, uint32_t *out);
 int32_t w3d_occt_shell(W3dOcctContext *ctx, uint32_t body, uint32_t face_id, double thickness, uint32_t *out);
 /* A 2D profile and the plane it is drawn on, as the four operations that take
  * one all need it.

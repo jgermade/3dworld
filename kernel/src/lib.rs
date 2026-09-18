@@ -293,6 +293,16 @@ pub struct Mesh {
     pub face_of_triangle: Vec<u32>,
     pub line_positions: Vec<[f32; 3]>,
     pub line_indices: Vec<u32>,
+    /// Which topological edge each wireframe segment came from — the same
+    /// promise `face_of_triangle` makes, one dimension down, and the reason a
+    /// blend can name an edge at all.
+    ///
+    /// A picked segment is a segment of *something*; without this the only
+    /// thing a caller can say about it is where it is in space, and the only
+    /// blend it can ask for is the one that rounds everything. It is empty, or
+    /// exactly [`Mesh::line_count`] long — never partly filled, because a
+    /// caller that has to test each lookup will stop testing.
+    pub edge_of_line: Vec<u32>,
 }
 
 /// Calculated geometry metrics for a specific topological face on a mesh.
@@ -312,6 +322,21 @@ impl Mesh {
 
     pub fn line_count(&self) -> usize {
         self.line_indices.len() / 2
+    }
+
+    /// The topological edge wireframe segment `line` belongs to, or `None` when
+    /// this backend does not say.
+    ///
+    /// `None` is the honest answer for a mesh whose lines were invented by
+    /// [`Mesh::line_edges`]'s fallback: those are triangle boundaries, not
+    /// edges, and a blend asked for one of them would blend something nobody
+    /// picked.
+    pub fn edge_of_line(&self, line: usize) -> Option<u32> {
+        if self.edge_of_line.len() == self.line_count() {
+            self.edge_of_line.get(line).copied()
+        } else {
+            None
+        }
     }
 
     /// Returns the wireframe line positions and indices.
@@ -535,6 +560,35 @@ pub trait GeometryKernel {
     ///
     /// Declinable with `fillet`, and only with it.
     fn chamfer(&mut self, body: Body, distance: f64) -> Result<Body>;
+
+    /// Rounds *the named edges* of a solid, and leaves the rest sharp.
+    ///
+    /// `edges` are ids as [`Mesh::edge_of_line`] reports them — the index of
+    /// the edge in the body's own edge ordering, which is the ordering
+    /// [`GeometryKernel::tessellate`] numbered its wireframe against. Ids come
+    /// from a tessellation of *this* body: a boolean renumbers, so an id taken
+    /// before one and used after it names a different edge, exactly as a
+    /// `face_id` does.
+    ///
+    /// **An empty `edges` is [`KernelError::Degenerate`], not "all of them".**
+    /// A selection that came back empty is a bug in the caller, and the reading
+    /// that blends the whole solid is the one this method exists to stop being
+    /// the only option: it is what the user sees when they meant to round one
+    /// corner. An id no edge has is `Degenerate` too — a bad argument, not an
+    /// unsupported operation. Repeats are not an error and name one edge once;
+    /// a caller mapping picked segments to edges will produce them by the
+    /// dozen.
+    ///
+    /// Declinable exactly as [`GeometryKernel::fillet`] is, and with it: a
+    /// backend with no rolling-ball surface answers [`KernelError::Unsupported`]
+    /// from all four blends or from none.
+    fn fillet_edges(&mut self, body: Body, edges: &[u32], radius: f64) -> Result<Body>;
+
+    /// Bevels *the named edges* of a solid, and leaves the rest sharp.
+    ///
+    /// `edges`, the empty case, unknown ids and repeats are all as
+    /// [`GeometryKernel::fillet_edges`] describes them. Declinable with it.
+    fn chamfer_edges(&mut self, body: Body, edges: &[u32], distance: f64) -> Result<Body>;
 
     /// Extrudes a 2D planar profile linearly along +Z by `distance`.
     ///
@@ -822,6 +876,7 @@ mod tests {
             face_of_triangle: vec![1, 1],
             line_positions: vec![],
             line_indices: vec![],
+            edge_of_line: Vec::new(),
         };
 
         let metrics = mesh.face_metrics(1).expect("face metrics for face 1");

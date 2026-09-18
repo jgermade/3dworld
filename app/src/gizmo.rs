@@ -200,8 +200,12 @@ impl Handle {
             Self::Rotate { .. } => "Girar",
             Self::PushPull { outward: true, .. } => "Extruir",
             Self::PushPull { outward: false, .. } => "Vaciar",
-            Self::Fillet => "Redondear (todo el sólido)",
-            Self::Chamfer => "Chaflán (todo el sólido)",
+            // The parenthesis said "todo el sólido" from 2026-09-16 until the
+            // kernel trait grew a per-edge blend, because that was the truth and
+            // a handle on one edge that rounded twelve is worse than one that
+            // admits it. It names the edge now.
+            Self::Fillet => "Redondear arista",
+            Self::Chamfer => "Chaflán arista",
         }
     }
 

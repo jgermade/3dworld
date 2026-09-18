@@ -248,6 +248,23 @@ faces, the order is still fully determined — first appearance, then triangle
 order within the face — it is simply a regrouping rather than a preservation.
 There is no case in which the result depends on which thread finished first.
 
+### Edge identity is not carried
+
+`Mesh::edge_of_line` — which topological edge each wireframe segment came from,
+and what a **per-edge** blend is named against — has no section in this format.
+A mesh that crosses this boundary therefore arrives with it **empty**, which
+`Mesh::edge_of_line` reports as "this backend does not say" rather than as a
+wrong id. A receiver must not infer an edge from a segment's position in the
+line list: that index is a tessellation's idea of an edge and means nothing to a
+kernel.
+
+This is a decision, not an omission. The backend the browser runs declines every
+blend, so ids would cross only to be refused at the other end, and widening a
+versioned format ahead of a caller is how the version stops meaning anything.
+The day the browser has a kernel that blends, this is the section that has to
+exist — and the field, the message layout and `sub_mesh` all change together.
+See `RECORD/2026-09-18_03h22.a-blend-that-names-its-edge.md`.
+
 **A vertex shared between faces in different chunks is duplicated**, once into
 each. This is the same cost as de-indexing, applied only where a split lands on
 it, and in practice it is never paid: both backends give each face its own
