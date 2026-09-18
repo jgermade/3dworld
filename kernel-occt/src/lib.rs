@@ -13,8 +13,8 @@
 
 use std::ffi::{CStr, c_char};
 use w3d_kernel::{
-    Aabb, Body, BooleanOp, GeometryKernel, KernelError, Mat4, Mesh, Profile, Quality, Result,
-    SketchPlane, Tolerance, Topology, Vec3,
+    Aabb, Body, BooleanOp, Capability, GeometryKernel, KernelError, Mat4, Mesh, Profile, Quality,
+    Result, SketchPlane, Tolerance, Topology, Vec3,
 };
 
 const OK: i32 = 0;
@@ -346,6 +346,25 @@ impl GeometryKernel for OcctKernel {
 
     /// OpenCASCADE, exactly.
     fn does_geometry(&self) -> bool {
+        true
+    }
+
+    /// Everything. This is the build the others' refusals point a user at:
+    /// `BRepFilletAPI_MakeFillet` and `..._MakeChamfer` for the blends,
+    /// `BRepOffsetAPI_MakeThickSolid` for the hollow, `..._MakePipe` for a
+    /// path that turns, `..._ThruSections` for a third section, and
+    /// `STEPControl` in both directions.
+    ///
+    /// `EdgeIdentity` is `true` because `w3d_occt_tessellate` numbers the
+    /// wireframe against the same `TopTools_IndexedMapOfShape` that
+    /// `resolve_edges` maps a blend's ids through — the two agreeing is what
+    /// makes an id taken from a click mean the same edge to the blend, and is
+    /// checked rather than assumed in `app/tests/blend_edges.rs`.
+    ///
+    /// A blanket `true` is a claim, not a shrug: the conformance probe runs
+    /// every one of these against this backend and fails the build if any of
+    /// them answers `Unsupported`.
+    fn supports(&self, _cap: Capability) -> bool {
         true
     }
 

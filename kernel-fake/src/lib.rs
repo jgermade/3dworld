@@ -18,8 +18,8 @@
 //! the kernel proves the whole modeller.
 
 use w3d_kernel::{
-    Aabb, Body, BooleanOp, GeometryKernel, KernelError, Mat4, Mesh, Profile, Quality, Result,
-    SketchPlane, Tolerance, Topology, Vec3,
+    Aabb, Body, BooleanOp, Capability, GeometryKernel, KernelError, Mat4, Mesh, Profile, Quality,
+    Result, SketchPlane, Tolerance, Topology, Vec3,
 };
 
 #[derive(Clone, Debug)]
@@ -233,6 +233,28 @@ impl GeometryKernel for FakeKernel {
     /// which is exactly what this backend is for.
     fn does_geometry(&self) -> bool {
         false
+    }
+
+    /// Bookkeeping accepts every operation, so the only capabilities this
+    /// backend lacks are the two it has nothing to answer *with*: a STEP file
+    /// needs surfaces, and an edge identity needs a topology.
+    ///
+    /// **It is the backend that separates `Blend` from `EdgeIdentity`**, and
+    /// that is worth more than it looks. It says `true` to blending a named
+    /// edge — `check_edge_ids` validates the ids and the blend is a clone — and
+    /// `false` to saying which line is which edge, because `tessellate_box`
+    /// invents a wireframe and has no edge to attribute a segment to. A caller
+    /// that took one of those answers for the other would offer a per-edge
+    /// blend with no way to pick the edge, which is the state the editor's
+    /// handle was in before there was a query to ask.
+    fn supports(&self, cap: Capability) -> bool {
+        match cap {
+            Capability::Blend
+            | Capability::Shell
+            | Capability::BentSweep
+            | Capability::MultiSectionLoft => true,
+            Capability::StepImport | Capability::StepExport | Capability::EdgeIdentity => false,
+        }
     }
 
     fn create_box(&mut self, size: Vec3) -> Result<Body> {

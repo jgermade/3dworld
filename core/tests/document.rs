@@ -3,8 +3,8 @@
 //! hole in it.
 
 use w3d_core::kernel::{
-    Aabb, Body, BooleanOp, GeometryKernel, Import, ImportedAssembly, ImportedBody, Mat4, Mesh,
-    Profile, Quality, SketchPlane, Tolerance, Topology, Vec3,
+    Aabb, Body, BooleanOp, Capability, GeometryKernel, Import, ImportedAssembly, ImportedBody,
+    Mat4, Mesh, Profile, Quality, SketchPlane, Tolerance, Topology, Vec3,
 };
 use w3d_core::{Document, DocumentError, Loaded, LoadedNode, Uid, Unit};
 use w3d_kernel_fake::FakeKernel;
@@ -339,6 +339,9 @@ impl GeometryKernel for Assembling {
     }
     fn does_geometry(&self) -> bool {
         self.inner.does_geometry()
+    }
+    fn supports(&self, cap: Capability) -> bool {
+        self.inner.supports(cap)
     }
     fn create_box(&mut self, size: Vec3) -> w3d_core::kernel::Result<Body> {
         self.inner.create_box(size)

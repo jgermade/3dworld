@@ -9,7 +9,7 @@
 
 use std::path::{Path, PathBuf};
 
-use w3d_core::kernel::{BooleanOp, GeometryKernel, Profile, SketchPlane, Vec3};
+use w3d_core::kernel::{BooleanOp, Capability, GeometryKernel, Profile, SketchPlane, Vec3};
 use w3d_core::{Document, NodeId};
 use w3d_render::{Camera, Pick};
 
@@ -398,6 +398,17 @@ impl<K: GeometryKernel> Editor<K> {
         &self.doc
     }
 
+    /// Whether the build behind this editor does `cap` at all, for a control
+    /// that would otherwise be offered and then refuse.
+    ///
+    /// The Ribbon asks this, and so does the edge handle. Until 2026-09-18 the
+    /// only way to find out was to press the button and read the status bar,
+    /// which on the default build is how a user discovered that Fillet,
+    /// Chamfer and Shell were not there at all.
+    pub fn supports(&self, cap: Capability) -> bool {
+        self.doc.supports(cap)
+    }
+
     pub fn document_mut(&mut self) -> &mut Document<K> {
         &mut self.doc
     }
@@ -752,7 +763,29 @@ impl<K: GeometryKernel> Editor<K> {
     where
         K: Default,
     {
-        let outcome = match command {
+        // Both arms go to the same place, because a user reads what happened
+        // and what did not in the one line they are already looking at. The
+        // distinction is not thrown away — `try_run` keeps it, for a caller
+        // that has to *act* on the difference rather than display it.
+        self.status = match self.try_run(command) {
+            Ok(message) | Err(message) => message,
+        };
+    }
+
+    /// [`Editor::run`], keeping the outcome instead of flattening it into the
+    /// status bar.
+    ///
+    /// `run` collapses `Ok` and `Err` into one string, which is right for the
+    /// shell and leaves a caller unable to tell a refusal from a success by
+    /// anything but reading the words. That was fine while nothing needed to:
+    /// since 2026-09-18 the capability tests do, because the claim they check
+    /// is "an operation this build denies is one that *fails*", and matching on
+    /// prose would make it a test of the wording.
+    pub fn try_run(&mut self, command: Command) -> Result<String, String>
+    where
+        K: Default,
+    {
+        match command {
             Command::AddBox => self.add("Box", |doc, name| {
                 doc.add_box(name, Vec3::new(20.0, 20.0, 20.0))
             }),
@@ -1008,11 +1041,7 @@ impl<K: GeometryKernel> Editor<K> {
                     ))
                 }
             }
-        };
-        self.status = match outcome {
-            Ok(message) => message,
-            Err(message) => message,
-        };
+        }
     }
 
     // ---- files --------------------------------------------------------
@@ -1127,6 +1156,17 @@ impl<K: GeometryKernel> Editor<K> {
             return Err(format!("{verb} necesita un tamaño positivo"));
         }
 
+        // Asked before the solid is meshed, because a tessellation is the
+        // expensive part and a build that cannot blend was never going to use
+        // it. Two capabilities and not one: this gesture needs a backend that
+        // blends a named edge *and* one that can name the edge under the
+        // cursor, and `FakeKernel` has the first without the second.
+        for cap in [Capability::Blend, Capability::EdgeIdentity] {
+            if !self.supports(cap) {
+                return Err(format!("{verb}: {}", cap.absence()));
+            }
+        }
+
         let edge = {
             let mesh = self
                 .doc
@@ -1134,9 +1174,15 @@ impl<K: GeometryKernel> Editor<K> {
                 .map_err(|e| format!("no se pudo mallar el sólido: {e}"))?;
             mesh.edge_of_line(segment as usize)
         };
+        // Still handled, and it is not the same question the capability
+        // answered. `EdgeIdentity` says this build attributes segments to
+        // edges; a *particular* mesh can still have none to attribute — the
+        // wireframe fallback in `line_edges()` invents segments from triangle
+        // boundaries, and those are not edges. The capability is about the
+        // build, this is about the mesh in hand.
         let Some(edge) = edge else {
-            return Err(String::from(
-                "este motor no dice a qué arista pertenece un segmento,                  así que no puede redondear una sola",
+            return Err(format!(
+                "{verb}: esta malla no dice a qué arista pertenece el segmento",
             ));
         };
 
