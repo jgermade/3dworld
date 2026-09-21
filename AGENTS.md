@@ -119,6 +119,9 @@ kernel-truck/  w3d-kernel-truck pure Rust, and what the browser models on:      
                                 exact surfaces, and a boolean that is narrow    ✅ wasm
                                 rather than absent — it declines what it        ◐ boolean
                                 cannot do, and no longer answers wrongly
+xarch/         w3d-xarch        one measurement, built twice: what x86-64 and   ✅ built
+                                wasm32 agree about, and what they do not —
+                                `make xarch`, and register item 4
 kernel-native/                  a kernel of our own                             ⬜
 ```
 
@@ -195,7 +198,13 @@ capability, it is declared there first**, then implemented behind whichever back
 - **`unsafe` lives in exactly one crate, and that crate is the FFI boundary.** The workspace
   *forbids* it, and `forbid` cannot be relaxed by an `#[allow]` in a file — so `w3d-kernel-occt`
   opts out of the shared lint in its own `Cargo.toml`, a visible act in a reviewed file rather than
-  an attribute buried in a module. A second crate wanting `unsafe` is a design conversation.
+  an attribute buried in a module. A second crate wanting `unsafe` is a design conversation. It has
+  not happened: `w3d-xarch` needed to export three functions to a wasm host, which is what
+  `#[unsafe(no_mangle)]` is for, and took `wasm-bindgen`'s macro instead — the same route
+  `w3d-web` already takes under the same `forbid`. No JS glue is generated and
+  `wasm-bindgen-cli` is not needed, because the exports take and return numbers; the cost is
+  that a host finds them by prefix, since the macro appends a hash to a name until that CLI
+  strips one.
 - **The C ABI header is the specification, not a convenience.** Every symbol
   `kernel-occt/native/w3d_occt.h` declares is one an Emscripten build must keep alive through
   `EMSCRIPTEN_KEEPALIVE`: an entry point for each trait method that crosses, plus the context and

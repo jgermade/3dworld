@@ -69,6 +69,14 @@ jobs:
       - run: make test
       - name: The wasm target still builds, and still has WebGL2 in it
         run: make wasm
+      - name: What the two architectures agree about, on a runner rather than a laptop
+        # The wasm32 target is already added above and the runner image has a
+        # node, so this costs a build and no setup. It is here rather than in
+        # `make test` because that command is a no-setup gate and this needs a
+        # second target — and it is here at all because the claim it holds
+        # (everything before the boolean is bit-identical on both) is exactly
+        # the kind that rots quietly in a record file. See register item 4.
+        run: make xarch
 
   # OpenCASCADE, and STEP against something that is not us. One job rather than
   # two because each job is a fresh machine and the second would rebuild two

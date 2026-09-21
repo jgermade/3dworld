@@ -1,0 +1,34 @@
+[package]
+name = "w3d-xarch"
+description = "One measurement, built twice: what x86-64 and wasm32 agree about."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# `cdylib` is what a browser-shaped target needs to export anything at all;
+# `rlib` is what the native binary links. The two builds run the *same*
+# `measurements()`, which is the only reason any of this means something.
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "xarch"
+path = "src/main.rs"
+
+[dependencies]
+w3d-kernel = { path = "../kernel" }
+w3d-kernel-truck = { path = "../kernel-truck" }
+
+# Only to export three functions to a host, and only on wasm32 — the same
+# route `w3d-web` takes. It is here rather than `#[unsafe(no_mangle)]`
+# because the workspace forbids `unsafe`, and AGENTS.md says a second crate
+# wanting it is a design conversation rather than an attribute: this crate
+# does not need one. Nothing here is called through the wasm-bindgen ABI,
+# so `wasm-bindgen-cli` is not needed and no JS glue is generated — the raw
+# exports take and return numbers, and `tools/xarch.js` calls them directly.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2.127"
+
+[lints]
+workspace = true
