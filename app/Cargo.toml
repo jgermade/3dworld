@@ -37,6 +37,12 @@ wgpu = { version = "30", default-features = false, features = [
     "dx12",
 ] }
 
+# Drives the Ribbon with no window and no GPU: it reads egui's AccessKit tree,
+# which is what says whether a button is enabled and what its tooltip says. No
+# features — the `wgpu` one renders pixels, and nothing here asks about pixels.
+[dev-dependencies]
+egui_kittest = "0.36"
+
 # OpenCASCADE is optional for the same reason it is not a default workspace
 # member: `cargo check` must not need OCCT installed. `cargo run --features occt`
 # is the modeller with real geometry; without it the fake kernel draws bounding
