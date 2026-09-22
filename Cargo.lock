@@ -3684,6 +3684,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "w3d-xarch"
+version = "0.0.0"
+dependencies = [
+ "w3d-kernel",
+ "w3d-kernel-truck",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "walkdir"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

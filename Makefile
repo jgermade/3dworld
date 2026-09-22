@@ -346,6 +346,26 @@ freecad-check:
 web-test: web-both
 	node web/test/browser.mjs
 
+.PHONY: xarch
+## One measurement, built twice: what x86-64 and wasm32 agree about.
+##
+## Register item 4 — the desktop and the browser cutting the same plate into
+## different solids — was traced on 2026-09-21 to an iteration order inside
+## `truck-shapeops`, which `rustc-hash` makes a property of the target's
+## pointer width. The fix is in a dependency and has not been taken, so this
+## **cannot** assert that the two builds agree, and does not pretend to: it
+## asserts the half that is true — everything before the boolean is bit
+## identical, the topology of the cut is too, and each build is deterministic
+## in itself — and it reports the disagreement rather than passing over it.
+##
+## The day the two rows under `item 4` come out `same`, the dependency has
+## moved and the rules in `xarch/src/lib.rs` should become `Rule::Exact`.
+##
+## Not part of `make test`: it needs a wasm32 target and a node, and `make
+## test` is a no-setup command.
+xarch:
+	python3 tools/xarch.py
+
 doc:
 	$(CARGO) doc --workspace --no-deps
 
