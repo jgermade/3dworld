@@ -908,16 +908,20 @@ fn capable<K: GeometryKernel + Default>(
     }
 }
 
-fn chrome<K: GeometryKernel + Default>(
+/// The Ribbon: the tab bar and the toolbar under it.
+///
+/// Its own function, with nothing from the GPU in its signature, so that a test
+/// can draw it. Every control on it is decided by the editor and a tab, and
+/// the one piece of renderer state it touches — the grid toggle — comes in as a
+/// `bool` rather than as the renderer. That is what lets `egui_kittest` read
+/// which buttons are enabled and what a disabled one says, which is the half of
+/// register item 8 that asserting on `Editor::supports` could not reach.
+fn ribbon<K: GeometryKernel + Default>(
     root: &mut egui::Ui,
     editor: &mut Editor<K>,
-    scene: &Scene,
-    renderer: &mut Renderer,
-    modifiers: ModifiersState,
     active_tab: &mut RibbonTab,
-    gizmo: &mut GizmoStatus,
+    show_grid: &mut bool,
 ) {
-    // 1. Top Ribbon Bar Panel
     egui::Panel::top("ribbon_panel").show(root, |ui| {
         // Tab Headers Bar
         ui.horizontal(|ui| {
@@ -1155,7 +1159,7 @@ fn chrome<K: GeometryKernel + Default>(
                 ui.group(|ui| {
                     ui.label("Viewport & Inspection");
                     ui.horizontal(|ui| {
-                        ui.checkbox(&mut renderer.show_grid, "Ground Grid");
+                        ui.checkbox(show_grid, "Ground Grid");
                         if ui.button("Zoom to Fit [F]").clicked() {
                             execute_command(editor, Command::ZoomToFit);
                         }
@@ -1197,6 +1201,19 @@ fn chrome<K: GeometryKernel + Default>(
             }
         });
     });
+}
+
+fn chrome<K: GeometryKernel + Default>(
+    root: &mut egui::Ui,
+    editor: &mut Editor<K>,
+    scene: &Scene,
+    renderer: &mut Renderer,
+    modifiers: ModifiersState,
+    active_tab: &mut RibbonTab,
+    gizmo: &mut GizmoStatus,
+) {
+    // 1. Top Ribbon Bar Panel
+    ribbon(root, editor, active_tab, &mut renderer.show_grid);
 
     // 2. Left Outliner Tree Panel
     egui::Panel::left("tree")
@@ -2369,5 +2386,159 @@ mod tests {
 
         assert!(!state.touched_the_document());
         assert_eq!(editor.document_mut().undo(), None);
+    }
+
+    /// What `ribbon` needs, held by the harness across frames.
+    struct Bench<K: GeometryKernel + Default> {
+        editor: Editor<K>,
+        tab: RibbonTab,
+        grid: bool,
+    }
+
+    /// The Ribbon, drawn with no window, on `tab`, over `editor`.
+    fn bench<K: GeometryKernel + Default>(
+        editor: Editor<K>,
+        tab: RibbonTab,
+    ) -> egui_kittest::Harness<'static, Bench<K>> {
+        let mut harness = egui_kittest::Harness::new_ui_state(
+            |ui, bench: &mut Bench<K>| {
+                ribbon(ui, &mut bench.editor, &mut bench.tab, &mut bench.grid);
+            },
+            Bench {
+                editor,
+                tab,
+                grid: true,
+            },
+        );
+        harness.run();
+        harness
+    }
+
+    /// Whether the widget called `label` is enabled — read from the AccessKit
+    /// tree, which is what egui builds from the widget itself, and not from
+    /// anything the test computed.
+    fn enabled<K: GeometryKernel + Default>(
+        harness: &egui_kittest::Harness<'_, Bench<K>>,
+        label: &str,
+    ) -> bool {
+        use egui_kittest::kittest::{NodeT, Queryable};
+        !harness.get_by_label(label).accesskit_node().is_disabled()
+    }
+
+    /// Hovers `label` and answers whether `text` is then on screen.
+    fn hover_shows<K: GeometryKernel + Default>(
+        harness: &mut egui_kittest::Harness<'_, Bench<K>>,
+        label: &str,
+        text: &str,
+    ) -> bool {
+        use egui_kittest::kittest::Queryable;
+        harness.get_by_label(label).hover();
+        harness.run();
+        let shown = harness.query_by_label(text).is_some();
+        harness.remove_cursor();
+        harness.run();
+        shown
+    }
+
+    /// Every button on the Ribbon that a capability guards, with the tab it is
+    /// on. Written out, because "the construction was applied to the right call
+    /// sites" is exactly what the 2026-09-18 record said was read and not
+    /// checked; a new gated button that is not in this list is a button no test
+    /// has pressed.
+    const GATED: [(RibbonTab, &str, Capability); 6] = [
+        (RibbonTab::Create, "Sweep", Capability::BentSweep),
+        (RibbonTab::Modify, "Fillet [R]", Capability::Blend),
+        (RibbonTab::Modify, "Chamfer [C]", Capability::Blend),
+        (RibbonTab::Modify, "Shell [H]", Capability::Shell),
+        (RibbonTab::File, "Import STEP...", Capability::StepImport),
+        (RibbonTab::File, "Export STEP...", Capability::StepExport),
+    ];
+
+    #[test]
+    fn a_button_the_build_cannot_serve_is_grey_and_says_why_on_hover() {
+        // FakeKernel is the one backend that denies *some* of these and not
+        // others, so one build shows both halves: STEP greyed with its
+        // sentence, the blends offered.
+        for (tab, label, cap) in GATED {
+            let mut harness = bench(editor(), tab);
+            let supported = harness.state().editor.supports(cap);
+            assert_eq!(
+                enabled(&harness, label),
+                supported,
+                "{label}: the widget and `supports({cap})` disagree"
+            );
+            assert_eq!(
+                hover_shows(&mut harness, label, cap.absence()),
+                !supported,
+                "{label}: the absence is said on hover exactly when the build lacks {cap}"
+            );
+        }
+        // Not vacuous: the fake has to have exercised both branches.
+        let e = editor();
+        assert!(GATED.iter().any(|&(_, _, c)| e.supports(c)));
+        assert!(GATED.iter().any(|&(_, _, c)| !e.supports(c)));
+    }
+
+    #[test]
+    fn a_button_off_for_want_of_a_selection_does_not_blame_the_build() {
+        let mut editor = editor();
+        editor.document_mut().clear_selection();
+        assert!(editor.supports(Capability::Blend));
+
+        let mut harness = bench(editor, RibbonTab::Modify);
+        assert!(!enabled(&harness, "Fillet [R]"), "nothing is selected");
+        assert!(
+            !hover_shows(&mut harness, "Fillet [R]", Capability::Blend.absence()),
+            "\"this build cannot\" is wrong advice when the build can"
+        );
+    }
+
+    /// The browser's and the default desktop build's backend, through the
+    /// widgets rather than through `supports`.
+    #[cfg(feature = "truck")]
+    #[test]
+    fn on_truck_the_ribbon_offers_the_two_section_loft_and_none_of_the_six() {
+        use egui_kittest::kittest::Queryable;
+        use w3d_kernel_truck::TruckKernel;
+        let with_a_box = || {
+            let mut editor = Editor::new(TruckKernel::default());
+            editor
+                .try_run(Command::AddBox)
+                .expect("a box every backend can make");
+            editor
+        };
+
+        for (tab, label, cap) in GATED {
+            let mut harness = bench(with_a_box(), tab);
+            assert!(!enabled(&harness, label), "{label} is offered on truck");
+            assert!(
+                hover_shows(&mut harness, label, cap.absence()),
+                "{label} is grey on truck and does not say why"
+            );
+        }
+
+        // A press on a grey button is not a press. Fillet, because it opens no
+        // dialog: had the press gone through, truck would have refused it in
+        // the status line, and the status line is where the editor says
+        // anything at all. `capable` guards this twice — the widget is
+        // disabled, and it never reports a click for a capability the build
+        // lacks — so this fails only when both are gone, which is the case it
+        // is for.
+        let mut harness = bench(with_a_box(), RibbonTab::Modify);
+        let before = harness.state().editor.status().to_owned();
+        harness.get_by_label("Fillet [R]").click();
+        harness.run();
+        assert_eq!(harness.state().editor.status(), before);
+
+        // The negative control for the naming: `MultiSectionLoft` is false
+        // here, and the Ribbon's two-profile Loft must still be offered.
+        let harness = bench(with_a_box(), RibbonTab::Create);
+        assert!(
+            !harness
+                .state()
+                .editor
+                .supports(Capability::MultiSectionLoft)
+        );
+        assert!(enabled(&harness, "Loft"));
     }
 }
