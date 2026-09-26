@@ -119,9 +119,11 @@ kernel-truck/  w3d-kernel-truck pure Rust, and what the browser models on:      
                                 exact surfaces, and a boolean that is narrow    ✅ wasm
                                 rather than absent — it declines what it        ◐ boolean
                                 cannot do, and no longer answers wrongly
-xarch/         w3d-xarch        one measurement, built twice: what x86-64 and   ✅ built
-                                wasm32 agree about, and what they do not —
-                                `make xarch`, and register item 4
+xarch/         w3d-xarch        one measurement, built twice: x86-64 and        ✅ built
+                                wasm32 must cut the same solid, bit for bit —
+                                `make xarch`
+vendor/                         patched copies of crates.io dependencies,       —
+                                each with a PATCHED.md; not workspace members
 kernel-native/                  a kernel of our own                             ⬜
 ```
 
@@ -364,6 +366,10 @@ arrives with a number attached, or it arrives untested.
   because the source ships.
 - **Modifications to OCCT are OCCT's**, whatever this repository is licensed as. Emscripten port
   patches live in their own series and are published under LGPL-2.1.
+- **The same holds for a vendored crate.** `vendor/<crate>/` keeps its upstream licence, carries
+  the licence text, marks every changed file, and has a `PATCHED.md` saying what differs, why,
+  and what would let the patch be dropped. A patch there is a fork with a cost; the default is
+  still to fix upstream.
 - **Parasolid**, which is what actually makes Plasticity good, is a commercial Siemens licence with
   no WebAssembly distribution. It is not an option here; the gap it leaves is the whole difficulty
   of this project, and should be named as such rather than wished away.

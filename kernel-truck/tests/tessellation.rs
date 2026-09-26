@@ -142,14 +142,18 @@ const FINGERPRINTS: [(usize, usize, usize, u64, u64, u64); 3] = [
         14435484911307075045,
     ),
     // drilled plate: six planar faces and the wall of the hole, the top and
-    // bottom bounded by a circle that no parameter range describes
+    // bottom bounded by a circle that no parameter range describes.
+    // Re-recorded 2026-09-26, deliberately: `vendor/truck-shapeops` enters the
+    // intersection loop at a target-independent vertex, and the cut is now the
+    // one x86-64 and wasm32 agree on (6292 triangles, was 6294 here). See
+    // `vendor/truck-shapeops/PATCHED.md`.
     (
-        3425,
-        3425,
-        18882,
-        809326082532109153,
-        11939554635547878893,
-        16600163193542640383,
+        3423,
+        3423,
+        18876,
+        14486768521686904109,
+        8406372795070483751,
+        13228869761998984702,
     ),
 ];
 

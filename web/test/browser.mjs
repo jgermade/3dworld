@@ -503,26 +503,24 @@ console.log('\n— the worker boundary: the boot path —');
     const c = r.comparison;
     check('the main thread can still tessellate the same scene', c && !c.failed, c?.failed ?? '');
     if (c && !c.failed) {
-      // **Not equality, and the reason is a finding rather than a tolerance.**
-      // The document's hole was cut on x86-64; the reference's was cut in
-      // wasm32 — and the two booleans do not produce quite the same solid, so
-      // the same tessellator makes 6294 triangles of one and 6290 of the
-      // other. Tessellation itself agrees across the two architectures: this
-      // same document meshes to 6294 natively and to 6294 in the browser. It
-      // is the boolean that differs, which is the hazard AGENTS.md names for
-      // relaxed SIMD arriving through a different door.
+      // **Equality, since 2026-09-26.** The document's hole is cut on x86-64
+      // and the reference's in wasm32, and until then the two booleans gave
+      // 6294 and 6290 triangles: `truck-shapeops` chained the intersection
+      // curve through a hash map whose order depends on the width of `usize`
+      // (register item 4). The workspace now carries that crate patched —
+      // `vendor/truck-shapeops/PATCHED.md` — and `make xarch` holds the two
+      // architectures to the same solid bit for bit, so a difference here is
+      // not the boolean any more.
       //
-      // So what is asserted is that these are the same *scene* — two copies of
+      // What is asserted is that these are the same *scene* — two copies of
       // it, one in `format/examples/scene_w3d.rs` and one in `web/src/lib.rs`,
-      // which is the drift this check exists to catch. It is a weak check and
-      // is written down as one: a change to a dimension that does not move the
-      // triangle count would pass it.
-      const drift = Math.abs(c.after.triangles - c.before.triangles);
+      // which is the drift this check exists to catch. It is still a count and
+      // is written down as one: a change to a dimension that happens not to
+      // move the triangle count would pass it.
       check(
-        'and it is the same scene as the one compiled in, to within the boolean',
-        c.after.triangles > 0 && drift <= c.before.triangles * 0.01,
-        `${c.before.triangles} from the document, ${c.after.triangles} built here — ` +
-          `${drift} triangles apart`,
+        'and it is the same scene as the one compiled in',
+        c.after.triangles > 0 && c.after.triangles === c.before.triangles,
+        `${c.before.triangles} from the document, ${c.after.triangles} built here`,
       );
       check(
         'the canvas still shows a solid',
@@ -623,8 +621,10 @@ console.log('\n— the worker will not load: the page must still work —');
     );
     check('frames were drawn', r.frames > 2, `${r.frames} frames`);
     check('the canvas is not blank', r.colours >= DRAWN, `${r.colours} distinct colours`);
-    // The same scene, by the path that does not cross a heap. If these ever
-    // disagree with the worker's 6290, one of the two is wrong.
+    // The same scene, by the path that does not cross a heap. It should be the
+    // 6292 the worker makes, since `truck-shapeops` was patched to cut the same
+    // solid on every target; only that a solid was drawn is asserted here, and
+    // the equality is the document run's `the same scene as the one compiled in`.
     check(
       'and it is the same scene the worker would have made',
       r.report.triangles > 0,
