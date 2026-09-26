@@ -138,6 +138,7 @@ web: web-scene
 	$(CARGO) build -p w3d-web --release --target $(WASM_TARGET)
 	wasm-bindgen --target web --no-typescript --out-dir $(WASM_OUT) \
 	    target/$(WASM_TARGET)/release/w3d_web.wasm
+	@$(MAKE) --no-print-directory web-notice
 	@ls -l $(WASM_OUT)/w3d_web_bg.wasm | awk '{printf "wasm:     %.2f MiB\n", $$5/1048576}'
 	@gzip -9 -c $(WASM_OUT)/w3d_web_bg.wasm | wc -c | awk '{printf "wasm.gz:  %.2f MiB\n", $$1/1048576}'
 	@brotli -9 -c $(WASM_OUT)/w3d_web_bg.wasm 2>/dev/null | wc -c | awk '{printf "wasm.br:  %.2f MiB\n", $$1/1048576}' || true
@@ -191,6 +192,21 @@ web-threaded:
 	    | awk '{printf "wasm.threaded:    %.2f MiB\n", $$5/1048576}'
 	@gzip -9 -c $(WASM_OUT)/threaded/w3d_web_bg.wasm | wc -c \
 	    | awk '{printf "wasm.threaded.gz: %.2f MiB\n", $$1/1048576}'
+	@$(MAKE) --no-print-directory web-notice
+
+## Serving the wasm is distribution, and the licences want their texts beside
+## what is distributed — GPL-3.0's own, and the notices of every crate and font
+## compiled in. So they go into dist/, which is what the page links and what
+## the Pages job uploads. `--check` first: a stale NOTICE is refused here rather
+## than shipped, because a notice that omits a crate is the same absence as no
+## notice for that crate. `.txt`, because a host serves an extensionless file as
+## a download, or as nothing.
+.PHONY: web-notice
+web-notice:
+	python3 tools/notice.py --check
+	mkdir -p $(WASM_OUT)
+	cp NOTICE $(WASM_OUT)/NOTICE.txt
+	cp LICENSE $(WASM_OUT)/LICENSE.txt
 
 ## Both entries of the matrix, which is what the loader's dispatch needs before
 ## it has two things to dispatch to.

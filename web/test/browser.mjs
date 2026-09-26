@@ -212,6 +212,19 @@ async function run({
       };
     });
 
+    // Whether the page carries its licence and notices, *fetched* rather than
+    // found in the markup: a link to a file `make web` did not copy is a link
+    // that reads as compliance and serves a 404.
+    const notices = await page.evaluate(() =>
+      Promise.all(
+        [...document.querySelectorAll('a[data-notice]')].map(async (a) => {
+          const r = await fetch(a.href).catch(() => null);
+          const text = r && r.ok ? await r.text() : '';
+          return { href: a.getAttribute('href'), status: r ? r.status : 0, head: text.slice(0, 80) };
+        }),
+      ),
+    );
+
     let pick = null;
     let colours = 0;
     let canvasFit = null;
@@ -251,7 +264,7 @@ async function run({
         .catch((e) => ({ failed: String(e && e.message ? e.message : e) }));
     }
 
-    return { ...state, pick, colours, canvasFit, comparison, consoleErrors };
+    return { ...state, pick, colours, canvasFit, comparison, consoleErrors, notices };
   } finally {
     await browser.close();
     proc.kill();
@@ -709,6 +722,18 @@ console.log('\n— no COOP/COEP, but a service worker: it must supply them —')
     checkVariant(r);
     check('nothing threw', r.consoleErrors.length === 0, r.consoleErrors.join(' | '));
   }
+  // Here and not on every run, because this is the one shaped like the
+  // deployment: GitHub Pages, headers from a service worker. What is served
+  // there is what `make web` left in dist/, and the licences oblige the
+  // notices to travel with it.
+  check('the page links its licence and its notices', r.notices.length === 2,
+    r.notices.map((n) => n.href).join(', '));
+  for (const n of r.notices) {
+    check(`and ${n.href} is served`, n.status === 200 && n.head.length > 0, `HTTP ${n.status}`);
+  }
+  const notice = r.notices.find((n) => n.href.endsWith('NOTICE.txt'));
+  check('and the notice is this project\'s', notice && notice.head.startsWith('3dworld'),
+    notice ? JSON.stringify(notice.head.split('\n')[0]) : '(no notice link)');
 }
 
 console.log('');

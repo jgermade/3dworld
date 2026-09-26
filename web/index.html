@@ -4,12 +4,14 @@
 <style>
   html, body { margin: 0; height: 100%; background: #0e0f11; color: #c8ccd2;
                font: 13px/1.5 ui-monospace, monospace; }
-  #stage { display: grid; grid-template-rows: 1fr auto; height: 100%; }
+  #stage { display: grid; grid-template-rows: 1fr auto auto; height: 100%; }
   #viewport { position: relative; min-height: 0; }
   canvas { width: 100%; height: 100%; display: block; }
   #status { padding: .6rem .9rem; border-top: 1px solid #24272c; white-space: pre-wrap; }
   .warn { color: #e8a13c; }
   .bad { color: #e06c5a; }
+  #licence { padding: .2rem .9rem .4rem; color: #6c717a; font-size: 11px; }
+  #licence a { color: inherit; }
 </style>
 <div id="stage">
   <!-- The canvas is created by the loader, not written here: a canvas keeps
@@ -17,6 +19,16 @@
        means replacing the element. -->
   <div id="viewport"></div>
   <div id="status">starting…</div>
+  <!-- Serving this page's wasm is distribution. GPL-3.0 wants the licence and
+       the source offered with it, and the crates and fonts compiled in want
+       their notices preserved — which means *beside the build*, not on the
+       machine that made it. `make web` copies both files into dist/ after
+       checking NOTICE is current, and the browser suite fetches every link
+       marked `data-notice` so that a deployment without them fails. -->
+  <div id="licence">GPL-3.0-or-later ·
+    <a data-notice href="./dist/LICENSE.txt">licence</a> ·
+    <a data-notice href="./dist/NOTICE.txt">third-party notices</a> ·
+    <a href="https://github.com/jgermade/3dworld">source</a></div>
 </div>
 <!-- GitHub Pages cannot send COOP and COEP, so a service worker supplies
      them and the page reloads once under it. This has to be a classic script,

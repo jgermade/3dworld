@@ -17,7 +17,12 @@ truck-base = "0.5.0"
 # is the only thing that turns this on, and `make check` never sees it.
 rayon = { version = "1.10", optional = true }
 serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+# `float_roundtrip` because the geometry blob is JSON and a reopened document
+# must be the document that was saved. Without it `serde_json` parses a decimal
+# to within an ulp rather than to the double it came from, and 28 of the numbers
+# in the demo cut came back one bit off — so a save, a load and a save wrote two
+# different files, and the reopened solid was not the one that was written.
+serde_json = { version = "1.0", features = ["float_roundtrip"] }
 thiserror = "2.0"
 truck-shapeops = "0.4.0"
 truck-meshalgo = { version = "0.4.0", default-features = false, features = ["tessellation"] }

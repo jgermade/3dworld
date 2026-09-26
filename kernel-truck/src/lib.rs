@@ -15,6 +15,7 @@ use std::collections::{HashMap, HashSet};
 use truck_meshalgo::tessellation::{MeshableShape, MeshedShape};
 use truck_modeling::*;
 use truck_polymesh::PolygonMesh;
+use truck_topology::compress::{CompressedEdgeIndex, CompressedShell, CompressedSolid};
 use w3d_kernel::{
     Aabb, Body, BooleanOp, Capability, GeometryKernel, Import, KernelError, Mat4, Mesh, Profile,
     Quality, Result, SketchPlane, Tolerance, Topology, Vec3,
@@ -199,6 +200,130 @@ fn number_edges(faces: &[([f64; 7], &Face)]) -> EdgeIds {
         }
     }
     ids
+}
+
+type Compressed = CompressedSolid<Point3, Curve, Surface>;
+type CompressedShellOf = CompressedShell<Point3, Curve, Surface>;
+
+/// A solid as [`GeometryKernel::save_body`] writes it: the same
+/// `truck-json-1` a plain `serde_json::to_string` gives, with every choice the
+/// topology leaves free made from the geometry instead.
+///
+/// Three things in a compressed shell are orders rather than facts — which
+/// face comes first, which edge a loop starts at, and which loop of a face is
+/// listed first — and the vertex and edge tables are numbered by the walk
+/// those orders make. `truck-shapeops` hands back the faces of a boolean in
+/// the order of a map keyed by *address*, so the same cut saved in two
+/// processes gave two files: same length, same numbers, different order. The
+/// walk was never the problem; `compress` numbers deterministically from
+/// whatever it is given, and here it is given a canonical order.
+///
+/// The keys are the geometry's own `serde_json` text, which is what the file
+/// holds anyway, so two blobs that differ in order differ in a key. Two faces
+/// whose keys tie are geometrically identical — the same surface, the same
+/// loops at the same points — and swapping them changes nothing written.
+fn canonical(solid: &Solid) -> Compressed {
+    let mut boundaries: Vec<(String, CompressedShellOf)> = solid
+        .compress()
+        .boundaries
+        .into_iter()
+        .map(canonical_shell)
+        .map(|shell| (json(&shell), shell))
+        .collect();
+    boundaries.sort_by(|a, b| a.0.cmp(&b.0));
+    CompressedSolid {
+        boundaries: boundaries.into_iter().map(|(_, shell)| shell).collect(),
+    }
+}
+
+fn json<T: serde::Serialize>(value: &T) -> String {
+    // Infallible for these types — points, curves and surfaces are plain
+    // numbers and enums — and a key that could not be written would only
+    // cost the order its tiebreak, never the file its contents.
+    serde_json::to_string(value).unwrap_or_default()
+}
+
+fn canonical_shell(shell: CompressedShellOf) -> CompressedShellOf {
+    let vertices: Vec<String> = shell.vertices.iter().map(json).collect();
+    let curves: Vec<String> = shell.edges.iter().map(|e| json(&e.curve)).collect();
+
+    // A use of an edge in a loop: where it starts, what it is, which way.
+    let use_key = |u: &CompressedEdgeIndex| {
+        let (front, back) = shell.edges[u.index].vertices;
+        let start = if u.orientation { front } else { back };
+        (&vertices[start], &curves[u.index], u.orientation)
+    };
+
+    // Each loop starts at its least edge use, compared as a whole sequence so
+    // a loop that passes one point twice still has one answer; then a face's
+    // loops are sorted, and the faces by surface, orientation and loops.
+    let mut faces: Vec<_> = shell
+        .faces
+        .into_iter()
+        .map(|mut face| {
+            let mut loops: Vec<(Vec<_>, Vec<CompressedEdgeIndex>)> = face
+                .boundaries
+                .iter()
+                .map(|wire| {
+                    let n = wire.len();
+                    let rotated = |s: usize| (0..n).map(move |i| wire[(s + i) % n]);
+                    let start = (0..n)
+                        .min_by(|&a, &b| {
+                            rotated(a)
+                                .map(|u| use_key(&u))
+                                .cmp(rotated(b).map(|u| use_key(&u)))
+                        })
+                        .unwrap_or(0);
+                    let wire: Vec<_> = rotated(start).collect();
+                    (wire.iter().map(use_key).collect(), wire)
+                })
+                .collect();
+            loops.sort_by(|a, b| a.0.cmp(&b.0));
+            let key = (
+                json(&face.surface),
+                face.orientation,
+                loops.iter().map(|l| l.0.clone()).collect::<Vec<_>>(),
+            );
+            face.boundaries = loops.into_iter().map(|(_, wire)| wire).collect();
+            (key, face)
+        })
+        .collect();
+    faces.sort_by(|a, b| a.0.cmp(&b.0));
+
+    // Renumbered by the walk `compress` itself makes: an edge the first time a
+    // loop reaches it, then its two ends.
+    let mut edge_ids = vec![None; shell.edges.len()];
+    let mut vertex_ids = vec![None; shell.vertices.len()];
+    let mut edges = Vec::with_capacity(shell.edges.len());
+    let mut points = Vec::with_capacity(shell.vertices.len());
+    let faces = faces
+        .into_iter()
+        .map(|(_, mut face)| {
+            for wire in &mut face.boundaries {
+                for u in wire.iter_mut() {
+                    let old = u.index;
+                    u.index = *edge_ids[old].get_or_insert_with(|| {
+                        let id = edges.len();
+                        let mut edge = shell.edges[old].clone();
+                        for v in [&mut edge.vertices.0, &mut edge.vertices.1] {
+                            *v = *vertex_ids[*v].get_or_insert_with(|| {
+                                points.push(shell.vertices[*v]);
+                                points.len() - 1
+                            });
+                        }
+                        edges.push(edge);
+                        id
+                    });
+                }
+            }
+            face
+        })
+        .collect();
+    CompressedShell {
+        vertices: points,
+        edges,
+        faces,
+    }
 }
 
 /// One face's triangles, in a mesh of its own with indices from zero.
@@ -1026,7 +1151,8 @@ impl GeometryKernel for TruckKernel {
 
     fn save_body(&self, body: Body) -> Result<Vec<u8>> {
         let solid = self.get(body)?;
-        let json = serde_json::to_string(solid).map_err(|e| KernelError::Failed(e.to_string()))?;
+        let json = serde_json::to_string(&canonical(solid))
+            .map_err(|e| KernelError::Failed(e.to_string()))?;
         Ok(json.into_bytes())
     }
 

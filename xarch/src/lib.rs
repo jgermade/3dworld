@@ -223,14 +223,17 @@ pub fn measurements() -> Vec<Row> {
     push("cut.mesh.lines", Rule::Exact, mesh.line_count() as f64);
     push("cut.mesh.hash", Rule::Exact, f32_bits(&mesh.positions));
 
-    // The saved cut, in `f64`. Its bytes are not a row: `TruckKernel` writes
-    // the vertices in the iteration order of a pointer-keyed map, so the blob
-    // is not byte-stable across runs even on one architecture. The *numbers*
-    // in it are, as a multiset — which is what disagreed before the patch, 44
-    // of 1353 of them in their last digits.
+    // The saved cut, in `f64` and then in bytes. The numbers as a multiset are
+    // what disagreed before the patch, 44 of 1353 of them in their last digits,
+    // and they stay a row of their own: a difference in them is a different
+    // solid, and a difference in the bytes alone is a different order. Until
+    // `save_body` wrote in a canonical order the bytes could not be a row at
+    // all — the boolean's faces came back in the order of a map keyed by
+    // address, so the blob changed between two runs on one machine.
     let blob = k.save_body(cut).expect("save the cut");
     push("cut.blob.len", Rule::Exact, blob.len() as f64);
     push("cut.blob.numbers", Rule::Exact, f64_bits(&numbers(&blob)));
+    push("cut.blob.hash", Rule::Exact, fnv(&blob));
 
     out
 }
