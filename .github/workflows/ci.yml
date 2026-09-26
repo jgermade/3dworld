@@ -74,8 +74,9 @@ jobs:
         # node, so this costs a build and no setup. It is here rather than in
         # `make test` because that command is a no-setup gate and this needs a
         # second target — and it is here at all because the claim it holds
-        # (everything before the boolean is bit-identical on both) is exactly
-        # the kind that rots quietly in a record file. See register item 4.
+        # (the two builds cut the same solid, bit for bit, which rests on a
+        # patched dependency) is exactly the kind that rots quietly in a
+        # record file. See vendor/truck-shapeops/PATCHED.md.
         run: make xarch
 
   # OpenCASCADE, and STEP against something that is not us. One job rather than

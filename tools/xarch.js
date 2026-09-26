@@ -46,7 +46,7 @@ const prepare = exported('prepare');
 const value = exported('value');
 const rule = exported('rule');
 
-const RULES = ['exact', 'close', 'report'];
+const RULES = ['exact', 'report'];
 const bits = new DataView(new ArrayBuffer(8));
 
 const count = prepare();

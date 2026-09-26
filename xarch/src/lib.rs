@@ -1,20 +1,19 @@
 //! One measurement, built twice: what x86-64 and `wasm32-unknown-unknown`
-//! agree about, and what they do not.
+//! agree about — which is now everything it measures.
 //!
-//! Register item 4 is that the browser and the desktop cut the same plate into
-//! different solids — 6294 triangles against 6290. On 2026-09-21 that was
+//! Register item 4 was that the browser and the desktop cut the same plate
+//! into different solids — 6294 triangles against 6290. On 2026-09-21 that was
 //! traced to an iteration order inside `truck-shapeops`: the intersection
 //! polyline is chained through an `FxHashMap`, and `rustc-hash` multiplies by a
 //! different constant when `usize` is 32 bits wide, so the same closed loop is
-//! entered at a different vertex. The fix is two lines in a crates.io
-//! dependency and is not taken yet.
+//! entered at a different vertex. Since 2026-09-26 the workspace carries that
+//! crate patched (`vendor/truck-shapeops/PATCHED.md`) with ordered containers
+//! in their place, and the cut is 6292 triangles on both.
 //!
-//! **So this crate cannot assert that the two builds agree, because they do
-//! not.** What it asserts is the half that is true, and that half is worth
-//! pinning: everything *up to* the boolean is bit-identical on both, and each
-//! build is deterministic in itself. The day either of those stops being true,
-//! the diagnosis above stops being the explanation — and a measurement in a
-//! record file cannot say so, which is why this is a check.
+//! **So every row is now asserted**: the operands, the cut's topology, its
+//! mesh, and the numbers in the saved solid, bit for bit, and each build
+//! deterministic in itself. The day the patch is dropped without upstream
+//! carrying the fix, the cut's rows fail here rather than in nobody's memory.
 //!
 //! Every number crosses as its `to_bits()`. A probe that compares printed
 //! doubles cannot see a difference of an ulp, and an ulp is the whole subject.
@@ -31,13 +30,11 @@ use w3d_kernel_truck::TruckKernel;
 /// How the two architectures are held to a row.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Rule {
-    /// Must agree bit for bit. Everything before the boolean is one of these.
+    /// Must agree bit for bit. Every row today is one of these.
     Exact,
-    /// Must agree to within 1%. The tolerance `make web-test` uses for the
-    /// same reason: the boolean's output differs by four triangles and
-    /// equality is not available until the dependency moves.
-    Close,
-    /// Printed, not asserted. A number whose disagreement is the finding.
+    /// Printed, not asserted. For a number whose disagreement is the finding;
+    /// no row is one since item 4's cause was patched, and the next known
+    /// disagreement should be written as one rather than left out.
     Report,
 }
 
@@ -45,7 +42,6 @@ impl Rule {
     pub fn as_str(self) -> &'static str {
         match self {
             Rule::Exact => "exact",
-            Rule::Close => "close",
             Rule::Report => "report",
         }
     }
@@ -74,6 +70,38 @@ fn f64_bits(values: &[f64]) -> f64 {
         bytes.extend_from_slice(&x.to_bits().to_le_bytes());
     }
     fnv(&bytes)
+}
+
+/// Every number in a JSON document, sorted by bit pattern: a multiset, so the
+/// order `save_body` happened to write them in does not matter and every digit
+/// of every one of them does.
+fn numbers(json: &[u8]) -> Vec<f64> {
+    let text = std::str::from_utf8(json).expect("a saved solid is UTF-8");
+    // Outside a string, JSON holds only numbers, `true`, `false`, `null` and
+    // punctuation, so a run of number characters with a digit in it is one.
+    let mut outside = String::with_capacity(text.len());
+    let (mut in_string, mut escaped) = (false, false);
+    for c in text.chars() {
+        if in_string {
+            match (escaped, c) {
+                (true, _) => escaped = false,
+                (false, '\\') => escaped = true,
+                (false, '"') => in_string = false,
+                _ => {}
+            }
+            outside.push(' ');
+        } else {
+            in_string = c == '"';
+            outside.push(if in_string { ' ' } else { c });
+        }
+    }
+    let mut out: Vec<f64> = outside
+        .split(|c: char| !(c.is_ascii_digit() || matches!(c, '-' | '+' | '.' | 'e' | 'E')))
+        .filter(|t| t.bytes().any(|b| b.is_ascii_digit()))
+        .map(|t| t.parse().expect("a JSON number"))
+        .collect();
+    out.sort_by_key(|x| x.to_bits());
+    out
 }
 
 fn f32_bits(points: &[[f32; 3]]) -> f64 {
@@ -184,23 +212,25 @@ pub fn measurements() -> Vec<Row> {
     let mesh = k.tessellate(cut, Quality::display_default()).expect("mesh");
     push(
         "cut.mesh.triangles",
-        Rule::Close,
+        Rule::Exact,
         mesh.triangle_count() as f64,
     );
     push(
         "cut.mesh.vertices",
-        Rule::Close,
+        Rule::Exact,
         mesh.positions.len() as f64,
     );
-    push("cut.mesh.lines", Rule::Close, mesh.line_count() as f64);
+    push("cut.mesh.lines", Rule::Exact, mesh.line_count() as f64);
+    push("cut.mesh.hash", Rule::Exact, f32_bits(&mesh.positions));
 
-    // Reported and not asserted, because it is the finding: the saved solid is
-    // two bytes shorter on wasm32, where 44 of its 1353 numbers differ in their
-    // last digits. Its *hash* is deliberately not a row — `TruckKernel` writes
+    // The saved cut, in `f64`. Its bytes are not a row: `TruckKernel` writes
     // the vertices in the iteration order of a pointer-keyed map, so the blob
-    // is not byte-stable across runs even on one architecture.
+    // is not byte-stable across runs even on one architecture. The *numbers*
+    // in it are, as a multiset — which is what disagreed before the patch, 44
+    // of 1353 of them in their last digits.
     let blob = k.save_body(cut).expect("save the cut");
-    push("cut.blob.len", Rule::Report, blob.len() as f64);
+    push("cut.blob.len", Rule::Exact, blob.len() as f64);
+    push("cut.blob.numbers", Rule::Exact, f64_bits(&numbers(&blob)));
 
     out
 }
@@ -261,9 +291,44 @@ mod exports {
                 .get(i as usize)
                 .map_or(u32::MAX, |row| match row.rule {
                     super::Rule::Exact => 0,
-                    super::Rule::Close => 1,
-                    super::Rule::Report => 2,
+                    super::Rule::Report => 1,
                 })
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::numbers;
+
+    #[test]
+    fn numbers_are_read_outside_strings_only() {
+        // A key with digits and an `e` in it, an escaped quote, `true` — none
+        // of them is a number, and a parse of any would either panic or put a
+        // name into the multiset.
+        let json = br#"{"Curve3e1":[1.5,-2e-3],"s\"9":true,"x":[0,4.25E2,null]}"#;
+        let expected: Vec<u64> = {
+            let mut v = [1.5f64, -2e-3, 0.0, 425.0];
+            v.sort_by_key(|x| x.to_bits());
+            v.iter().map(|x| x.to_bits()).collect()
+        };
+        let got: Vec<u64> = numbers(json).iter().map(|x| x.to_bits()).collect();
+        assert_eq!(got, expected);
+    }
+
+    #[test]
+    fn a_saved_solid_gives_up_its_coordinates() {
+        // A multiset of nothing would agree with anything, so the reader has to
+        // be shown to find the numbers in a real `save_body`: a box has eight
+        // corners, and the extremes of its bounds must turn up among them.
+        use w3d_kernel::{GeometryKernel, Vec3};
+        let mut k = w3d_kernel_truck::TruckKernel::default();
+        let cube = k.create_box(Vec3::new(20.0, 20.0, 20.0)).unwrap();
+        let found = numbers(&k.save_body(cube).unwrap());
+        assert!(found.len() >= 24, "{} numbers in a saved box", found.len());
+        let b = k.bounds(cube).unwrap();
+        for x in [b.min.x, b.max.x, b.min.z, b.max.z] {
+            assert!(found.contains(&x), "{x} not among {found:?}");
+        }
     }
 }

@@ -4,6 +4,10 @@ members = ["kernel", "kernel-fake", "kernel-occt", "kernel-truck", "core", "form
 # kernel-occt needs OpenCASCADE headers and libraries present, so it is not a
 # default member: `cargo test` stays a no-setup command. Run it explicitly with
 # `cargo test -p w3d-kernel-occt`, or `make test-occt`.
+# vendor/ holds patched copies of crates.io dependencies, each with a PATCHED.md
+# saying what differs and why. They are wired in by [patch.crates-io] below and
+# are not ours to lint or format.
+exclude = ["vendor"]
 default-members = ["kernel", "kernel-fake", "kernel-truck", "core", "format", "wire", "render", "web", "app", "xarch"]
 
 [workspace.package]
@@ -19,3 +23,11 @@ unsafe_code = "forbid"
 lto = true
 codegen-units = 1
 panic = "abort"
+
+# Register item 4: `truck-shapeops` chains the boolean's intersection curve
+# through an `FxHashMap`, whose iteration order depends on the width of `usize`,
+# so the desktop and the browser cut the same solids differently. The vendored
+# copy uses ordered containers there and nothing else changes; see
+# vendor/truck-shapeops/PATCHED.md, and remove this the day upstream carries it.
+[patch.crates-io]
+truck-shapeops = { path = "vendor/truck-shapeops" }

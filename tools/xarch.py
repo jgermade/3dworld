@@ -1,28 +1,26 @@
 #!/usr/bin/env python3
-"""Runs one measurement on two architectures and says what they agree about.
+"""Runs one measurement on two architectures and requires them to agree.
 
-Register item 4 is that the desktop and the browser cut the same plate into
+Register item 4 was that the desktop and the browser cut the same plate into
 different solids — 6294 triangles against 6290. On 2026-09-21 that was traced
 to an iteration order inside `truck-shapeops`: the intersection polyline is
 chained through an `FxHashMap`, `rustc-hash` multiplies by a different constant
 when `usize` is 32 bits wide, and the same closed loop is therefore entered at a
-different vertex. The fix is two lines in a crates.io dependency and has not
-been taken.
+different vertex. Since 2026-09-26 the workspace carries that crate patched —
+`vendor/truck-shapeops/PATCHED.md` — and the cut is 6292 triangles on both.
 
-**So this cannot assert that the two builds agree.** It asserts the half that is
-true, and that half is what makes the diagnosis falsifiable:
+**So every row is asserted, bit for bit**: the operands as saved solids, their
+bounds, their topology and their meshes at four sags; the cut's topology, its
+mesh, and every number in the saved cut; and each build deterministic in
+itself, run twice in two processes. Before the patch this script could only
+hold the half before the boolean and report the rest.
 
-  - everything *before* the boolean is bit-identical on both — the operands as
-    saved solids, their bounds, their topology, and their meshes at four sags;
-  - the topology of the cut is identical too, so the disagreement is about
-    where a curve starts and not about what the solid is;
-  - and each build is deterministic in itself, run twice in two processes.
-
-The last one is not ceremony. The first version of this measurement hashed the
-*saved cut*, which varies from run to run on one machine — `TruckKernel` writes
-its vertices in the iteration order of a pointer-keyed map — and that produced
-one confident wrong reading before anybody checked. A cross-architecture claim
-resting on a number that is not stable within an architecture is not a claim.
+The determinism half is not ceremony. The first version of this measurement
+hashed the *saved cut*'s bytes, which vary from run to run on one machine —
+`TruckKernel` writes its vertices in the iteration order of a pointer-keyed map
+— and that produced one confident wrong reading before anybody checked. A
+cross-architecture claim resting on a number that is not stable within an
+architecture is not a claim.
 
 What it needs: a wasm32 target (`rustup target add`, as `make wasm` does) and a
 node. Deliberately not wasm-bindgen's CLI — see `tools/xarch.js`.
@@ -36,12 +34,6 @@ ROOT = Path(__file__).resolve().parent.parent
 TARGET = "wasm32-unknown-unknown"
 WASM = ROOT / "target" / TARGET / "release" / "w3d_xarch.wasm"
 NATIVE = ROOT / "target" / "release" / "xarch"
-
-# The tolerance `Rule::Close` is held to, and the same 1% `make web-test` uses
-# between the page's two copies of the demo scene — for the same reason, and it
-# should become equality on the day the dependency moves.
-CLOSE = 0.01
-
 
 def run(cmd, **kwargs):
     return subprocess.run(cmd, cwd=ROOT, check=True, text=True,
@@ -103,16 +95,8 @@ def compare(rows_native, rows_wasm):
             verdict = "same" if same else "DIFFER"
             if not same:
                 failures.append(f"{name} must agree and does not: {value_n} against {value_w}")
-        elif rule == "close":
-            off = abs(value_n - value_w) / max(abs(value_n), 1.0)
-            if off > CLOSE:
-                verdict = f"OFF BY {off:.1%}"
-                failures.append(f"{name} is {off:.1%} apart, over {CLOSE:.0%}: "
-                                f"{value_n} against {value_w}")
-            else:
-                verdict = "same" if same else f"{off:.2%} apart, item 4"
         elif rule == "report":
-            verdict = "same" if same else "differs, item 4"
+            verdict = "same" if same else "differs, reported"
         else:
             raise SystemExit(f"row {i} carries a rule this script does not know: {rule}")
         lines.append(f"{name or '':{width}}  {value_n:>16.10g}  {value_w:>16.10g}  {verdict}")
@@ -120,23 +104,20 @@ def compare(rows_native, rows_wasm):
 
 
 def negative_controls():
-    """Three faults, and the table has to catch each. They run *first*, and
+    """Two faults, and the table has to catch each. They run *first*, and
     they run on every invocation: a comparison that cannot fail is a
     comparison that says nothing when it passes, and the way this script
     silently stops asserting is a rule name that stops matching."""
     row = lambda i, name, rule, bits, value: (i, name, rule, bits, value)
     native = [
         row(0, "a.exact", "exact", "aaaa", 1.0),
-        row(1, "b.close", "close", "bbbb", 100.0),
-        row(2, "c.report", "report", "cccc", 7.0),
+        row(1, "b.report", "report", "bbbb", 7.0),
     ]
     controls = [
         ("an exact row that differs",
-         [row(0, "a.exact", "exact", "zzzz", 2.0), native[1], native[2]], 1),
-        ("a close row 5% apart",
-         [native[0], row(1, "b.close", "close", "zzzz", 105.0), native[2]], 1),
+         [row(0, "a.exact", "exact", "zzzz", 2.0), native[1]], 1),
         ("a report row that differs, which must NOT fail",
-         [native[0], native[1], row(2, "c.report", "report", "zzzz", 9.0)], 0),
+         [native[0], row(1, "b.report", "report", "zzzz", 9.0)], 0),
     ]
     for description, wasm, wanted in controls:
         _, failures = compare(native, wasm)
@@ -168,9 +149,9 @@ def main():
         for failure in failures:
             print(f"FAIL: {failure}")
         return 1
-    print("The two builds agree on everything before the boolean, and on the "
-          "topology of its result.")
-    print("They disagree inside it, by item 4, and that is not asserted here.")
+    exact = sum(1 for r in native[0] if r[2] == "exact")
+    print(f"The two builds agree, bit for bit, on all {exact} asserted rows — "
+          "the boolean's result included.")
     return 0
 
 
