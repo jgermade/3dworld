@@ -108,6 +108,52 @@ tree. Check render/Cargo.toml's wgpu features."; exit 1)
 ## Output goes to web/dist/, which is gitignored. Nothing built is committed.
 WASM_OUT := web/dist
 
+## `wasm-opt`, from a pinned binaryen release rather than the distribution's:
+## Ubuntu Noble ships binaryen 108, which cannot parse what current rustc
+## emits — `table.fill`, from the reference-types feature rustc turned on by
+## default for wasm32 — and fails with "invalid code after misc prefix: 17".
+## A version that must be new enough is a version that is pinned, and a
+## download that is pinned is checked against its hash.
+##
+## Fetched by `make binaryen`, not by the build, for the reason `occt-headers`
+## gives: a build that reaches the network on its own is not reproducible.
+## `WASM_OPT=none` builds unoptimised and says so; any other value names the
+## binary to use.
+BINARYEN_VERSION := version_124
+BINARYEN_SHA256 := 0290c3779fedf592b8da0ded3032ff55c41a2b7bfa2d6bf7b7bac6f0e6e28963
+BINARYEN_DIR := tools/.binaryen
+WASM_OPT ?= $(BINARYEN_DIR)/bin/wasm-opt
+
+.PHONY: binaryen
+binaryen:
+	mkdir -p $(BINARYEN_DIR)
+	curl -sSfL -o $(BINARYEN_DIR)/binaryen.tar.gz \
+	    https://github.com/WebAssembly/binaryen/releases/download/$(BINARYEN_VERSION)/binaryen-$(BINARYEN_VERSION)-x86_64-linux.tar.gz
+	echo "$(BINARYEN_SHA256)  $(BINARYEN_DIR)/binaryen.tar.gz" | sha256sum -c -
+	tar -xzf $(BINARYEN_DIR)/binaryen.tar.gz -C $(BINARYEN_DIR) --strip-components=1
+	rm $(BINARYEN_DIR)/binaryen.tar.gz
+	$(BINARYEN_DIR)/bin/wasm-opt --version
+
+## `-O3` and not `-Oz`, and the difference was measured (rustc 1.98.1, binaryen
+## 124): `-Oz` is 114 KiB smaller raw, **7 KiB** smaller gzipped (1.315 against
+## 1.322 MB) and 1 KiB *larger* under brotli, and it buys that by trading speed
+## in a program whose whole browser workload is a boolean and a tessellation.
+## A large part of what `wasm-opt` removes at any level is the `name` section —
+## 1.02 MiB of function names, which is also what a panic's stack trace in the
+## console would have used.
+##
+## In place: the unoptimised module is not served, so it is not kept.
+define optimise
+	@if [ "$(WASM_OPT)" = none ]; then \
+	    echo "WASM_OPT=none: $(1) is NOT optimised"; \
+	elif command -v "$(WASM_OPT)" >/dev/null 2>&1; then \
+	    echo "$(WASM_OPT) -O3 $(1)"; $(WASM_OPT) -O3 $(1) -o $(1); \
+	else \
+	    echo "no wasm-opt at $(WASM_OPT): run \`make binaryen\`, or build with WASM_OPT=none"; exit 1; \
+	fi
+	@python3 tools/wasm_payload.py $(if $(filter none,$(WASM_OPT)),--unoptimised) $(1)
+endef
+
 ## What the threaded variant needs, in one place because it is long and because
 ## every flag in it is explained above `web-threaded` rather than in a comment
 ## nobody reads at the end of a line.
@@ -120,7 +166,7 @@ THREAD_RUSTFLAGS := -C target-feature=+atomics,+bulk-memory,+mutable-globals \
   -C link-arg=--export=__tls_size \
   -C link-arg=--export=__tls_align
 
-.PHONY: web web-threaded web-both web-opt web-serve web-test app up.app up.web app-test
+.PHONY: web web-threaded web-both web-serve web-test app up.app up.web app-test
 ## The document the page boots on, written by the kernel that will read it
 ## back. Not a check, and not committed: a generated file in the tree is a file
 ## that can be older than its generator and still look authoritative.
@@ -138,10 +184,8 @@ web: web-scene
 	$(CARGO) build -p w3d-web --release --target $(WASM_TARGET)
 	wasm-bindgen --target web --no-typescript --out-dir $(WASM_OUT) \
 	    target/$(WASM_TARGET)/release/w3d_web.wasm
+	$(call optimise,$(WASM_OUT)/w3d_web_bg.wasm)
 	@$(MAKE) --no-print-directory web-notice
-	@ls -l $(WASM_OUT)/w3d_web_bg.wasm | awk '{printf "wasm:     %.2f MiB\n", $$5/1048576}'
-	@gzip -9 -c $(WASM_OUT)/w3d_web_bg.wasm | wc -c | awk '{printf "wasm.gz:  %.2f MiB\n", $$1/1048576}'
-	@brotli -9 -c $(WASM_OUT)/w3d_web_bg.wasm 2>/dev/null | wc -c | awk '{printf "wasm.br:  %.2f MiB\n", $$1/1048576}' || true
 
 ## The second entry in the build matrix: the same crate, compiled to a module
 ## with a shared memory and atomic instructions, meshing a solid's faces across
@@ -185,13 +229,11 @@ web-threaded:
 	@# bundler can serve. Left alone it is a page that hangs rather than one
 	@# that fails — see the file.
 	python3 tools/rayon_worker_entry.py $(WASM_OUT)/threaded w3d_web.js
-	@# The build said yes; this asks the artifact. See the file for why the
-	@# two are different questions.
+	$(call optimise,$(WASM_OUT)/threaded/w3d_web_bg.wasm)
+	@# The build said yes; this asks the artifact — after `wasm-opt`, because
+	@# an optimiser that rewrote the memory would be the last step to break it.
+	@# See the file for why the two are different questions.
 	python3 tools/wasm_threads.py $(WASM_OUT)/threaded/w3d_web_bg.wasm
-	@ls -l $(WASM_OUT)/threaded/w3d_web_bg.wasm \
-	    | awk '{printf "wasm.threaded:    %.2f MiB\n", $$5/1048576}'
-	@gzip -9 -c $(WASM_OUT)/threaded/w3d_web_bg.wasm | wc -c \
-	    | awk '{printf "wasm.threaded.gz: %.2f MiB\n", $$1/1048576}'
 	@$(MAKE) --no-print-directory web-notice
 
 ## Serving the wasm is distribution, and the licences want their texts beside
@@ -211,14 +253,6 @@ web-notice:
 ## Both entries of the matrix, which is what the loader's dispatch needs before
 ## it has two things to dispatch to.
 web-both: web web-threaded
-
-web-opt: web
-	@which wasm-opt >/dev/null 2>&1 && ( \
-	    wasm-opt -O3 $(WASM_OUT)/w3d_web_bg.wasm -o $(WASM_OUT)/w3d_web_bg.opt.wasm && \
-	    ls -l $(WASM_OUT)/w3d_web_bg.opt.wasm | awk '{printf "wasm.opt:    %.2f MiB\n", $$5/1048576}' && \
-	    gzip -9 -c $(WASM_OUT)/w3d_web_bg.opt.wasm | wc -c | awk '{printf "wasm.opt.gz: %.2f MiB\n", $$1/1048576}' && \
-	    (brotli -9 -c $(WASM_OUT)/w3d_web_bg.opt.wasm 2>/dev/null | wc -c | awk '{printf "wasm.opt.br: %.2f MiB\n", $$1/1048576}' || true) \
-	) || echo "wasm-opt not installed on host; reported raw & compressed wasm metrics above"
 
 ## Serves web/ with COOP/COEP. `--no-isolation` omits them, which is the case
 ## worth seeing: the loader must degrade visibly rather than fail obscurely.

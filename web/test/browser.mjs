@@ -52,6 +52,7 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
 import fs from 'node:fs';
+import zlib from 'node:zlib';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, '..', '..');
@@ -88,6 +89,8 @@ const THREADED_BUILT = fs.existsSync(
 );
 
 const failures = [];
+/** What the first run fetched — see the payload section at the end. */
+let firstLoad = [];
 
 function check(name, ok, detail = '') {
   console.log(`${ok ? 'ok  ' : 'FAIL'}  ${name}${detail ? ` — ${detail}` : ''}`);
@@ -183,6 +186,26 @@ async function run({
     const page = await browser.newPage({ viewport: { width: 960, height: 660 } });
     const consoleErrors = [];
     page.on('pageerror', (e) => consoleErrors.push(String(e)));
+    // Every response this origin served, with the bytes the page actually
+    // received — the payload is what a load fetched, not a list of files
+    // somebody believes it fetches.
+    const fetched = [];
+    page.on('requestfinished', (req) => {
+      if (!req.url().startsWith(url)) return;
+      fetched.push(
+        (async () => {
+          const res = await req.response();
+          const body = res ? await res.body().catch(() => null) : null;
+          const sizes = await req.sizes().catch(() => null);
+          return {
+            path: new URL(req.url()).pathname,
+            status: res ? res.status() : 0,
+            body,
+            transferred: sizes ? sizes.responseBodySize : null,
+          };
+        })(),
+      );
+    });
     await page.goto(target, { waitUntil: 'load' });
 
     await page
@@ -211,6 +234,10 @@ async function run({
         status: document.getElementById('status')?.textContent ?? '',
       };
     });
+
+    // The payload is what the *page* fetched, so it is taken before the check
+    // below fetches anything of its own.
+    const loaded = fetched.slice();
 
     // Whether the page carries its licence and notices, *fetched* rather than
     // found in the markup: a link to a file `make web` did not copy is a link
@@ -264,7 +291,8 @@ async function run({
         .catch((e) => ({ failed: String(e && e.message ? e.message : e) }));
     }
 
-    return { ...state, pick, colours, canvasFit, comparison, consoleErrors, notices };
+    const responses = await Promise.all(loaded);
+    return { ...state, pick, colours, canvasFit, comparison, consoleErrors, notices, responses };
   } finally {
     await browser.close();
     proc.kill();
@@ -328,6 +356,7 @@ console.log('\n— WebGPU offered, cross-origin isolated —');
 {
   const r = await run({ isolated: true, webgpu: true });
   check('the page starts', r.ready, r.error ?? '');
+  firstLoad = r.responses;
   if (r.ready) {
     check('an adapter answered', !!r.report.backend, `${r.report.backend} · ${r.report.adapter}`);
     check('frames were drawn', r.frames > 2, `${r.frames} frames`);
@@ -734,6 +763,64 @@ console.log('\n— no COOP/COEP, but a service worker: it must supply them —')
   const notice = r.notices.find((n) => n.href.endsWith('NOTICE.txt'));
   check('and the notice is this project\'s', notice && notice.head.startsWith('3dworld'),
     notice ? JSON.stringify(notice.head.split('\n')[0]) : '(no notice link)');
+}
+
+console.log('\n— the payload: what a first load fetched, weighed —');
+{
+  // A size, and nothing asserted about it: there is no golden number for a
+  // payload, and one would fail on the day somebody adds a feature on purpose.
+  // What *is* asserted is that the number is about the right thing — the
+  // module the page ran is the module `make web` left in dist/ — and that
+  // nothing it asked for was missing.
+  const byPath = new Map();
+  for (const r of firstLoad) {
+    const e = byPath.get(r.path) ?? { path: r.path, requests: 0, statuses: new Set(), body: null, transferred: [] };
+    e.requests += 1;
+    e.statuses.add(r.status);
+    if (r.body && (!e.body || r.body.length > e.body.length)) e.body = r.body;
+    e.transferred.push(r.transferred);
+    byPath.set(r.path, e);
+  }
+  const rows = [...byPath.values()].map((e) => {
+    const raw = e.body ? e.body.length : 0;
+    return {
+      ...e,
+      raw,
+      gz: e.body ? zlib.gzipSync(e.body, { level: 9 }).length : 0,
+      br: e.body
+        ? zlib.brotliCompressSync(e.body, {
+            params: { [zlib.constants.BROTLI_PARAM_QUALITY]: 11 },
+          }).length
+        : 0,
+    };
+  });
+  rows.sort((a, b) => b.raw - a.raw);
+  const kib = (n) => (n / 1024).toFixed(1).padStart(8);
+  console.log(`      ${'raw KiB'.padStart(8)} ${'gzip'.padStart(8)} ${'brotli'.padStart(8)}  requests  path`);
+  for (const e of rows) {
+    console.log(`      ${kib(e.raw)} ${kib(e.gz)} ${kib(e.br)}  ${String(e.requests).padStart(8)}  ${e.path}` +
+      `  (transferred ${e.transferred.join(', ')})`);
+  }
+  const sum = (k) => rows.reduce((a, e) => a + e[k], 0);
+  console.log(`      ${kib(sum('raw'))} ${kib(sum('gz'))} ${kib(sum('br'))}            total, ${rows.length} files`);
+
+  check('every file the first load asked for was served',
+    rows.length > 0 && rows.every((e) => e.statuses.size === 1 && e.statuses.has(200)),
+    rows.filter((e) => !e.statuses.has(200)).map((e) => `${e.path} ${[...e.statuses]}`).join(', '));
+  // Every module, not only the one this thread ran: on a threaded page the
+  // worker still loads the single-threaded build, so two modules cross.
+  const modules = rows.filter((e) => e.path.endsWith('.wasm'));
+  // The finding this table was built to make visible: the worker and this
+  // thread each fetched the module, and a first visit paid for it twice. They
+  // now share one compile — so one request per module, whatever the cache did.
+  check('each module was downloaded once, not once per thread',
+    modules.length > 0 && modules.every((e) => e.requests === 1),
+    modules.map((e) => `${e.path} ×${e.requests}`).join(', ') || '(no module fetched)');
+  for (const e of modules) {
+    const built = path.join(root, 'web', e.path.replace(/^\//, ''));
+    check(`and ${e.path} is the module on disk`,
+      fs.existsSync(built) && fs.statSync(built).size === e.raw, `${e.raw} bytes served`);
+  }
 }
 
 console.log('');

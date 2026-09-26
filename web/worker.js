@@ -45,10 +45,13 @@
 import init, { tessellateScene, tessellateDocument } from './dist/w3d_web.js';
 
 self.onmessage = async (event) => {
-  const { chunksPerBody = 4, document = null } = event.data ?? {};
+  const { chunksPerBody = 4, document = null, module = null } = event.data ?? {};
   try {
     const startedInit = performance.now();
-    await init();
+    // The module the page compiled, when it could — so the first visit
+    // downloads it once rather than once per thread. See `compileSingle` in
+    // `loader.js`. Without one, `init` fetches its own, as it always did.
+    await init(module ? { module_or_path: module } : undefined);
     const initMs = performance.now() - startedInit;
 
     const started = performance.now();

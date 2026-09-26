@@ -240,6 +240,10 @@ jobs:
           if [ "$($HOME/.cargo/bin/wasm-bindgen --version 2>/dev/null | awk '{print $2}')" != "$version" ]; then
             cargo install wasm-bindgen-cli --version "$version" --force
           fi
+      - name: wasm-opt, from the pinned binaryen release
+        # Not Ubuntu's: its binaryen 108 cannot parse what current rustc emits.
+        # The Makefile pins the version and checks the download's hash.
+        run: make binaryen
       - name: Build WebAssembly assets
         run: make web
       - name: Upload artifact for GitHub Pages

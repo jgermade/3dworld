@@ -11,3 +11,4 @@ web/test/node_modules/
 
 .DS_Store__pycache__/
 web/scene.w3d
+tools/.binaryen/

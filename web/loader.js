@@ -113,6 +113,28 @@ const VARIANTS = {
 };
 
 /**
+ * The single-threaded module, fetched and compiled **once** for both threads.
+ *
+ * The worker and this thread used to load it separately — `init()` on each
+ * side, one fetch each — and `make web-test`'s payload table showed what that
+ * cost: the 4.5 MB module transferred twice on every first visit, because the
+ * two requests start together and neither can be served from a cache the other
+ * has not filled yet. A compiled `WebAssembly.Module` can be posted to a
+ * worker, so it is compiled here and handed to both.
+ *
+ * `null` if it cannot be, and then each side falls back to fetching its own —
+ * the old behaviour, slower and still correct. A host that serves `.wasm`
+ * without `application/wasm` fails `compileStreaming` and is caught by the
+ * second attempt, which is what wasm-bindgen's own loader does too.
+ */
+function compileSingle() {
+  const url = new URL('./dist/w3d_web_bg.wasm', import.meta.url);
+  return WebAssembly.compileStreaming(fetch(url))
+    .catch(() => fetch(url).then((r) => r.arrayBuffer()).then((b) => WebAssembly.compile(b)))
+    .catch(() => null);
+}
+
+/**
  * How many workers to ask for.
  *
  * `hardwareConcurrency` is the machine's answer and the cap is ours. The cap
@@ -156,10 +178,11 @@ export function poolSize(limit = 8) {
  *
  * Three things about the order below are load-bearing:
  *
- *   - **The worker is started first**, before the module is even imported.
- *     It loads its own copy and shares nothing, so there is nothing to wait
- *     for — and every millisecond of adapter negotiation on this thread is a
- *     millisecond the worker is already modelling.
+ *   - **The worker is started first**, before the module is even imported,
+ *     so every millisecond of adapter negotiation on this thread is a
+ *     millisecond the worker is already modelling. Since 2026-09-26 it waits
+ *     for one thing — the module this thread compiles for both, rather than
+ *     a second download of its own (see `compileSingle`).
  *   - **The mesh is installed before the graphics check.** `drewSomething`
  *     asks whether WebGPU actually rasterised anything by counting colours on
  *     the canvas, and a viewer with no bodies draws a flat background. Run
@@ -177,6 +200,13 @@ export function poolSize(limit = 8) {
  * document. A modeller has to send the document across, which is a second
  * format and is not written.
  */
+/** What wasm-bindgen's `init` is given: the shared module, or nothing, in
+ *  which case it fetches its own. */
+async function initArgs(compiled) {
+  const module = await compiled;
+  return module ? { module_or_path: module } : undefined;
+}
+
 export async function boot(
   container,
   { chunksPerBody = 4, workerUrl, documentUrl = './scene.w3d' } = {},
@@ -193,6 +223,10 @@ export async function boot(
   // overlaps with the worker loading its own copy of the wasm.
   const document = fetchDocument(documentUrl);
 
+  // Before the worker too, and for the same reason: the worker waits for this
+  // rather than fetching a second copy. See `compileSingle`.
+  const compiled = compileSingle();
+
   // Started before anything else on this thread, and deliberately not awaited
   // until the device is open. A rejection here is not fatal — see `meshNote`.
   //
@@ -200,7 +234,13 @@ export async function boot(
   // fallback is a fallback that does not work, and the only honest way to
   // reach this one is to give it a worker that really will not load — see
   // `web/test/browser.mjs`.
-  const meshing = tessellateInWorker(chunksPerBody, undefined, workerUrl, document).then(
+  const meshing = tessellateInWorker(
+    chunksPerBody,
+    undefined,
+    workerUrl,
+    document,
+    compiled,
+  ).then(
     (result) => ({ ok: true, result }),
     (error) => ({ ok: false, error }),
   );
@@ -217,7 +257,9 @@ export async function boot(
   }
 
   let module = await import(VARIANTS[chosen]);
-  await module.default();
+  // The shared compile only fits the single variant; the threaded one is a
+  // different module with a shared memory, and loads its own.
+  await module.default(chosen === 'single' ? await initArgs(compiled) : undefined);
 
   // The pool is started here and not inside the module: a wasm instance cannot
   // spawn its own workers, so `initThreadPool` is a promise JS has to await
@@ -241,7 +283,7 @@ export async function boot(
         'is not a missing feature: the page is isolated and the build exists, ' +
         'so something is stopping the workers.';
       module = await import(VARIANTS.single);
-      await module.default();
+      await module.default(await initArgs(compiled));
     }
   }
 
@@ -427,6 +469,7 @@ export function tessellateInWorker(
   timeoutMs = 60000,
   workerUrl = './worker.js',
   documentPromise = null,
+  modulePromise = null,
 ) {
   return new Promise((resolve, reject) => {
     let worker;
@@ -502,9 +545,11 @@ export function tessellateInWorker(
     // fetching the document overlapped with the worker loading its wasm. The
     // buffer goes in the transfer list: a document is the one thing crossing
     // *into* the worker and there is no reason to copy it either.
-    Promise.resolve(documentPromise)
-      .then((doc) => {
-        worker.postMessage({ chunksPerBody, document: doc }, doc ? [doc] : []);
+    Promise.all([documentPromise, modulePromise])
+      .then(([doc, module]) => {
+        // A `WebAssembly.Module` is cloned, not transferred — cloning one is
+        // sharing the compiled code, which is the point.
+        worker.postMessage({ chunksPerBody, document: doc, module }, doc ? [doc] : []);
       })
       .catch((e) => {
         clearTimeout(timer);
