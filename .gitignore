@@ -9,6 +9,7 @@ web/dist/
 web/test/node_modules/
 /samples
 
-.DS_Store__pycache__/
+.DS_Store
+__pycache__/
 web/scene.w3d
 tools/.binaryen/
