@@ -38,10 +38,25 @@ a third starting vertex. The conformance suite passes against it, which is what 
 boolean has to be argued against, and it is one scene's evidence that the two architectures agree.
 Whether either answer was the better curve is not a question this patch asks.
 
-**Only the one map whose order reached the output was changed.** `truck-shapeops` uses `FxHash`
-containers in `healing/`, `divide_face/`, `loops_store/` and `faces_classification/` as well.
-Nothing measured shows their order reaching a result, and nothing shows that it cannot; `make
-xarch` is one plate and one drill.
+**Only the one map whose order reached the output was changed, and the rest were read.** Audited
+on 2026-09-27, in `RECORD/2026-09-27_09h16.the-order-a-boolean-hands-back.completed.md`:
+
+- `divide_face/` and `loops_store/` use their maps only through `entry`, `get`, `insert` and
+  `remove` — caches and lookups, never iterated. Their order cannot reach anything.
+- `faces_classification/` looks faces up in its map and iterates the `Shell` beside it, a `Vec`.
+- `healing/` iterates one map (`param_vertices`, in `enumerate_vertices_on_divisor`) and sorts
+  the result by parameter afterwards, so only an exact tie keeps the hash's order; its maps are
+  keyed by `usize`, whose hash differs by target. It is not on the boolean's path at all — it is
+  exported for imported shapes, and nothing in this repository calls it.
+
+What *does* reach a result is not in this crate: `and` and `or` end in
+`truck_topology::Shell::connected_components`, which walks an `FxHashMap` keyed by `&Face` —
+by address — so the **order of a boolean's faces** changes between runs. It changes the order,
+not the solid. `w3d-kernel-truck` no longer lets it show: `save_body` writes a canonical order,
+faces are sorted with a geometric tiebreak, and edges are numbered by where they are.
+`integrate_by_component` also decides a component's status from `boundary[0][0]`, the first
+edge of an order that map sets; on a component whose boundary touches only one class, which is
+every one a valid input makes, any edge gives the same answer.
 
 ## Dropping it
 

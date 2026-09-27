@@ -118,7 +118,13 @@ fn tessellation_is_independent_of_the_thread_count() {
 }
 
 /// Recorded from the sequential path and asserted against both, in the order
-/// [`cases`] returns. See the note at the top of the file on why these are
+/// [`cases`] returns.
+///
+/// The last component of all three was re-recorded on 2026-09-27, and only that
+/// one: edges are now numbered by where they are rather than by the order the
+/// loops were walked, because the walk's order did not survive a save and a
+/// reopen (`kernel-truck/tests/face_order.rs`). Positions and face ids did not
+/// move, on either path. See the note at the top of the file on why these are
 /// literals rather than two runs compared in one process.
 const FINGERPRINTS: [(usize, usize, usize, u64, u64, u64); 3] = [
     // box: six planar faces, four vertices each
@@ -128,7 +134,7 @@ const FINGERPRINTS: [(usize, usize, usize, u64, u64, u64); 3] = [
         36,
         14095475103671264770,
         1236065057125872,
-        16815202147016075296,
+        14449719283496147135,
     ),
     // cylinder: a disc swept along the axis — four lateral faces and two caps,
     // and a cap triangulated over its whole disc rather than gridded over the
@@ -139,7 +145,7 @@ const FINGERPRINTS: [(usize, usize, usize, u64, u64, u64); 3] = [
         18438,
         15871330935632557431,
         14858392254419109789,
-        14435484911307075045,
+        7006856340508243065,
     ),
     // drilled plate: six planar faces and the wall of the hole, the top and
     // bottom bounded by a circle that no parameter range describes.
@@ -153,7 +159,7 @@ const FINGERPRINTS: [(usize, usize, usize, u64, u64, u64); 3] = [
         18876,
         14486768521686904109,
         8406372795070483751,
-        13228869761998984702,
+        17489130983091671759,
     ),
 ];
 

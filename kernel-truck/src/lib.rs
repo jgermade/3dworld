@@ -66,13 +66,7 @@ impl TruckKernel {
     /// then declines the blend anyway.
     fn distinct_edges(&self, body: Body) -> Result<u32> {
         let solid = self.get(body)?;
-        let mut faces: Vec<([f64; 7], &Face)> = solid
-            .boundaries()
-            .iter()
-            .flat_map(|shell| shell.face_iter())
-            .map(|face| (face_key(face), face))
-            .collect();
-        faces.sort_by(|a, b| key_order(&a.0, &b.0));
+        let faces = sorted_faces(solid);
         Ok(number_edges(&faces).len() as u32)
     }
 
@@ -161,20 +155,63 @@ fn get_range(b: (std::ops::Bound<f64>, std::ops::Bound<f64>)) -> (f64, f64) {
 /// surface's parameter range and its midpoint is what keeps that id the same
 /// across two runs, across the serial and the parallel path, and across a save
 /// and a load — none of which the topology's own iteration order promises.
-fn face_key(face: &Face) -> [f64; 7] {
+///
+/// **The surface alone is not enough, and it was measured not to be.** Two
+/// faces can share one: a slot cut across the top of a plate leaves two top
+/// faces on the same plane, and their keys tied. The sort is stable, so a tie
+/// kept the order the boolean handed back — the order of a map keyed by
+/// address, in `truck-topology`'s `Shell::connected_components` — and the two
+/// faces swapped ids between one run and the next. The tiebreak is the face's
+/// boundary vertices, sorted: two faces on one surface with the same vertices
+/// are the same region.
+type FaceKey = ([f64; 7], Vec<[f64; 3]>);
+
+fn face_key(face: &Face) -> FaceKey {
     let surface = face.surface();
     let u = get_range(surface.parameter_range().0);
     let v = get_range(surface.parameter_range().1);
     let p = surface.subs((u.0 + u.1) * 0.5, (v.0 + v.1) * 0.5);
-    [u.0, u.1, v.0, v.1, p.x, p.y, p.z]
+    let mut vertices: Vec<[f64; 3]> = face
+        .boundaries()
+        .iter()
+        .flat_map(|wire| wire.vertex_iter())
+        .map(|v| {
+            let q = v.point();
+            [q.x, q.y, q.z]
+        })
+        .collect();
+    vertices.sort_by(|a, b| numbers_order(a, b));
+    ([u.0, u.1, v.0, v.1, p.x, p.y, p.z], vertices)
 }
 
-fn key_order(a: &[f64; 7], b: &[f64; 7]) -> std::cmp::Ordering {
+fn numbers_order(a: &[f64], b: &[f64]) -> std::cmp::Ordering {
     a.iter()
         .zip(b.iter())
         .map(|(x, y)| x.total_cmp(y))
         .find(|o| o.is_ne())
-        .unwrap_or(std::cmp::Ordering::Equal)
+        .unwrap_or_else(|| a.len().cmp(&b.len()))
+}
+
+fn key_order(a: &FaceKey, b: &FaceKey) -> std::cmp::Ordering {
+    numbers_order(&a.0, &b.0).then_with(|| {
+        a.1.iter()
+            .zip(b.1.iter())
+            .map(|(x, y)| numbers_order(x, y))
+            .find(|o| o.is_ne())
+            .unwrap_or_else(|| a.1.len().cmp(&b.1.len()))
+    })
+}
+
+/// A solid's faces in [`face_key`] order: the order face ids are positions in.
+fn sorted_faces(solid: &Solid) -> Vec<(FaceKey, &Face)> {
+    let mut faces: Vec<(FaceKey, &Face)> = solid
+        .boundaries()
+        .iter()
+        .flat_map(|shell| shell.face_iter())
+        .map(|face| (face_key(face), face))
+        .collect();
+    faces.sort_by(|a, b| key_order(&a.0, &b.0));
+    faces
 }
 
 /// A solid's distinct edges, numbered — the id space `Mesh::edge_of_line` and
@@ -186,20 +223,59 @@ fn key_order(a: &[f64; 7], b: &[f64; 7]) -> std::cmp::Ordering {
 /// is over distinct edges and a shared edge gets one id.
 type EdgeIds = HashMap<EdgeID, u32>;
 
-/// Numbered in the order the *sorted* faces walk them, which is the same
-/// determinism argument the sort itself exists for: an id that depended on which
-/// thread finished first would be an id a saved selection could not survive.
-fn number_edges(faces: &[([f64; 7], &Face)]) -> EdgeIds {
-    let mut ids = EdgeIds::new();
+/// Numbered by where the edge *is*, not by the order anything walks it.
+///
+/// It used to be the order the sorted faces walked their loops, and that is a
+/// determinism argument with a hole in it: the faces are sorted, but which edge
+/// a loop starts at, and which of a face's loops comes first, are the
+/// topology's order. A boolean hands those back from maps keyed by address,
+/// and `save_body` writes them canonically — so a document's edge ids changed
+/// the first time it was saved and reopened, and a selection stored against
+/// one named another edge. `kernel-truck/tests/face_order.rs` scrambles those
+/// orders and requires the same ids.
+///
+/// The key is the edge's two ends, sorted, and the point at the middle of its
+/// curve — which tells apart the two halves of a circle that share both ends.
+/// Two edges with the same key are the same curve between the same points.
+fn number_edges(faces: &[(FaceKey, &Face)]) -> EdgeIds {
+    let mut seen: HashMap<EdgeID, [f64; 9]> = HashMap::new();
+    let mut order: Vec<(EdgeID, [f64; 9])> = Vec::new();
     for (_, face) in faces {
         for wire in face.absolute_boundaries() {
             for edge in wire.edge_iter() {
-                let next = ids.len() as u32;
-                ids.entry(edge.id()).or_insert(next);
+                if seen.contains_key(&edge.id()) {
+                    continue;
+                }
+                let key = edge_key(edge);
+                seen.insert(edge.id(), key);
+                order.push((edge.id(), key));
             }
         }
     }
-    ids
+    // Stable, so two edges whose keys tie keep the walk's order between them —
+    // which is only reachable by a curve that runs twice between one pair of
+    // points through one midpoint, and is not an edge this backend makes.
+    order.sort_by(|a, b| numbers_order(&a.1, &b.1));
+    order
+        .into_iter()
+        .enumerate()
+        .map(|(i, (id, _))| (id, i as u32))
+        .collect()
+}
+
+fn edge_key(edge: &Edge) -> [f64; 9] {
+    let point = |v: &Vertex| {
+        let p = v.point();
+        [p.x, p.y, p.z]
+    };
+    let (mut a, mut b) = (point(edge.front()), point(edge.back()));
+    if numbers_order(&a, &b).is_gt() {
+        std::mem::swap(&mut a, &mut b);
+    }
+    let curve = edge.curve();
+    let (t0, t1) = curve.range_tuple();
+    let m = curve.subs((t0 + t1) * 0.5);
+    [a[0], a[1], a[2], b[0], b[1], b[2], m.x, m.y, m.z]
 }
 
 type Compressed = CompressedSolid<Point3, Curve, Surface>;
@@ -1102,13 +1178,7 @@ impl GeometryKernel for TruckKernel {
     /// reason: a result a machine is allowed to disagree about is not a result.
     fn tessellate(&self, body: Body, quality: Quality) -> Result<Mesh> {
         let solid = self.get(body)?;
-        let mut faces: Vec<([f64; 7], &Face)> = solid
-            .boundaries()
-            .iter()
-            .flat_map(|shell| shell.face_iter())
-            .map(|face| (face_key(face), face))
-            .collect();
-        faces.sort_by(|a, b| key_order(&a.0, &b.0));
+        let faces = sorted_faces(solid);
 
         // `truck-meshalgo` panics on a tolerance at or below its own, and the
         // sag comes from a `Quality` a caller chose, so it is clamped here
