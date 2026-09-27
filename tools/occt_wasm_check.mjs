@@ -5,10 +5,10 @@
 //
 // Prints the same `name<TAB>value` rows as the native half, and then one more
 // kind of row the native half cannot make: an OCCT exception thrown and caught
-// *inside wasm*. The Rust side checks a revolve axis before the shim sees it,
-// so on the desktop that path is unreachable; here the shim is called directly
-// with a zero axis, `gp_Dir` throws `Standard_ConstructionError`, and the
-// answer must be an error code and a message — not a trap. It is the only
+// *inside wasm*. The Rust side validates a profile before the shim sees it, so
+// on the desktop that path is unreachable; here the shim is called directly
+// with a polygon of one repeated point, OCCT throws `StdFail_NotDone`, and the
+// answer must be an error code and OCCT's message — not a trap. It is the only
 // evidence that `-fwasm-exceptions` works, and a build without it passes every
 // other row here.
 //
@@ -139,19 +139,25 @@ for (const [n, v] of rows) console.log(`${n}\t${v}`);
 
 // --- wasm only -------------------------------------------------------------
 
-// A rectangle profile on the XY plane: kind, p1, p2, vertices, count, then
-// origin, x axis, y axis — `W3dOcctProfile`, 8-byte aligned on wasm32.
+// A polygon whose three corners are one point, on the XY plane:
+// `W3dOcctProfile` is kind, p1, p2, vertices, count, then origin, x axis and
+// y axis, 8-byte aligned on wasm32. `BRepBuilderAPI_MakePolygon` drops the
+// repeated points, and `Wire()` on what is left throws `StdFail_NotDone` —
+// unconditionally, which matters: OCCT's release build defines `No_Exception`
+// and compiles its `Raise_if` checks out, so most of its "exceptions" never
+// throw in either build. This one does in both. The Rust side refuses such a
+// profile before the shim sees it (`Profile::validate`), so only a direct call
+// reaches the throw.
+const corners = doubles([1, 1, 1, 1, 1, 1]);
 const profile = M._malloc(104);
-M.HEAP32[profile >>> 2] = 0;
-M.HEAPF64[(profile + 8) >>> 3] = 2;
-M.HEAPF64[(profile + 16) >>> 3] = 3;
-M.HEAPU32[(profile + 24) >>> 2] = 0;
-M.HEAPU32[(profile + 28) >>> 2] = 0;
+M.HEAP32[profile >>> 2] = 2;
+M.HEAPF64[(profile + 8) >>> 3] = 0;
+M.HEAPF64[(profile + 16) >>> 3] = 0;
+M.HEAPU32[(profile + 24) >>> 2] = corners;
+M.HEAPU32[(profile + 28) >>> 2] = 3;
 M.HEAPF64.set([0, 0, 0, 1, 0, 0, 0, 1, 0], (profile + 32) >>> 3);
-const origin = doubles([5, 0, 0]);
-const zeroAxis = doubles([0, 0, 0]);
-const thrown = call('revolve', ctx, profile, origin, zeroAxis, 1.0, scratch);
-console.log(`exception.revolve_zero_axis\t${KINDS[thrown] ?? thrown}\t${lastError()}`);
+const thrown = call('extrude', ctx, profile, 5.0, scratch);
+console.log(`exception.degenerate_polygon\t${KINDS[thrown] ?? thrown}\t${lastError()}`);
 
 console.error(`module instantiated in ${loadMs.toFixed(0)} ms; scenes built in ${elapsedMs.toFixed(0)} ms`);
 M._w3d_occt_context_free(ctx);

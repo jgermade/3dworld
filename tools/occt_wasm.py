@@ -82,8 +82,18 @@ TARGETS = [
 CMAKE_FLAGS = [
     "-DCMAKE_BUILD_TYPE=Release",
     "-DBUILD_LIBRARY_TYPE=Static",
-    "-DCMAKE_CXX_FLAGS=-fwasm-exceptions",
-    "-DCMAKE_C_FLAGS=-fwasm-exceptions",
+    # `-UOCC_CONVERT_SIGNALS`, and it was found by a module that would not
+    # compile: OCCT defines it on every non-Windows build, and with it every
+    # `OCC_CATCH_SIGNALS` becomes a `setjmp`. A `setjmp` in a function that
+    # also has a wasm `try` produced **invalid wasm** — V8 refused
+    # `ShapeUpgrade_ShapeDivide::Perform` with "br_table: label arity
+    # inconsistent", at every optimisation level, and the next such function
+    # the moment that one was fixed. There are no signals in wasm to convert —
+    # a trap is not a signal — so the macro is dropped rather than paid for
+    # with `-sSUPPORT_LONGJMP=wasm`. The flags come after OCCT's `-D` on the
+    # compile line, so the `-U` wins.
+    "-DCMAKE_CXX_FLAGS=-fwasm-exceptions -UOCC_CONVERT_SIGNALS",
+    "-DCMAKE_C_FLAGS=-fwasm-exceptions -UOCC_CONVERT_SIGNALS",
     "-DBUILD_MODULE_Draw=OFF",
     "-DBUILD_MODULE_Visualization=OFF",
     "-DBUILD_MODULE_ApplicationFramework=ON",

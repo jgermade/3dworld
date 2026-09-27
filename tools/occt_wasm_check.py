@@ -66,11 +66,13 @@ def main():
         if not same and not report:
             failures.append(name)
 
-    kind, _, message = b.get("exception.revolve_zero_axis", "(missing)").partition("\t")
-    ok = kind == "failed" and "gp_Dir" in message
+    kind, _, message = b.get("exception.degenerate_polygon", "(missing)").partition("\t")
+    # OCCT's own words, not one of the shim's: the shim's messages are for the
+    # failures it detects itself, and this one it can only catch.
+    ok = kind == "failed" and "not done" in message
     print(f"{'exception in wasm':22} {kind:>28} {message[:40]:>28}  {'caught' if ok else 'NOT CAUGHT'}")
     if not ok:
-        failures.append("exception.revolve_zero_axis")
+        failures.append("exception.degenerate_polygon")
 
     if failures:
         raise SystemExit(f"{len(failures)} row(s) disagree: {', '.join(failures)}")
