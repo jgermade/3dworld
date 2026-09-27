@@ -254,6 +254,14 @@ web-notice:
 ## it has two things to dispatch to.
 web-both: web web-threaded
 
+## The page's second document: the drilled plate with its edges filleted,
+## written by OpenCASCADE, so that `?doc=occt` opens something only the exact
+## kernel can make and the worker has to fetch the module for it. Needs a
+## native OCCT, like `make test-occt`; not a dependency of `make web`.
+.PHONY: web-scene-occt
+web-scene-occt:
+	$(CARGO) run -q -p w3d-kernel-occt --example scene_w3d_occt --release -- web/scene-occt.w3d
+
 ## OpenCASCADE for the browser: a second wasm module built by Emscripten from a
 ## pinned OCCT, exporting `kernel-occt/native/w3d_occt.h` and nothing else. See
 ## `tools/occt_wasm.py` for why it is a module of its own and what is pinned.

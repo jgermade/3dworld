@@ -514,3 +514,17 @@ fn two_saves_of_one_document_are_the_same_bytes() {
     let doc = drilled_plate();
     assert_eq!(save(&doc).unwrap(), save(&doc).unwrap());
 }
+
+#[test]
+fn a_file_says_whose_geometry_it_holds_before_it_is_opened() {
+    // What the browser's worker asks before it decides whether to fetch
+    // OpenCASCADE: the answer must be the writing kernel's own format, and a
+    // file that is not a document must be refused rather than guessed at.
+    let doc = drilled_plate();
+    let bytes = save(&doc).unwrap();
+    assert_eq!(
+        w3d_format::geometry_of(&bytes).unwrap(),
+        FakeKernel::default().geometry_format()
+    );
+    assert!(w3d_format::geometry_of(b"not a zip").is_err());
+}

@@ -16,3 +16,4 @@ tools/.binaryen/
 build/occt-wasm/
 tools/.emsdk/
 build/occt-bridge/
+web/scene-occt.w3d

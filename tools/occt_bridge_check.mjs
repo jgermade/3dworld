@@ -2,8 +2,8 @@
 // browser's OpenCASCADE module — from Node.
 //
 // Two wasm instances, two linear memories, and this file is the whole of what
-// joins them: the five primitives `remote.rs` asks for, on `globalThis.w3dOcct`.
-// The page will install the same five; nothing here knows the header.
+// joins them: the five primitives `remote.rs` asks for, installed by
+// `web/occt-bridge.js` — the page's worker installs them from the same file.
 //
 // Prints the conformance report, then the reference rows. Exits non-zero if a
 // conformance check failed; the rows are compared by `tools/occt_wasm_check.py`.
@@ -17,24 +17,9 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const what = process.argv[2] ?? 'both';
 
-const { default: createOcct } = await import(
-  pathToFileURL(path.join(root, 'web', 'dist', 'occt', 'w3d_occt.mjs')).href
-);
-const M = await createOcct();
-
-globalThis.w3dOcct = {
-  call: (name, args) => {
-    const fn = M[`_w3d_occt_${name}`];
-    if (!fn) throw new Error(`the OpenCASCADE module exports no w3d_occt_${name}`);
-    return fn(...args);
-  },
-  malloc: (len) => M._malloc(len),
-  free: (ptr) => M._free(ptr),
-  // `M.HEAPU8` is read on every call, never kept: the module's memory grows,
-  // and growing it replaces the buffer every earlier view was made of.
-  write: (ptr, bytes) => M.HEAPU8.set(bytes, ptr),
-  read: (ptr, out) => out.set(M.HEAPU8.subarray(ptr, ptr + out.length)),
-};
+// The same bridge the page's worker installs, from the same file.
+const { installOcct } = await import(pathToFileURL(path.join(root, 'web', 'occt-bridge.js')).href);
+await installOcct();
 
 const bridgeDir = path.join(root, 'build', 'occt-bridge');
 const bridge = await import(pathToFileURL(path.join(bridgeDir, 'w3d_occt_bridge_check.js')).href);

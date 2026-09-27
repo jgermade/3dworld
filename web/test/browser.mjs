@@ -84,6 +84,15 @@ const EXECUTABLE = process.env.W3D_CHROME ?? (fs.existsSync(OPT_CHROME) ? OPT_CH
  * an artifact is missing is the failure mode this whole directory exists to
  * avoid.
  */
+/**
+ * Whether the OpenCASCADE module and its document exist. Same rule as
+ * `THREADED_BUILT`: both answers assert. With them, `?doc=occt` must open the
+ * document with OpenCASCADE; without them, the page must say what is missing.
+ */
+const OCCT_BUILT =
+  fs.existsSync(path.join(root, 'web', 'dist', 'occt', 'w3d_occt.mjs')) &&
+  fs.existsSync(path.join(root, 'web', 'scene-occt.w3d'));
+
 const THREADED_BUILT = fs.existsSync(
   path.join(root, 'web', 'dist', 'threaded', 'w3d_web.js'),
 );
@@ -153,6 +162,7 @@ async function run({
   compare = false,
   breakWorker = false,
   noDocument = false,
+  occtDocument = false,
 } = {}) {
   const { proc, url } = await serve({ isolated });
   // `?coi=off` is the page's own hook for skipping service-worker registration.
@@ -167,6 +177,9 @@ async function run({
   // The deployment where `make web-scene` has not run. The worker must fall
   // back to the scene compiled into it, and say so.
   if (noDocument) params.push('doc=off');
+  // A document written by OpenCASCADE, which the worker must fetch the
+  // OpenCASCADE module to open.
+  if (occtDocument) params.push('doc=occt');
   const target = params.length ? `${url}?${params.join('&')}` : url;
   const args = ['--no-sandbox', '--enable-unsafe-swiftshader'];
   if (webgpu) {
@@ -765,6 +778,42 @@ console.log('\n— no COOP/COEP, but a service worker: it must supply them —')
     notice ? JSON.stringify(notice.head.split('\n')[0]) : '(no notice link)');
 }
 
+console.log('\n— a document only OpenCASCADE can open —');
+{
+  const r = await run({ isolated: true, webgpu: true, occtDocument: true });
+  check('the page starts', r.ready, r.error ?? '');
+  if (r.ready && OCCT_BUILT) {
+    check('the worker opened the document, not the built-in scene',
+      r.report.source === 'document', r.report.source);
+    check('and its manifest named OpenCASCADE',
+      r.wire && r.wire.geometry === 'occt-brep-1', r.wire ? String(r.wire.geometry) : '(no worker)');
+    check('so the worker fetched the module, and says what that cost',
+      r.wire && typeof r.wire.occtMs === 'number' && r.wire.occtMs > 0,
+      r.wire ? `${Math.round(r.wire.occtMs)} ms` : '(no worker)');
+    check('the mesh was made in the worker', r.report.meshedBy === 'worker',
+      `meshed by ${r.report.meshedBy}`);
+    // 2924 is what `make web-scene-occt` meshed natively; the browser's OCCT
+    // agreed with the desktop's on every mesh `make occt-wasm-check` compares,
+    // so this is asserted exactly, not to a tolerance.
+    check('the filleted plate arrived whole', r.report.triangles === 2924,
+      `${r.report.triangles} triangles`);
+    check('the canvas is not blank', r.colours >= DRAWN, `${r.colours} distinct colours`);
+    check('picking works on it', r.pick && r.pick.object !== null && r.pick.face !== null,
+      JSON.stringify(r.pick));
+    check('the user can see which kernel opened it',
+      r.status.includes('(occt-brep-1)') && r.status.includes('OpenCASCADE loaded in'),
+      r.status.split('\n')[1] ?? '');
+    const modules = r.responses.filter((x) => x.path.endsWith('/w3d_occt.wasm'));
+    check('the module was fetched once', modules.length === 1, `${modules.length} request(s)`);
+    check('nothing threw', r.consoleErrors.length === 0, r.consoleErrors.join(' | '));
+  } else if (r.ready) {
+    // Without the module the page must still come up — on the built-in scene
+    // — and must say it could not open the document, and why.
+    check('it falls back and says the module is missing',
+      (r.meshNote ?? '').includes('no OpenCASCADE'), r.meshNote ?? '(no note)');
+  }
+}
+
 console.log('\n— the payload: what a first load fetched, weighed —');
 {
   // A size, and nothing asserted about it: there is no golden number for a
@@ -804,6 +853,12 @@ console.log('\n— the payload: what a first load fetched, weighed —');
   const sum = (k) => rows.reduce((a, e) => a + e[k], 0);
   console.log(`      ${kib(sum('raw'))} ${kib(sum('gz'))} ${kib(sum('br'))}            total, ${rows.length} files`);
 
+  // The other half of the run above: a page opening its own document never
+  // asks for OpenCASCADE. Five megabytes gzipped is a cost only a document that
+  // needs it may impose.
+  check('a page whose document does not need OpenCASCADE never fetches it',
+    rows.every((e) => !e.path.includes('/dist/occt/')),
+    rows.filter((e) => e.path.includes('/dist/occt/')).map((e) => e.path).join(', ') || 'none requested');
   check('every file the first load asked for was served',
     rows.length > 0 && rows.every((e) => e.statuses.size === 1 && e.statuses.has(200)),
     rows.filter((e) => !e.statuses.has(200)).map((e) => `${e.path} ${[...e.statuses]}`).join(', '));

@@ -70,6 +70,11 @@
     // deployment where `make web-scene` has not run, and it must be a branch
     // the suite asserts rather than the one it happens to take.
     const forceNoDocument = query.get('doc') === 'off';
+    // `?doc=occt` boots on a document written by OpenCASCADE — the drilled
+    // plate with its edges filleted, which the page's own kernel cannot make —
+    // so the worker has to fetch the OpenCASCADE module to open it. Without
+    // the parameter that module is never requested, and the suite asserts so.
+    const occtDocument = query.get('doc') === 'occt';
 
     // While the worker works, this thread is supposed to be free. That is the
     // entire benefit of the boot path and it is invisible — the picture at the
@@ -113,7 +118,9 @@
     try {
       booted = await boot(container, {
         workerUrl: forceWorkerFailure ? './worker-that-does-not-exist.js' : undefined,
-        documentUrl: forceNoDocument ? './no-such-scene.w3d' : undefined,
+        documentUrl: forceNoDocument
+          ? './no-such-scene.w3d'
+          : occtDocument ? './scene-occt.w3d' : undefined,
       });
     } finally {
       ticking = false;
@@ -150,6 +157,8 @@
         tessellateMs: wire.tessellateMs,
         encodeMs: wire.encodeMs,
         modelled: wire.modelled,
+        geometry: wire.geometry,
+        occtMs: wire.occtMs,
       },
     });
 
@@ -322,6 +331,13 @@
           // built-in scene meshed in the worker, each of which means a
           // different thing went wrong and both of which look identical.
           ` · from ${report.source}` +
+          // Which kernel's geometry, and whether OpenCASCADE had to be fetched
+          // for it: a page that opened an OCCT document without saying so
+          // would look exactly like one that opened the page's own.
+          (state.wire && state.wire.geometry ? ` (${state.wire.geometry})` : '') +
+          (state.wire && state.wire.occtMs !== null
+            ? ` · OpenCASCADE loaded in ${Math.round(state.wire.occtMs)} ms`
+            : '') +
           (report.modelled === null ? '' : report.modelled ? ' (cut)' : ' (NOT cut)'),
         // `pool` is rayon's own count, not the variant's name. A threaded
         // build whose workers never started says `pool 1` here and would say

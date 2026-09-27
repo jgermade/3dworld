@@ -42,7 +42,8 @@
  * the document would otherwise draw exactly the same picture.
  */
 
-import init, { tessellateScene, tessellateDocument } from './dist/w3d_web.js';
+import init, { tessellateScene, tessellateDocument, documentGeometry } from './dist/w3d_web.js';
+import { OCCT_GEOMETRY, installOcct } from './occt-bridge.js';
 
 self.onmessage = async (event) => {
   const { chunksPerBody = 4, document = null, module = null } = event.data ?? {};
@@ -59,6 +60,16 @@ self.onmessage = async (event) => {
     // The second is the older path and is still the honest answer when
     // `make web-scene` has not run — not a silent one: `source` travels back.
     const source = document ? 'document' : 'built-in scene';
+    // OpenCASCADE is fetched here, by the document that needs it, and by no
+    // other: 5 MiB gzipped against the page's 1.3, paid only by a file whose
+    // manifest says `occt-brep-1`. `occtMs` is that cost, or null when it was
+    // not paid — which the browser test asserts on the page's own scene.
+    let occtMs = null;
+    let geometry = null;
+    if (document) {
+      geometry = documentGeometry(new Uint8Array(document));
+      if (geometry === OCCT_GEOMETRY) occtMs = await installOcct();
+    }
     const result = document
       ? tessellateDocument(new Uint8Array(document), chunksPerBody)
       : tessellateScene(chunksPerBody);
@@ -101,7 +112,7 @@ self.onmessage = async (event) => {
       // describes a mesh and has no field for whether a boolean succeeded, and
       // the page has no document of its own left to ask.
       {
-        ok: true, buffers, bytes, bodies, source,
+        ok: true, buffers, bytes, bodies, source, geometry, occtMs,
         initMs, totalMs, modelMs, tessellateMs, encodeMs,
         // `null` from the document path, and that is the answer: a solid does
         // not record whether a boolean made it. See `tessellate_document`.

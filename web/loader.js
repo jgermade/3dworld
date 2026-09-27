@@ -521,6 +521,10 @@ export function tessellateInWorker(
         encodeMs: payload.encodeMs,
         bodies: payload.bodies,
         source: payload.source,
+        // Which kernel's geometry the document held, and what fetching
+        // OpenCASCADE for it cost — `null` for both when it was not needed.
+        geometry: payload.geometry ?? null,
+        occtMs: payload.occtMs ?? null,
         // Passed through as-is, `null` included: see the doc comment. Coercing
         // it to a boolean here would turn "nobody watched" into "it did not
         // happen", which is a different and wrong sentence.
