@@ -13,3 +13,5 @@ web/test/node_modules/
 __pycache__/
 web/scene.w3d
 tools/.binaryen/
+build/occt-wasm/
+tools/.emsdk/

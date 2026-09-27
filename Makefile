@@ -254,6 +254,31 @@ web-notice:
 ## it has two things to dispatch to.
 web-both: web web-threaded
 
+## OpenCASCADE for the browser: a second wasm module built by Emscripten from a
+## pinned OCCT, exporting `kernel-occt/native/w3d_occt.h` and nothing else. See
+## `tools/occt_wasm.py` for why it is a module of its own and what is pinned.
+## Into web/dist/occt/. Slow — the toolkits are most of OCCT — and so none of
+## it is part of `make web`: the page does not load it yet.
+##
+## `occt-wasm-src` and `occt-wasm-emsdk` reach the network and are run on
+## purpose; `occt-wasm` does not.
+.PHONY: occt-wasm-src occt-wasm-emsdk occt-wasm occt-wasm-check
+occt-wasm-src:
+	python3 tools/occt_wasm.py src
+
+occt-wasm-emsdk:
+	python3 tools/occt_wasm.py emsdk
+
+occt-wasm:
+	python3 tools/occt_wasm.py build link
+
+## The module held to the desktop's OCCT, scene by scene: topology exactly,
+## meshes reported, and one OCCT exception thrown and caught inside wasm —
+## the only row a build without working exceptions fails. Needs the native
+## OCCT `make test-occt` needs, and Node.
+occt-wasm-check:
+	python3 tools/occt_wasm_check.py
+
 ## Serves web/ with COOP/COEP. `--no-isolation` omits them, which is the case
 ## worth seeing: the loader must degrade visibly rather than fail obscurely.
 web-serve: web
