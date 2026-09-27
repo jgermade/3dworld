@@ -272,11 +272,23 @@ occt-wasm-emsdk:
 occt-wasm:
 	python3 tools/occt_wasm.py build link
 
+## `OcctKernel` compiled to wasm32, reaching the module through
+## `kernel-occt/src/remote.rs`, and the conformance suite run through it from
+## Node — the whole contract, checked on the route the page will take.
+.PHONY: occt-bridge occt-bridge-check
+occt-bridge:
+	$(CARGO) build -p w3d-occt-bridge-check --release --target $(WASM_TARGET)
+	wasm-bindgen --target web --no-typescript --out-dir build/occt-bridge \
+	    target/$(WASM_TARGET)/release/w3d_occt_bridge_check.wasm
+
+occt-bridge-check: occt-bridge
+	node tools/occt_bridge_check.mjs conformance
+
 ## The module held to the desktop's OCCT, scene by scene: topology exactly,
 ## meshes reported, and one OCCT exception thrown and caught inside wasm —
 ## the only row a build without working exceptions fails. Needs the native
 ## OCCT `make test-occt` needs, and Node.
-occt-wasm-check:
+occt-wasm-check: occt-bridge
 	python3 tools/occt_wasm_check.py
 
 ## Serves web/ with COOP/COEP. `--no-isolation` omits them, which is the case

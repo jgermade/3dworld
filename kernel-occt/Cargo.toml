@@ -11,6 +11,12 @@ links = "w3d_occt"
 [dependencies]
 w3d-kernel = { path = "../kernel" }
 
+# The browser's OpenCASCADE is a second wasm module, and the only way from
+# this one to that one is through JS — see `src/remote.rs`. The same crate
+# and version `w3d-web` already uses.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2.127"
+
 # Deliberately NOT `[lints] workspace = true`. The workspace forbids unsafe,
 # and `forbid` cannot be relaxed by a crate that inherits it — which is the
 # point: unsafe exists in exactly one crate, the FFI boundary, and opting out

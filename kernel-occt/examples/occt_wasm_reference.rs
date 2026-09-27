@@ -26,13 +26,25 @@ fn error_kind(e: &KernelError) -> &'static str {
     }
 }
 
+#[allow(dead_code)]
 fn main() {
     let mut k = OcctKernel::new();
+    for (name, value) in rows(&mut k) {
+        println!("{name}\t{value}");
+    }
+}
+
+/// The scenes, as rows. A function rather than `main`'s body because the
+/// bridge check (`kernel-occt/bridge-check`) includes this file and runs the
+/// same function on wasm32, through `src/remote.rs` — so the two columns
+/// `make occt-wasm-check` compares are one piece of code built twice.
+pub fn rows(k: &mut OcctKernel) -> Vec<(String, String)> {
+    let mut out = Vec::new();
     let q = Quality::display_default();
-    let row = |name: &str, value: String| println!("{name}\t{value}");
+    let mut row = |name: &str, value: String| out.push((name.to_string(), value));
 
     let cube = k.create_box(Vec3::new(20.0, 20.0, 20.0)).expect("cube");
-    row("cube.topology", topo(&k, cube));
+    row("cube.topology", topo(k, cube));
 
     let plate = k.create_box(Vec3::new(40.0, 40.0, 10.0)).expect("plate");
     let drill = k.create_cylinder(6.0, 20.0).expect("drill");
@@ -47,7 +59,7 @@ fn main() {
             Tolerance::document_default(),
         )
         .expect("the cut");
-    row("cut.topology", topo(&k, cut));
+    row("cut.topology", topo(k, cut));
     let m = k.tessellate(cut, q).expect("mesh the cut");
     row(
         "cut.mesh",
@@ -68,7 +80,7 @@ fn main() {
     );
 
     let fillet = k.fillet(cube, 2.0).expect("fillet");
-    row("fillet.topology", topo(&k, fillet));
+    row("fillet.topology", topo(k, fillet));
     let m = k.tessellate(fillet, q).expect("mesh the fillet");
     row(
         "fillet.mesh",
@@ -81,10 +93,10 @@ fn main() {
     );
 
     let chamfer = k.chamfer(cube, 2.0).expect("chamfer");
-    row("chamfer.topology", topo(&k, chamfer));
+    row("chamfer.topology", topo(k, chamfer));
 
     let shell = k.shell(cube, 0, 1.0).expect("shell");
-    row("shell.topology", topo(&k, shell));
+    row("shell.topology", topo(k, shell));
 
     // A fillet the cube cannot hold. At r = 10 OCCT says so; at r = 15 it
     // returns a solid with 78 edges and 40 vertices where a filleted cube has
@@ -93,24 +105,25 @@ fn main() {
     row(
         "fillet.r10",
         match k.fillet(cube, 10.0) {
-            Ok(b) => topo(&k, b),
+            Ok(b) => topo(k, b),
             Err(e) => error_kind(&e).into(),
         },
     );
     row(
         "fillet.r15",
         match k.fillet(cube, 15.0) {
-            Ok(b) => topo(&k, b),
+            Ok(b) => topo(k, b),
             Err(e) => error_kind(&e).into(),
         },
     );
 
     let blob = k.save_body(cut).expect("save");
     let back = k.load_body(&blob).expect("load");
-    row("brep.topology", topo(&k, back));
+    row("brep.topology", topo(k, back));
 
     let step = k.export_step(&[cut]).expect("export STEP");
     let imported = k.import_step(&step).expect("import STEP");
     row("step.bodies", imported.bodies.len().to_string());
-    row("step.topology", topo(&k, imported.bodies[0].body));
+    row("step.topology", topo(k, imported.bodies[0].body));
+    out
 }

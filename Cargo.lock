@@ -3620,6 +3620,7 @@ dependencies = [
  "w3d-kernel",
  "w3d-kernel-fake",
  "w3d-render",
+ "wasm-bindgen",
  "wgpu",
 ]
 
@@ -3640,6 +3641,15 @@ dependencies = [
  "truck-stepio",
  "truck-topology",
  "w3d-kernel",
+]
+
+[[package]]
+name = "w3d-occt-bridge-check"
+version = "0.0.0"
+dependencies = [
+ "w3d-kernel",
+ "w3d-kernel-occt",
+ "wasm-bindgen",
 ]
 
 [[package]]

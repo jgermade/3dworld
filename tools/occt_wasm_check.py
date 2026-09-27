@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """The browser's OpenCASCADE, held to the desktop's.
 
-Runs `kernel-occt/examples/occt_wasm_reference.rs` natively and
-`tools/occt_wasm_check.mjs` against web/dist/occt/, and compares the rows.
+Runs `kernel-occt/examples/occt_wasm_reference.rs` natively,
+`tools/occt_wasm_check.mjs` against web/dist/occt/ (the C seam called by hand
+from JS), and the same example's `rows()` compiled to wasm32 through
+`kernel-occt/src/remote.rs` (`tools/occt_bridge_check.mjs`), and compares the
+three.
 
 Two rules, and the difference between them is the point:
 
@@ -54,15 +57,27 @@ def main():
         raise SystemExit("the wasm half did not finish — a trap or a missing module, not a row")
     sys.stderr.write(wasm_run.stderr)
 
-    a, b = rows(native), rows(wasm_run.stdout)
+    # The third column: the same rows from `OcctKernel` itself, compiled to
+    # wasm32 and reaching the module through `kernel-occt/src/remote.rs` —
+    # the route the page will take. The JS column above calls the C seam by
+    # hand; this one is the Rust that already passes `make test-occt`.
+    bridge_run = subprocess.run(
+        ["node", os.path.join(ROOT, "tools", "occt_bridge_check.mjs"), "reference"],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    if bridge_run.returncode != 0:
+        sys.stderr.write(bridge_run.stdout + bridge_run.stderr)
+        raise SystemExit("the bridge did not finish — run `make occt-bridge` first")
+
+    a, b, c = rows(native), rows(wasm_run.stdout), rows(bridge_run.stdout)
     failures = []
-    print(f"{'row':22} {'native':>28} {'wasm32':>28}")
+    print(f"{'row':18} {'native':>24} {'wasm32, by hand':>24} {'wasm32, via Rust':>24}")
     for name, value in a.items():
-        other = b.get(name, "(missing)")
+        others = [b.get(name, "(missing)"), c.get(name, "(missing)")]
         report = name.endswith(".mesh")
-        same = value == other
+        same = all(o == value for o in others)
         verdict = "same" if same else ("differs (reported)" if report else "DIFFERS")
-        print(f"{name:22} {value:>28} {other:>28}  {verdict}")
+        print(f"{name:18} {value[:24]:>24} {others[0][:24]:>24} {others[1][:24]:>24}  {verdict}")
         if not same and not report:
             failures.append(name)
 

@@ -170,6 +170,14 @@ impl RawMesh {
 
 enum Context {}
 
+// On wasm32 the same functions, with the same signatures, forwarding to the
+// OpenCASCADE module through JS. Everything below this block is shared.
+#[cfg(target_arch = "wasm32")]
+mod remote;
+#[cfg(target_arch = "wasm32")]
+use remote::*;
+
+#[cfg(not(target_arch = "wasm32"))]
 unsafe extern "C" {
     fn w3d_occt_context_new() -> *mut Context;
     fn w3d_occt_context_free(ctx: *mut Context);
