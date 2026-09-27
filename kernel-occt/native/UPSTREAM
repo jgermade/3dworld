@@ -1,10 +1,13 @@
 # The OpenCASCADE this shim is written against, and the revision `make
 # occt-headers` repairs a broken install from.
 #
-# It is not a pin in the sense a Cargo.lock is one: the build takes whatever
-# OCCT the system has, and this file records what that was *supposed* to be.
-# A real pin arrives with the Emscripten build, which compiles OCCT rather than
-# linking a distribution's.
+# For the desktop it is not a pin in the sense a Cargo.lock is one: that build
+# takes whatever OCCT the system has, and this file records what that was
+# *supposed* to be. The browser's build is pinned for real since 2026-09-27:
+# `tools/occt_wasm.py` compiles OCCT from this tag and refuses the source
+# unless the tag is this commit.
+
+commit  = b079fb9877ef64d4a8158a60fa157f59b096debb
 
 version = 7.6.3
 tag     = V7_6_3
