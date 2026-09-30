@@ -46,6 +46,14 @@ fn main() {
     println!("cargo:rerun-if-env-changed=OCCT_LIB_DIR");
     println!("cargo:rerun-if-changed=native/UPSTREAM");
 
+    // On wasm32 there is nothing to compile and nothing to link: OpenCASCADE is
+    // a module of its own there, built by `make occt-wasm`, and `src/remote.rs`
+    // reaches it through JS. See `tools/occt_wasm.py` for why it cannot be
+    // linked into this target.
+    if env::var("CARGO_CFG_TARGET_ARCH").as_deref() == Ok("wasm32") {
+        return;
+    }
+
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR"));
     let include = env::var("OCCT_INCLUDE_DIR").unwrap_or_else(|_| {
         if PathBuf::from("/usr/include/opencascade")

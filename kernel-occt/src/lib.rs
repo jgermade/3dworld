@@ -170,6 +170,14 @@ impl RawMesh {
 
 enum Context {}
 
+// On wasm32 the same functions, with the same signatures, forwarding to the
+// OpenCASCADE module through JS. Everything below this block is shared.
+#[cfg(target_arch = "wasm32")]
+mod remote;
+#[cfg(target_arch = "wasm32")]
+use remote::*;
+
+#[cfg(not(target_arch = "wasm32"))]
 unsafe extern "C" {
     fn w3d_occt_context_new() -> *mut Context;
     fn w3d_occt_context_free(ctx: *mut Context);
@@ -309,6 +317,11 @@ impl Default for OcctKernel {
 }
 
 impl OcctKernel {
+    /// What [`GeometryKernel::geometry_format`] answers, as a constant for a
+    /// reader that has to choose a kernel *before* it has one — the browser's
+    /// worker, deciding whether a document needs OpenCASCADE at all.
+    pub const GEOMETRY_FORMAT: &'static str = "occt-brep-1";
+
     pub fn new() -> Self {
         let ctx = unsafe { w3d_occt_context_new() };
         assert!(!ctx.is_null(), "OpenCASCADE context allocation failed");
@@ -691,7 +704,7 @@ impl GeometryKernel for OcctKernel {
         // Versioned, because it is a promise about bytes on somebody's disk.
         // The `1` moves if what BRepTools::Write produces here ever changes
         // shape — an OCCT major version is the likely cause.
-        "occt-brep-1"
+        Self::GEOMETRY_FORMAT
     }
 
     fn save_body(&self, body: Body) -> Result<Vec<u8>> {

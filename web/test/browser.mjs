@@ -52,6 +52,7 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
 import fs from 'node:fs';
+import zlib from 'node:zlib';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, '..', '..');
@@ -83,11 +84,22 @@ const EXECUTABLE = process.env.W3D_CHROME ?? (fs.existsSync(OPT_CHROME) ? OPT_CH
  * an artifact is missing is the failure mode this whole directory exists to
  * avoid.
  */
+/**
+ * Whether the OpenCASCADE module and its document exist. Same rule as
+ * `THREADED_BUILT`: both answers assert. With them, `?doc=occt` must open the
+ * document with OpenCASCADE; without them, the page must say what is missing.
+ */
+const OCCT_BUILT =
+  fs.existsSync(path.join(root, 'web', 'dist', 'occt', 'w3d_occt.mjs')) &&
+  fs.existsSync(path.join(root, 'web', 'scene-occt.w3d'));
+
 const THREADED_BUILT = fs.existsSync(
   path.join(root, 'web', 'dist', 'threaded', 'w3d_web.js'),
 );
 
 const failures = [];
+/** What the first run fetched — see the payload section at the end. */
+let firstLoad = [];
 
 function check(name, ok, detail = '') {
   console.log(`${ok ? 'ok  ' : 'FAIL'}  ${name}${detail ? ` — ${detail}` : ''}`);
@@ -150,6 +162,7 @@ async function run({
   compare = false,
   breakWorker = false,
   noDocument = false,
+  occtDocument = false,
 } = {}) {
   const { proc, url } = await serve({ isolated });
   // `?coi=off` is the page's own hook for skipping service-worker registration.
@@ -164,6 +177,9 @@ async function run({
   // The deployment where `make web-scene` has not run. The worker must fall
   // back to the scene compiled into it, and say so.
   if (noDocument) params.push('doc=off');
+  // A document written by OpenCASCADE, which the worker must fetch the
+  // OpenCASCADE module to open.
+  if (occtDocument) params.push('doc=occt');
   const target = params.length ? `${url}?${params.join('&')}` : url;
   const args = ['--no-sandbox', '--enable-unsafe-swiftshader'];
   if (webgpu) {
@@ -183,6 +199,26 @@ async function run({
     const page = await browser.newPage({ viewport: { width: 960, height: 660 } });
     const consoleErrors = [];
     page.on('pageerror', (e) => consoleErrors.push(String(e)));
+    // Every response this origin served, with the bytes the page actually
+    // received — the payload is what a load fetched, not a list of files
+    // somebody believes it fetches.
+    const fetched = [];
+    page.on('requestfinished', (req) => {
+      if (!req.url().startsWith(url)) return;
+      fetched.push(
+        (async () => {
+          const res = await req.response();
+          const body = res ? await res.body().catch(() => null) : null;
+          const sizes = await req.sizes().catch(() => null);
+          return {
+            path: new URL(req.url()).pathname,
+            status: res ? res.status() : 0,
+            body,
+            transferred: sizes ? sizes.responseBodySize : null,
+          };
+        })(),
+      );
+    });
     await page.goto(target, { waitUntil: 'load' });
 
     await page
@@ -211,6 +247,23 @@ async function run({
         status: document.getElementById('status')?.textContent ?? '',
       };
     });
+
+    // The payload is what the *page* fetched, so it is taken before the check
+    // below fetches anything of its own.
+    const loaded = fetched.slice();
+
+    // Whether the page carries its licence and notices, *fetched* rather than
+    // found in the markup: a link to a file `make web` did not copy is a link
+    // that reads as compliance and serves a 404.
+    const notices = await page.evaluate(() =>
+      Promise.all(
+        [...document.querySelectorAll('a[data-notice]')].map(async (a) => {
+          const r = await fetch(a.href).catch(() => null);
+          const text = r && r.ok ? await r.text() : '';
+          return { href: a.getAttribute('href'), status: r ? r.status : 0, head: text.slice(0, 80) };
+        }),
+      ),
+    );
 
     let pick = null;
     let colours = 0;
@@ -251,7 +304,8 @@ async function run({
         .catch((e) => ({ failed: String(e && e.message ? e.message : e) }));
     }
 
-    return { ...state, pick, colours, canvasFit, comparison, consoleErrors };
+    const responses = await Promise.all(loaded);
+    return { ...state, pick, colours, canvasFit, comparison, consoleErrors, notices, responses };
   } finally {
     await browser.close();
     proc.kill();
@@ -315,6 +369,7 @@ console.log('\n— WebGPU offered, cross-origin isolated —');
 {
   const r = await run({ isolated: true, webgpu: true });
   check('the page starts', r.ready, r.error ?? '');
+  firstLoad = r.responses;
   if (r.ready) {
     check('an adapter answered', !!r.report.backend, `${r.report.backend} · ${r.report.adapter}`);
     check('frames were drawn', r.frames > 2, `${r.frames} frames`);
@@ -708,6 +763,118 @@ console.log('\n— no COOP/COEP, but a service worker: it must supply them —')
     // ready and the artifact is not.
     checkVariant(r);
     check('nothing threw', r.consoleErrors.length === 0, r.consoleErrors.join(' | '));
+  }
+  // Here and not on every run, because this is the one shaped like the
+  // deployment: GitHub Pages, headers from a service worker. What is served
+  // there is what `make web` left in dist/, and the licences oblige the
+  // notices to travel with it.
+  check('the page links its licence and its notices', r.notices.length === 2,
+    r.notices.map((n) => n.href).join(', '));
+  for (const n of r.notices) {
+    check(`and ${n.href} is served`, n.status === 200 && n.head.length > 0, `HTTP ${n.status}`);
+  }
+  const notice = r.notices.find((n) => n.href.endsWith('NOTICE.txt'));
+  check('and the notice is this project\'s', notice && notice.head.startsWith('3dworld'),
+    notice ? JSON.stringify(notice.head.split('\n')[0]) : '(no notice link)');
+}
+
+console.log('\n— a document only OpenCASCADE can open —');
+{
+  const r = await run({ isolated: true, webgpu: true, occtDocument: true });
+  check('the page starts', r.ready, r.error ?? '');
+  if (r.ready && OCCT_BUILT) {
+    check('the worker opened the document, not the built-in scene',
+      r.report.source === 'document', r.report.source);
+    check('and its manifest named OpenCASCADE',
+      r.wire && r.wire.geometry === 'occt-brep-1', r.wire ? String(r.wire.geometry) : '(no worker)');
+    check('so the worker fetched the module, and says what that cost',
+      r.wire && typeof r.wire.occtMs === 'number' && r.wire.occtMs > 0,
+      r.wire ? `${Math.round(r.wire.occtMs)} ms` : '(no worker)');
+    check('the mesh was made in the worker', r.report.meshedBy === 'worker',
+      `meshed by ${r.report.meshedBy}`);
+    // 2924 is what `make web-scene-occt` meshed natively; the browser's OCCT
+    // agreed with the desktop's on every mesh `make occt-wasm-check` compares,
+    // so this is asserted exactly, not to a tolerance.
+    check('the filleted plate arrived whole', r.report.triangles === 2924,
+      `${r.report.triangles} triangles`);
+    check('the canvas is not blank', r.colours >= DRAWN, `${r.colours} distinct colours`);
+    check('picking works on it', r.pick && r.pick.object !== null && r.pick.face !== null,
+      JSON.stringify(r.pick));
+    check('the user can see which kernel opened it',
+      r.status.includes('(occt-brep-1)') && r.status.includes('OpenCASCADE loaded in'),
+      r.status.split('\n')[1] ?? '');
+    const modules = r.responses.filter((x) => x.path.endsWith('/w3d_occt.wasm'));
+    check('the module was fetched once', modules.length === 1, `${modules.length} request(s)`);
+    check('nothing threw', r.consoleErrors.length === 0, r.consoleErrors.join(' | '));
+  } else if (r.ready) {
+    // Without the module the page must still come up — on the built-in scene
+    // — and must say it could not open the document, and why.
+    check('it falls back and says the module is missing',
+      (r.meshNote ?? '').includes('no OpenCASCADE'), r.meshNote ?? '(no note)');
+  }
+}
+
+console.log('\n— the payload: what a first load fetched, weighed —');
+{
+  // A size, and nothing asserted about it: there is no golden number for a
+  // payload, and one would fail on the day somebody adds a feature on purpose.
+  // What *is* asserted is that the number is about the right thing — the
+  // module the page ran is the module `make web` left in dist/ — and that
+  // nothing it asked for was missing.
+  const byPath = new Map();
+  for (const r of firstLoad) {
+    const e = byPath.get(r.path) ?? { path: r.path, requests: 0, statuses: new Set(), body: null, transferred: [] };
+    e.requests += 1;
+    e.statuses.add(r.status);
+    if (r.body && (!e.body || r.body.length > e.body.length)) e.body = r.body;
+    e.transferred.push(r.transferred);
+    byPath.set(r.path, e);
+  }
+  const rows = [...byPath.values()].map((e) => {
+    const raw = e.body ? e.body.length : 0;
+    return {
+      ...e,
+      raw,
+      gz: e.body ? zlib.gzipSync(e.body, { level: 9 }).length : 0,
+      br: e.body
+        ? zlib.brotliCompressSync(e.body, {
+            params: { [zlib.constants.BROTLI_PARAM_QUALITY]: 11 },
+          }).length
+        : 0,
+    };
+  });
+  rows.sort((a, b) => b.raw - a.raw);
+  const kib = (n) => (n / 1024).toFixed(1).padStart(8);
+  console.log(`      ${'raw KiB'.padStart(8)} ${'gzip'.padStart(8)} ${'brotli'.padStart(8)}  requests  path`);
+  for (const e of rows) {
+    console.log(`      ${kib(e.raw)} ${kib(e.gz)} ${kib(e.br)}  ${String(e.requests).padStart(8)}  ${e.path}` +
+      `  (transferred ${e.transferred.join(', ')})`);
+  }
+  const sum = (k) => rows.reduce((a, e) => a + e[k], 0);
+  console.log(`      ${kib(sum('raw'))} ${kib(sum('gz'))} ${kib(sum('br'))}            total, ${rows.length} files`);
+
+  // The other half of the run above: a page opening its own document never
+  // asks for OpenCASCADE. Five megabytes gzipped is a cost only a document that
+  // needs it may impose.
+  check('a page whose document does not need OpenCASCADE never fetches it',
+    rows.every((e) => !e.path.includes('/dist/occt/')),
+    rows.filter((e) => e.path.includes('/dist/occt/')).map((e) => e.path).join(', ') || 'none requested');
+  check('every file the first load asked for was served',
+    rows.length > 0 && rows.every((e) => e.statuses.size === 1 && e.statuses.has(200)),
+    rows.filter((e) => !e.statuses.has(200)).map((e) => `${e.path} ${[...e.statuses]}`).join(', '));
+  // Every module, not only the one this thread ran: on a threaded page the
+  // worker still loads the single-threaded build, so two modules cross.
+  const modules = rows.filter((e) => e.path.endsWith('.wasm'));
+  // The finding this table was built to make visible: the worker and this
+  // thread each fetched the module, and a first visit paid for it twice. They
+  // now share one compile — so one request per module, whatever the cache did.
+  check('each module was downloaded once, not once per thread',
+    modules.length > 0 && modules.every((e) => e.requests === 1),
+    modules.map((e) => `${e.path} ×${e.requests}`).join(', ') || '(no module fetched)');
+  for (const e of modules) {
+    const built = path.join(root, 'web', e.path.replace(/^\//, ''));
+    check(`and ${e.path} is the module on disk`,
+      fs.existsSync(built) && fs.statSync(built).size === e.raw, `${e.raw} bytes served`);
   }
 }
 

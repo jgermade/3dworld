@@ -66,6 +66,10 @@ jobs:
           if [ "$($HOME/.cargo/bin/wasm-bindgen --version 2>/dev/null | awk '{print $2}')" != "$version" ]; then
             cargo install wasm-bindgen-cli --version "$version" --force
           fi
+      - name: wasm-opt, from the pinned binaryen release
+        # `make web` refuses to build unoptimised unless told to, because the
+        # module this job tests must be the module Pages serves.
+        run: make binaryen
       - name: Playwright, and a browser
         run: |
           cd web/test

@@ -30,7 +30,8 @@
 
 use js_sys::{Array, Object, Reflect, Uint8Array};
 use w3d_core::Document;
-use w3d_core::kernel::{Aabb, BooleanOp, Mat4, Vec3};
+use w3d_core::kernel::{Aabb, BooleanOp, GeometryKernel, Mat4, Vec3};
+use w3d_kernel_occt::OcctKernel;
 use w3d_kernel_truck::TruckKernel;
 use w3d_render::{Camera, Gpu, GpuMesh, Material, Object as DrawObject, PickPending, Renderer};
 use w3d_wire::{Addressing, Message, merge, split_by_face};
@@ -195,17 +196,44 @@ pub fn tessellate_scene(chunks_per_body: u32) -> Result<Object, JsError> {
 /// `format/examples/scene_w3d.rs` — which is a guarantee about the file, not
 /// something this function verified, and saying `true` here would be the page
 /// vouching for a check it never ran.
+///
+/// **Which kernel opens it is the file's to say**, since 2026-09-27: its
+/// manifest names the geometry, and a document written by OpenCASCADE is
+/// opened by [`OcctKernel`] — which on this target is the bridge in
+/// `kernel-occt/src/remote.rs` to a second module. The worker has to have
+/// loaded that module and installed its five primitives *before* calling
+/// this; it knows to because it asked [`document_geometry`] first.
 #[wasm_bindgen(js_name = tessellateDocument)]
 pub fn tessellate_document(bytes: &[u8], chunks_per_body: u32) -> Result<Object, JsError> {
+    let geometry = document_geometry(bytes)?;
     let started = js_sys::Date::now();
-    let doc = w3d_format::load(TruckKernel::default(), bytes)
-        .map_err(|e| JsError::new(&format!("the document would not open: {e}")))?;
     // Named `model_ms` for the phase it replaces, and it is not modelling: it
-    // is a zip, a manifest and a BREP parse per body. On this scene it is the
-    // 500 ms of boolean that is *no longer here*, which is the saving.
-    let model_ms = js_sys::Date::now() - started;
+    // is a zip, a manifest and a geometry parse per body. On the truck scene
+    // it is the 500 ms of boolean that is *no longer here*, which is the
+    // saving.
+    let opened =
+        |e: w3d_format::FormatError| JsError::new(&format!("the document would not open: {e}"));
+    let result = if geometry == OcctKernel::GEOMETRY_FORMAT {
+        let doc = w3d_format::load(OcctKernel::new(), bytes).map_err(opened)?;
+        let model_ms = js_sys::Date::now() - started;
+        tessellate_into_chunks(doc, chunks_per_body, model_ms, None)?
+    } else {
+        // Anything else goes to truck, which refuses a format it does not
+        // write by name — the refusal `FORMAT.md` promises, not a guess.
+        let doc = w3d_format::load(TruckKernel::default(), bytes).map_err(opened)?;
+        let model_ms = js_sys::Date::now() - started;
+        tessellate_into_chunks(doc, chunks_per_body, model_ms, None)?
+    };
+    set(&result, "geometry", &JsValue::from_str(&geometry))?;
+    Ok(result)
+}
 
-    tessellate_into_chunks(doc, chunks_per_body, model_ms, None)
+/// The geometry format a `.w3d` holds, from its manifest, without opening a
+/// body: what the worker asks before deciding whether to fetch OpenCASCADE.
+#[wasm_bindgen(js_name = documentGeometry)]
+pub fn document_geometry(bytes: &[u8]) -> Result<String, JsError> {
+    w3d_format::geometry_of(bytes)
+        .map_err(|e| JsError::new(&format!("the document would not open: {e}")))
 }
 
 /// Mesh every body, split each into chunks, and report the phases.
@@ -213,8 +241,8 @@ pub fn tessellate_document(bytes: &[u8], chunks_per_body: u32) -> Result<Object,
 /// Shared by both producers so that a document and the built-in scene cannot
 /// drift into being encoded differently — which would make the comparison the
 /// browser test draws between them meaningless.
-fn tessellate_into_chunks(
-    mut doc: Document<TruckKernel>,
+fn tessellate_into_chunks<K: GeometryKernel>(
+    mut doc: Document<K>,
     chunks_per_body: u32,
     model_ms: f64,
     modelled: Option<bool>,

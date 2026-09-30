@@ -25,6 +25,11 @@ crate-type = ["cdylib", "rlib"]
 w3d-core = { path = "../core" }
 w3d-kernel-fake = { path = "../kernel-fake" }
 w3d-kernel-truck = { path = "../kernel-truck" }
+# OpenCASCADE, for a document written by it. On wasm32 this crate compiles no
+# C++ and links nothing: its FFI block is `kernel-occt/src/remote.rs`, which
+# reaches a second module — `make occt-wasm` — through five JS functions the
+# worker installs only when a document asks for this kernel.
+w3d-kernel-occt = { path = "../kernel-occt" }
 w3d-render = { path = "../render" }
 # The message a tessellation becomes. Depended on directly rather than
 # through `w3d-render`'s re-export, because the *worker* half of this crate

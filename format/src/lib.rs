@@ -310,18 +310,14 @@ pub fn load<K: GeometryKernel>(kernel: K, bytes: &[u8]) -> Result<Document<K>, F
     Ok(load_with_metadata(kernel, bytes)?.document)
 }
 
-/// Reads a document along with metadata (camera pose, thumbnail).
-pub fn load_with_metadata<K: GeometryKernel>(
-    mut kernel: K,
-    bytes: &[u8],
-) -> Result<LoadedDocument<K>, FormatError> {
-    let entries = zip::read(bytes)?;
+/// The manifest, checked for being ours and not too new — everything a reader
+/// can say about a file before it has a kernel to open it with.
+fn read_manifest(entries: &BTreeMap<String, Vec<u8>>) -> Result<Manifest, FormatError> {
     let raw = entries
         .get(MANIFEST)
         .ok_or_else(|| FormatError::NotADocument(format!("no {MANIFEST}")))?;
     let manifest: Manifest = serde_json::from_slice(raw)
         .map_err(|e| FormatError::NotADocument(format!("the manifest is not ours: {e}")))?;
-
     if manifest.format != MAGIC {
         return Err(FormatError::NotADocument(format!(
             "the manifest says `{}`",
@@ -334,6 +330,28 @@ pub fn load_with_metadata<K: GeometryKernel>(
             understood: VERSION,
         });
     }
+    Ok(manifest)
+}
+
+/// Which kernel's geometry a document holds — `truck-json-1`, `occt-brep-1` —
+/// read from its manifest without opening a single body.
+///
+/// For a reader that has more than one kernel and has to choose before it
+/// loads: the browser's worker, which fetches OpenCASCADE only for a document
+/// that needs it. A reader with one kernel does not need this — `load`
+/// refuses a mismatch by name — and a reader that picks by this and then
+/// loads still gets that refusal if the two disagree.
+pub fn geometry_of(bytes: &[u8]) -> Result<String, FormatError> {
+    Ok(read_manifest(&zip::read(bytes)?)?.geometry)
+}
+
+/// Reads a document along with metadata (camera pose, thumbnail).
+pub fn load_with_metadata<K: GeometryKernel>(
+    mut kernel: K,
+    bytes: &[u8],
+) -> Result<LoadedDocument<K>, FormatError> {
+    let entries = zip::read(bytes)?;
+    let manifest = read_manifest(&entries)?;
     if manifest.geometry != kernel.geometry_format() {
         return Err(FormatError::WrongKernel {
             file: manifest.geometry,

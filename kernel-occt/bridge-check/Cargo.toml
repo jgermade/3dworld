@@ -1,0 +1,20 @@
+[package]
+name = "w3d-occt-bridge-check"
+description = "OcctKernel on wasm32, through src/remote.rs, run from Node against the Emscripten module."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# Built only for wasm32, by `make occt-bridge-check`, and not a default member:
+# natively there is nothing for it to check that `make test-occt` does not.
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+w3d-kernel = { path = "../../kernel" }
+w3d-kernel-occt = { path = ".." }
+wasm-bindgen = "0.2.127"
+
+[lints]
+workspace = true

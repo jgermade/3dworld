@@ -3620,6 +3620,7 @@ dependencies = [
  "w3d-kernel",
  "w3d-kernel-fake",
  "w3d-render",
+ "wasm-bindgen",
  "wgpu",
 ]
 
@@ -3643,6 +3644,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "w3d-occt-bridge-check"
+version = "0.0.0"
+dependencies = [
+ "w3d-kernel",
+ "w3d-kernel-occt",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "w3d-render"
 version = "0.0.0"
 dependencies = [
@@ -3663,6 +3673,7 @@ dependencies = [
  "w3d-core",
  "w3d-format",
  "w3d-kernel-fake",
+ "w3d-kernel-occt",
  "w3d-kernel-truck",
  "w3d-render",
  "w3d-wire",

@@ -104,6 +104,11 @@ fn numbers(json: &[u8]) -> Vec<f64> {
     out
 }
 
+fn u32_bits(ids: &[u32]) -> f64 {
+    let bytes: Vec<u8> = ids.iter().flat_map(|i| i.to_le_bytes()).collect();
+    fnv(&bytes)
+}
+
 fn f32_bits(points: &[[f32; 3]]) -> f64 {
     let mut bytes = Vec::with_capacity(points.len() * 12);
     for p in points {
@@ -222,15 +227,81 @@ pub fn measurements() -> Vec<Row> {
     );
     push("cut.mesh.lines", Rule::Exact, mesh.line_count() as f64);
     push("cut.mesh.hash", Rule::Exact, f32_bits(&mesh.positions));
+    // Ids, not geometry: which triangle belongs to which face and which
+    // segment to which edge. A selection is stored against these, so two
+    // builds that drew the same picture and numbered it differently would
+    // disagree about what a user had selected.
+    push(
+        "cut.mesh.face_ids",
+        Rule::Exact,
+        u32_bits(&mesh.face_of_triangle),
+    );
+    push(
+        "cut.mesh.edge_ids",
+        Rule::Exact,
+        u32_bits(&mesh.edge_of_line),
+    );
 
-    // The saved cut, in `f64`. Its bytes are not a row: `TruckKernel` writes
-    // the vertices in the iteration order of a pointer-keyed map, so the blob
-    // is not byte-stable across runs even on one architecture. The *numbers*
-    // in it are, as a multiset — which is what disagreed before the patch, 44
-    // of 1353 of them in their last digits.
+    // The saved cut, in `f64` and then in bytes. The numbers as a multiset are
+    // what disagreed before the patch, 44 of 1353 of them in their last digits,
+    // and they stay a row of their own: a difference in them is a different
+    // solid, and a difference in the bytes alone is a different order. Until
+    // `save_body` wrote in a canonical order the bytes could not be a row at
+    // all — the boolean's faces came back in the order of a map keyed by
+    // address, so the blob changed between two runs on one machine.
     let blob = k.save_body(cut).expect("save the cut");
     push("cut.blob.len", Rule::Exact, blob.len() as f64);
     push("cut.blob.numbers", Rule::Exact, f64_bits(&numbers(&blob)));
+    push("cut.blob.hash", Rule::Exact, fnv(&blob));
+
+    // The second scene: a slot across the plate's top, which leaves **two
+    // faces on one plane**. Added on 2026-09-27 by the audit of
+    // `truck-shapeops`' hash maps, because it is the case where a boolean's
+    // face order — a map keyed by address, in `truck-topology` — reached the
+    // face ids: the two top faces tied on their surface and swapped ids
+    // between runs. The drill cannot show it; nothing it cuts shares a surface.
+    let tool = k
+        .create_box(Vec3::new(10.0, 60.0, 12.0))
+        .expect("the slot's tool");
+    let tool = k
+        .transform(tool, &Mat4::from_translation(Vec3::new(0.0, 0.0, 6.0)))
+        .expect("the tool moves");
+    let slot = k
+        .boolean(BooleanOp::Difference, plate, tool, tol)
+        .expect("the slot");
+    let t = k.topology(slot).expect("topology of the slot");
+    push(
+        "slot.topology",
+        Rule::Exact,
+        f64_bits(&[
+            f64::from(t.solids),
+            f64::from(t.faces),
+            f64::from(t.edges),
+            f64::from(t.vertices),
+        ]),
+    );
+    let mesh = k
+        .tessellate(slot, Quality::display_default())
+        .expect("mesh the slot");
+    push(
+        "slot.mesh.triangles",
+        Rule::Exact,
+        mesh.triangle_count() as f64,
+    );
+    push("slot.mesh.hash", Rule::Exact, f32_bits(&mesh.positions));
+    push(
+        "slot.mesh.face_ids",
+        Rule::Exact,
+        u32_bits(&mesh.face_of_triangle),
+    );
+    push(
+        "slot.mesh.edge_ids",
+        Rule::Exact,
+        u32_bits(&mesh.edge_of_line),
+    );
+    let blob = k.save_body(slot).expect("save the slot");
+    push("slot.blob.numbers", Rule::Exact, f64_bits(&numbers(&blob)));
+    push("slot.blob.hash", Rule::Exact, fnv(&blob));
 
     out
 }
